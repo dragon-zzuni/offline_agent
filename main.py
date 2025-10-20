@@ -437,18 +437,36 @@ class SmartAssistant:
         logger.info(f"👤 PM 필터링: email={pm_email}, handle={pm_handle}")
         
         def _is_pm_recipient(msg: Dict[str, Any]) -> bool:
-            """PM이 수신자인지 확인"""
+            """PM이 수신자인지 확인하고 recipient_type 설정"""
             msg_type = msg.get("type", "")
             
             if msg_type == "email":
                 # 이메일: to, cc, bcc에 PM이 포함되어 있는지 확인
-                recipients = msg.get("recipients", []) or []
+                recipients = msg.get("recipients", []) or msg.get("to", []) or []
                 cc = msg.get("cc", []) or []
                 bcc = msg.get("bcc", []) or []
-                all_recipients = [r.lower() for r in (recipients + cc + bcc)]
-                return pm_email in all_recipients
+                
+                # TO에 있으면 직접 수신
+                if pm_email in [r.lower() for r in recipients]:
+                    msg["recipient_type"] = "to"
+                    return True
+                
+                # CC에 있으면 참조
+                if pm_email in [r.lower() for r in cc]:
+                    msg["recipient_type"] = "cc"
+                    return True
+                
+                # BCC에 있으면 숨은 참조
+                if pm_email in [r.lower() for r in bcc]:
+                    msg["recipient_type"] = "bcc"
+                    return True
+                
+                return False
             
             elif msg_type == "messenger":
+                # 메신저는 항상 직접 수신으로 간주
+                msg["recipient_type"] = "to"
+                
                 # 메신저: room_slug에 PM handle이 포함되어 있는지 확인
                 # dm:designer:dev → PM(dev)이 아니므로 제외
                 # dm:pm:designer → PM이 포함되므로 포함
@@ -727,20 +745,26 @@ class SmartAssistant:
 
             # 액션들을 TODO 아이템으로 변환
             for action in result.get("actions", []):
+                # 원본 메시지에서 recipient_type 가져오기
+                source_msg = result.get("message") or {}
+                recipient_type = source_msg.get("recipient_type", "to")
+                
                 todo_item = {
                     "id": action.get("action_id"),
                     "title": action.get("title"),
                     "description": action.get("description"),
                     "priority": action.get("priority", priority_level),  # 액션에 없으면 result 우선순위 사용
                     "deadline": action.get("deadline"),                  # ISO 문자열 권장
-                    "requester": action.get("requester") or (result.get("message") or {}).get("sender"),
+                    "requester": action.get("requester") or source_msg.get("sender"),
                     "type": action.get("action_type"),
                     "status": "pending",
+                    "recipient_type": recipient_type,  # 수신 타입 추가 (to/cc/bcc)
                     "source_message": {
-                        "id": (result.get("message") or {}).get("msg_id"),
-                        "sender": (result.get("message") or {}).get("sender"),
-                        "subject": (result.get("message") or {}).get("subject"),
-                        "platform": (result.get("message") or {}).get("platform"),
+                        "id": source_msg.get("msg_id"),
+                        "sender": source_msg.get("sender"),
+                        "subject": source_msg.get("subject"),
+                        "platform": source_msg.get("platform"),
+                        "recipient_type": recipient_type,
                     },
                     "created_at": action.get("created_at"),
                 }

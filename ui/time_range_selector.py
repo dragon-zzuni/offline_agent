@@ -50,9 +50,11 @@ class TimeRangeSelector(QWidget):
         start_layout = QHBoxLayout()
         start_label = QLabel("시작:")
         start_label.setFixedWidth(50)
+        start_label.setStyleSheet(f"font-size: {FontSizes.SM}; font-weight: {FontWeights.SEMIBOLD};")
         self.start_datetime = QDateTimeEdit()
         self.start_datetime.setCalendarPopup(True)
         self.start_datetime.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.start_datetime.setStyleSheet(f"font-size: {FontSizes.SM}; padding: 4px;")
         start_layout.addWidget(start_label)
         start_layout.addWidget(self.start_datetime)
         layout.addLayout(start_layout)
@@ -61,9 +63,11 @@ class TimeRangeSelector(QWidget):
         end_layout = QHBoxLayout()
         end_label = QLabel("종료:")
         end_label.setFixedWidth(50)
+        end_label.setStyleSheet(f"font-size: {FontSizes.SM}; font-weight: {FontWeights.SEMIBOLD};")
         self.end_datetime = QDateTimeEdit()
         self.end_datetime.setCalendarPopup(True)
         self.end_datetime.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.end_datetime.setStyleSheet(f"font-size: {FontSizes.SM}; padding: 4px;")
         end_layout.addWidget(end_label)
         end_layout.addWidget(self.end_datetime)
         layout.addLayout(end_layout)
@@ -174,25 +178,43 @@ class TimeRangeSelector(QWidget):
         self.end_datetime.setDateTime(QDateTime(now))
     
     def _set_all_time_range(self):
-        """전체 기간 설정 (최근 1년)
+        """전체 기간 설정
         
-        데이터셋의 모든 메시지를 포함하도록 넉넉한 범위를 설정합니다.
+        데이터셋의 실제 메시지 범위를 사용합니다.
+        데이터 범위가 설정되지 않은 경우 최근 1년을 사용합니다.
         """
-        now = datetime.now()
-        # 1년 전부터 현재까지
-        start = now - timedelta(days=365)
-        
-        self.start_datetime.setDateTime(QDateTime(start))
-        self.end_datetime.setDateTime(QDateTime(now))
+        # 데이터 범위가 설정되어 있으면 사용
+        if hasattr(self, '_data_start') and hasattr(self, '_data_end'):
+            self.start_datetime.setDateTime(QDateTime(self._data_start))
+            self.end_datetime.setDateTime(QDateTime(self._data_end))
+        else:
+            # 데이터 범위가 없으면 최근 1년 사용
+            now = datetime.now()
+            start = now - timedelta(days=365)
+            self.start_datetime.setDateTime(QDateTime(start))
+            self.end_datetime.setDateTime(QDateTime(now))
         
         # 자동으로 적용
         self._apply_range()
     
+    def set_data_range(self, start: datetime, end: datetime):
+        """데이터의 실제 시간 범위 설정
+        
+        Args:
+            start: 데이터의 가장 오래된 메시지 시간
+            end: 데이터의 가장 최근 메시지 시간
+        """
+        self._data_start = start
+        self._data_end = end
+        
+        # 기본 범위를 데이터 범위로 설정
+        self.start_datetime.setDateTime(QDateTime(start))
+        self.end_datetime.setDateTime(QDateTime(end))
+    
     def _set_quick_range(self, hours: int = 0, days: int = 0):
         """빠른 선택 범위 설정
         
-        현재 시간을 기준으로 지정된 시간만큼 이전부터의 범위를 설정합니다.
-        사용자가 빠른 선택 버튼을 클릭할 때 호출됩니다.
+        데이터의 가장 최근 시간을 기준으로 지정된 시간만큼 이전부터의 범위를 설정합니다.
         
         Args:
             hours: 최근 몇 시간 (기본값: 0)
@@ -202,14 +224,19 @@ class TimeRangeSelector(QWidget):
             >>> _set_quick_range(hours=4)  # 최근 4시간
             >>> _set_quick_range(days=7)   # 최근 7일
         """
-        now = datetime.now()
-        if days > 0:
-            start = now - timedelta(days=days)
+        # 데이터의 가장 최근 시간을 기준으로 사용
+        if hasattr(self, '_data_end'):
+            end = self._data_end
         else:
-            start = now - timedelta(hours=hours)
+            end = datetime.now()
+        
+        if days > 0:
+            start = end - timedelta(days=days)
+        else:
+            start = end - timedelta(hours=hours)
         
         self.start_datetime.setDateTime(QDateTime(start))
-        self.end_datetime.setDateTime(QDateTime(now))
+        self.end_datetime.setDateTime(QDateTime(end))
     
     def _set_today(self):
         """오늘 00:00 ~ 현재 시간으로 설정"""

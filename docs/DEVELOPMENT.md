@@ -64,10 +64,15 @@ PyQt6 기반 메인 GUI 윈도우입니다.
 
 **주요 메서드:**
 - `init_ui()`: UI 초기화
-- `create_left_panel()`: 좌측 제어 패널 생성
+- `create_left_panel()`: 좌측 제어 패널 생성 (스크롤 지원) ✨ v1.2.1+++
 - `create_right_panel()`: 우측 결과 패널 생성
 - `start_collection()`: 메시지 수집 시작
 - `handle_result()`: 분석 결과 처리
+
+**UI 개선사항 (v1.2.1+++):**
+- 좌측 패널에 `QScrollArea` 적용으로 스크롤 지원
+- 화면 크기가 작아도 모든 컨트롤 접근 가능
+- 프레임 스타일 제거로 깔끔한 디자인
 
 ### 3. TodoPanel (ui/todo_panel.py)
 TODO 관리 패널입니다.

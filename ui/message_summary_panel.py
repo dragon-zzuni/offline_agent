@@ -238,13 +238,13 @@ class MessageSummaryPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-    def display_summaries(self, summaries: List[Dict]):
+    def display_summaries(self, summaries: List):
         """그룹화된 요약 표시
         
         각 그룹을 카드 형태로 표시합니다.
         
         Args:
-            summaries: 그룹화된 요약 리스트
+            summaries: 그룹화된 요약 리스트 (GroupedSummary 객체 또는 딕셔너리)
         """
         self.clear()
         
@@ -254,7 +254,13 @@ class MessageSummaryPanel(QWidget):
         
         # 각 요약을 카드로 표시
         for summary in summaries:
-            card = self._create_summary_card(summary)
+            # GroupedSummary 객체인 경우 딕셔너리로 변환
+            if hasattr(summary, "to_dict"):
+                summary_dict = summary.to_dict()
+            else:
+                summary_dict = summary
+            
+            card = self._create_summary_card(summary_dict)
             self.summary_layout.insertWidget(self.summary_layout.count() - 1, card)
     
     def _create_summary_card(self, summary: Dict) -> QWidget:
@@ -371,7 +377,11 @@ class MessageSummaryPanel(QWidget):
         return container
     
     def _format_period(self, summary: Dict) -> str:
-        """기간을 포맷팅"""
+        """기간을 포맷팅
+        
+        Args:
+            summary: 요약 딕셔너리
+        """
         start = summary.get("period_start")
         end = summary.get("period_end")
         unit = summary.get("unit", "daily")
@@ -380,13 +390,13 @@ class MessageSummaryPanel(QWidget):
         if isinstance(start, str):
             try:
                 start = datetime.fromisoformat(start.replace("Z", "+00:00"))
-            except:
+            except Exception:
                 start = None
         
         if isinstance(end, str):
             try:
                 end = datetime.fromisoformat(end.replace("Z", "+00:00"))
-            except:
+            except Exception:
                 end = None
         
         if not start:
@@ -396,9 +406,14 @@ class MessageSummaryPanel(QWidget):
             return start.strftime("%Y년 %m월 %d일 (%a)")
         elif unit == "weekly":
             if end:
-                return f"{start.strftime('%m/%d')} ~ {end.strftime('%m/%d')}"
+                # 주간: 시작일 ~ 종료일 (년도 포함)
+                if start.year == end.year:
+                    return f"{start.strftime('%Y년 %m/%d')} ~ {end.strftime('%m/%d')}"
+                else:
+                    return f"{start.strftime('%Y년 %m/%d')} ~ {end.strftime('%Y년 %m/%d')}"
             return start.strftime("%Y년 %W주차")
         elif unit == "monthly":
+            # 월별: 년도와 월만 표시
             return start.strftime("%Y년 %m월")
         else:
             return start.strftime("%Y-%m-%d")

@@ -83,11 +83,12 @@ class EmailItem(QWidget):
 
 
 class EmailPanel(QWidget):
-    """이메일 패널 - TODO 가치가 있는 이메일만 표시"""
+    """이메일 패널 - TODO 리스트에 없는 이메일 표시"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.emails: List[Dict] = []
+        self.todo_message_ids: set = set()  # TODO에 포함된 메시지 ID 추적
         self._init_ui()
     
     def _init_ui(self):
@@ -109,7 +110,7 @@ class EmailPanel(QWidget):
         layout.addLayout(header)
         
         # 설명
-        desc = QLabel("TODO로 변환할 가치가 있는 이메일만 표시됩니다")
+        desc = QLabel("TODO 리스트에 포함되지 않은 이메일만 표시됩니다")
         desc.setStyleSheet("color:#6B7280; font-size:12px; margin-bottom:8px;")
         layout.addWidget(desc)
         
@@ -136,21 +137,37 @@ class EmailPanel(QWidget):
         self.email_list.clear()
         self.count_label.setText("0건")
     
-    def update_emails(self, emails: List[Dict]):
+    def update_emails(self, emails: List[Dict], todo_items: List[Dict] = None):
         """이메일 목록 업데이트
         
         Args:
             emails: 이메일 딕셔너리 리스트
+            todo_items: TODO 아이템 리스트 (선택사항)
         """
         self.emails = emails
         self.email_list.clear()
+        
+        # TODO 아이템에서 메시지 ID 추출
+        if todo_items:
+            self.todo_message_ids = set()
+            for todo in todo_items:
+                source_msg = todo.get("source_message", {})
+                if isinstance(source_msg, str):
+                    import json
+                    try:
+                        source_msg = json.loads(source_msg)
+                    except:
+                        source_msg = {}
+                msg_id = source_msg.get("id") or source_msg.get("msg_id")
+                if msg_id:
+                    self.todo_message_ids.add(msg_id)
         
         if not emails:
             self.count_label.setText("0건")
             return
         
-        # TODO 가치가 있는 이메일만 필터링
-        filtered_emails = self._filter_todo_worthy_emails(emails)
+        # TODO에 없는 이메일만 필터링
+        filtered_emails = self._filter_non_todo_emails(emails)
         
         self.count_label.setText(f"{len(filtered_emails)}건")
         
@@ -161,54 +178,27 @@ class EmailPanel(QWidget):
             self.email_list.addItem(item)
             self.email_list.setItemWidget(item, widget)
     
-    def _filter_todo_worthy_emails(self, emails: List[Dict]) -> List[Dict]:
-        """TODO 가치가 있는 이메일만 필터링
-        
-        간단한 휴리스틱으로 필터링:
-        - 요청/질문/확인이 포함된 이메일
-        - 마감일이 언급된 이메일
-        - 회의/미팅 관련 이메일
+    def _filter_non_todo_emails(self, emails: List[Dict]) -> List[Dict]:
+        """TODO 리스트에 없는 이메일만 필터링
         
         Args:
             emails: 전체 이메일 리스트
             
         Returns:
-            필터링된 이메일 리스트
-            
-        Examples:
-            >>> emails = [
-            ...     {"subject": "회의 요청", "body": "내일 오전 10시 회의 부탁드립니다"},
-            ...     {"subject": "안녕하세요", "body": "잘 지내시나요?"}
-            ... ]
-            >>> filtered = self._filter_todo_worthy_emails(emails)
-            >>> len(filtered)
-            1
+            TODO에 없는 이메일 리스트
         """
-        # TODO 관련 키워드 정의 (카테고리별 분류)
-        keywords = {
-            "request": ["요청", "request", "부탁", "확인", "check"],
-            "review": ["검토", "review", "승인", "approval", "결재"],
-            "meeting": ["회의", "meeting", "미팅", "일정", "schedule"],
-            "urgent": ["마감", "deadline", "긴급", "urgent", "asap"],
-            "inquiry": ["질문", "question", "문의", "inquiry"]
-        }
-        
-        # 모든 키워드를 하나의 리스트로 통합
-        all_keywords = [kw for category in keywords.values() for kw in category]
-        
         filtered = []
         for email in emails:
-            # 제목과 본문을 소문자로 변환하여 검색
-            subject = (email.get("subject") or "").lower()
-            body = (email.get("body") or "").lower()
-            content = f"{subject} {body}"
+            # 이메일 타입만 필터링
+            if email.get("type", "").lower() != "email":
+                continue
             
-            # 키워드 매칭 (하나라도 포함되면 필터링)
-            if any(kw in content for kw in all_keywords):
+            # TODO에 포함되지 않은 이메일만 추가
+            msg_id = email.get("msg_id") or email.get("id")
+            if msg_id and msg_id not in self.todo_message_ids:
                 filtered.append(email)
-                logger.debug(
-                    f"이메일 필터링 통과: {email.get('subject', '제목없음')[:30]}"
-                )
         
-        logger.info(f"📧 이메일 필터링 완료: {len(emails)}개 → {len(filtered)}개")
+        logger.info(f"📧 TODO에 없는 이메일: {len(filtered)}건 (전체 {len(emails)}건)")
         return filtered
+    
+

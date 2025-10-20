@@ -6,7 +6,7 @@ import sys
 import os
 import asyncio
 import json
-
+import logging
 import sqlite3
 
 
@@ -18,6 +18,9 @@ from collections import Counter
 import math, uuid, json, sqlite3
 import requests
 
+# 로거 초기화
+logger = logging.getLogger(__name__)
+
 from PyQt6.QtGui import QFont, QFontDatabase
 from PyQt6.QtWidgets import QApplication, QStyleFactory
 
@@ -27,6 +30,19 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 def _make_http_session():
+    """HTTP 세션 생성 (재시도 로직 포함)
+    
+    네트워크 오류 시 자동으로 재시도하는 HTTP 세션을 생성합니다.
+    
+    재시도 설정:
+    - 최대 3회 재시도
+    - 백오프 팩터: 0.6초
+    - 재시도 대상 상태 코드: 502, 503, 504
+    - 허용 메서드: GET, POST
+    
+    Returns:
+        requests.Session: 재시도 로직이 적용된 HTTP 세션
+    """
     retry = Retry(
         total=3, connect=3, read=3,
         backoff_factor=0.6,
@@ -36,7 +52,8 @@ def _make_http_session():
     )
     s = requests.Session()
     adapter = HTTPAdapter(max_retries=retry)
-    s.mount("https://", adapter); s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
     return s
 
 
@@ -90,6 +107,10 @@ sys.path.insert(0, str(project_root))
 
 from main import SmartAssistant, DEFAULT_DATASET_ROOT
 from ui.todo_panel import TodoPanel   # ✅ TodoPanel 사용
+from ui.time_range_selector import TimeRangeSelector  # ✅ TimeRangeSelector 추가
+from ui.message_summary_panel import MessageSummaryPanel  # ✅ MessageSummaryPanel 추가
+from ui.email_panel import EmailPanel  # ✅ EmailPanel 추가
+from ui.analysis_result_panel import AnalysisResultPanel  # ✅ AnalysisResultPanel 추가
 
 
 # 한 번만 실행(어디든 붙여서 호출)
@@ -458,13 +479,13 @@ class SmartAssistantGUI(QMainWindow):
         # 메인 레이아웃
         main_layout = QHBoxLayout(central_widget)
         
-        # 좌측 패널 (설정 및 제어)
+        # 좌측 패널 (설정 및 제어) - 고정 너비
         left_panel = self.create_left_panel()
-        main_layout.addWidget(left_panel, 1)
+        main_layout.addWidget(left_panel, 0)  # stretch factor 0 = 고정 크기
         
-        # 우측 패널 (결과 표시)
+        # 우측 패널 (결과 표시) - 나머지 공간 모두 사용
         right_panel = self.create_right_panel()
-        main_layout.addWidget(right_panel, 2)
+        main_layout.addWidget(right_panel, 1)  # stretch factor 1 = 확장 가능
         
         # 메뉴바 설정
         self.create_menu_bar()
@@ -473,18 +494,30 @@ class SmartAssistantGUI(QMainWindow):
         self.create_status_bar()
     
     def create_left_panel(self):
-        """좌측 패널 생성"""
-        panel = QFrame()
-        panel.setFrameStyle(QFrame.Shape.StyledPanel)
-        panel.setMaximumWidth(350)
+        """좌측 패널 생성 (스크롤 가능)"""
+        from PyQt6.QtWidgets import QScrollArea
+        from PyQt6.QtCore import Qt
         
+        # 스크롤 영역 생성
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMaximumWidth(200)  # 220 → 200으로 더 축소
+        scroll_area.setMinimumWidth(280)  # 최소 너비 설정
+        scroll_area.setFrameStyle(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # 수평 스크롤 비활성화
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)  # 수직 스크롤만 필요시 표시
+        
+        # 실제 컨텐츠 패널
+        panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(13, 13, 13, 13)  # 마진 축소 (기본 11 → 8)
+        layout.setSpacing(10)  # 간격 축소
         
         # 제목
         title = QLabel("Smart Assistant")
-        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))  # 16 → 14로 축소
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("color: #2c3e50; margin: 10px;")
+        title.setStyleSheet("color: #2c3e50; margin: 8px;")  # margin도 축소
         layout.addWidget(title)
         
         # 상태 표시기
@@ -547,17 +580,17 @@ class SmartAssistantGUI(QMainWindow):
         control_layout = QVBoxLayout(control_group)
         
         # 시작 버튼
-        self.start_button = QPushButton("🔄 메시지 수집 시작")
+        self.start_button = QPushButton("🔄 메시지 수집")
         self.start_button.clicked.connect(self.start_collection)
         self.start_button.setStyleSheet("""
             QPushButton {
                 background-color: #27ae60;
                 color: white;
                 border: none;
-                padding: 12px;
-                border-radius: 6px;
+                padding: 8px;
+                border-radius: 4px;
                 font-weight: bold;
-                font-size: 14px;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background-color: #229954;
@@ -569,7 +602,7 @@ class SmartAssistantGUI(QMainWindow):
         control_layout.addWidget(self.start_button)
         
         # 중지 버튼
-        self.stop_button = QPushButton("⏹️ 수집 중지")
+        self.stop_button = QPushButton("⏹️ 중지")
         self.stop_button.clicked.connect(self.stop_collection)
         self.stop_button.setEnabled(False)
         self.stop_button.setStyleSheet("""
@@ -577,10 +610,10 @@ class SmartAssistantGUI(QMainWindow):
                 background-color: #e74c3c;
                 color: white;
                 border: none;
-                padding: 12px;
-                border-radius: 6px;
+                padding: 8px;
+                border-radius: 4px;
                 font-weight: bold;
-                font-size: 14px;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background-color: #c0392b;
@@ -592,16 +625,17 @@ class SmartAssistantGUI(QMainWindow):
         control_layout.addWidget(self.stop_button)
         
         # 오프라인 정리 버튼
-        self.cleanup_button = QPushButton("🧹 오프라인 정리")
+        self.cleanup_button = QPushButton("🧹 정리")
         self.cleanup_button.clicked.connect(self.offline_cleanup)
         self.cleanup_button.setStyleSheet("""
             QPushButton {
                 background-color: #f39c12;
                 color: white;
                 border: none;
-                padding: 10px;
+                padding: 8px;
                 border-radius: 4px;
                 font-weight: bold;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background-color: #e67e22;
@@ -618,9 +652,18 @@ class SmartAssistantGUI(QMainWindow):
         
         # 상태 메시지
         self.status_message = QLabel("준비됨")
-        self.status_message.setStyleSheet("color: #666; font-size: 12px; padding: 5px;")
+        self.status_message.setStyleSheet("color: #666; font-size: 10px; padding: 4px;")
+        self.status_message.setWordWrap(True)  # 텍스트 줄바꿈 활성화
         layout.addWidget(self.status_message)
 
+        # ✅ 시간 범위 선택기 추가
+        time_range_group = QGroupBox("⏰ 시간 범위 선택")
+        time_range_layout = QVBoxLayout(time_range_group)
+        self.time_range_selector = TimeRangeSelector()
+        self.time_range_selector.time_range_changed.connect(self._on_time_range_changed)
+        time_range_layout.addWidget(self.time_range_selector)
+        layout.addWidget(time_range_group)
+        
         # 날씨 위젯
         weather_group = QGroupBox("오늘/내일 날씨")
         weather_layout = QVBoxLayout(weather_group)
@@ -657,7 +700,10 @@ class SmartAssistantGUI(QMainWindow):
         
         layout.addStretch()
         
-        return panel
+        # 스크롤 영역에 패널 설정
+        scroll_area.setWidget(panel)
+        
+        return scroll_area
     
     def mark_dataset_reload_needed(self):
         """데이터셋을 다시 읽도록 표시"""
@@ -893,9 +939,9 @@ class SmartAssistantGUI(QMainWindow):
         todo_layout.addWidget(self.todo_panel)
         self.tab_widget.addTab(self.todo_tab, "📋 TODO 리스트")
 
-        # 메시지/분석/타임라인 탭
-        self.timeline_tab = self.create_timeline_tab(); self.tab_widget.addTab(self.timeline_tab, "🕒 타임라인")
+        # ✅ 메시지/이메일/분석 탭
         self.message_tab = self.create_message_tab(); self.tab_widget.addTab(self.message_tab, "📨 메시지")
+        self.email_tab = self.create_email_tab(); self.tab_widget.addTab(self.email_tab, "📧 이메일")
         self.analysis_tab = self.create_analysis_tab(); self.tab_widget.addTab(self.analysis_tab, "📊 분석 결과")
 
         layout.addWidget(self.tab_widget)
@@ -1354,40 +1400,37 @@ class SmartAssistantGUI(QMainWindow):
 
     
     def create_message_tab(self):
-        """메시지 탭 생성"""
+        """메시지 탭 생성 - MessageSummaryPanel 사용"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-
-        self.message_summary_label = QLabel("메시지를 수집하면 요약이 표시됩니다.")
-        self.message_summary_label.setStyleSheet("background:#E0F2FE; color:#0F172A; padding:8px 12px; border-radius:6px; font-weight:600;")
-        layout.addWidget(self.message_summary_label)
-
-        # 메시지 테이블
-        self.message_table = QTableWidget()
-        self.message_table.setColumnCount(4)
-        self.message_table.setHorizontalHeaderLabels(["플랫폼", "발신자", "제목/내용", "날짜"])
-        self.message_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         
-        layout.addWidget(self.message_table)
+        # ✅ MessageSummaryPanel 사용
+        self.message_summary_panel = MessageSummaryPanel()
+        self.message_summary_panel.summary_unit_changed.connect(self._on_summary_unit_changed)
+        layout.addWidget(self.message_summary_panel)
+        
+        return tab
+    
+    def create_email_tab(self):
+        """이메일 탭 생성 - EmailPanel 사용"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # ✅ EmailPanel 사용
+        self.email_panel = EmailPanel()
+        layout.addWidget(self.email_panel)
         
         return tab
     
     def create_analysis_tab(self):
-        """분석 결과 탭 생성"""
+        """분석 결과 탭 생성 - AnalysisResultPanel 사용"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-
-        self.analysis_summary_label = QLabel("TODO 생성 결과가 여기에 요약됩니다.")
-        self.analysis_summary_label.setStyleSheet("background:#EDE9FE; color:#312E81; padding:8px 12px; border-radius:6px; font-weight:600;")
-        layout.addWidget(self.analysis_summary_label)
-
-        # 분석 결과 텍스트
-        self.analysis_text = QTextEdit()
-        self.analysis_text.setReadOnly(True)
-        self.analysis_text.setPlaceholderText("분석 결과가 여기에 표시됩니다.")
-        self.analysis_text.setFont(QFont("Consolas", 10))
+        layout.setContentsMargins(0, 0, 0, 0)
         
-        layout.addWidget(self.analysis_text)
+        # ✅ AnalysisResultPanel 사용
+        self.analysis_result_panel = AnalysisResultPanel()
+        layout.addWidget(self.analysis_result_panel)
         
         return tab
 
@@ -1501,6 +1544,191 @@ class SmartAssistantGUI(QMainWindow):
                 self.status_bar.showMessage("오프라인 모드")
             self.status_message.setText("오프라인 모드입니다. 필요 시 다시 온라인으로 전환하세요.")
     
+    def _on_time_range_changed(self, start: datetime, end: datetime):
+        """시간 범위 변경 핸들러
+        
+        TimeRangeSelector에서 시간 범위가 변경되면 호출됩니다.
+        변경된 시간 범위를 collect_options에 저장하고 상태 메시지를 업데이트합니다.
+        
+        Args:
+            start: 시작 시간 (UTC aware datetime)
+            end: 종료 시간 (UTC aware datetime)
+        """
+        # 시간 범위를 collect_options에 저장
+        self.collect_options["time_range"] = {
+            "start": start,
+            "end": end
+        }
+        
+        # 상태 메시지 업데이트
+        start_str = start.strftime('%Y-%m-%d %H:%M')
+        end_str = end.strftime('%Y-%m-%d %H:%M')
+        self.status_message.setText(
+            f"시간 범위 설정: {start_str} ~ {end_str}\n"
+            "'메시지 수집 시작'을 눌러 분석하세요."
+        )
+    
+    def _on_summary_unit_changed(self, unit: str):
+        """요약 단위 변경 핸들러
+        
+        MessageSummaryPanel에서 요약 단위가 변경되면 호출됩니다.
+        메시지를 새로운 단위로 그룹화하고 요약을 업데이트합니다.
+        
+        Args:
+            unit: 요약 단위 ("day", "week", "month")
+        """
+        if not self.collected_messages:
+            return
+        
+        # 메시지 그룹화 및 요약 업데이트
+        self._update_message_summaries(unit)
+    
+    def _update_message_summaries(self, unit: str = "day"):
+        """메시지 그룹화 및 요약 생성
+        
+        수집된 메시지를 지정된 단위로 그룹화하고 각 그룹별 요약을 생성합니다.
+        생성된 요약은 MessageSummaryPanel에 표시됩니다.
+        
+        Args:
+            unit: 그룹화 단위 ("day", "week", "month")
+                - "day": 일별 그룹화
+                - "week": 주별 그룹화 (월요일 시작)
+                - "month": 월별 그룹화
+        """
+        if not self.collected_messages:
+            return
+        
+        from nlp.message_grouping import group_by_day, group_by_week, group_by_month
+        from nlp.grouped_summary import GroupedSummary
+        
+        # 단위에 따라 메시지 그룹화
+        if unit == "day":
+            groups = group_by_day(self.collected_messages)
+        elif unit == "week":
+            groups = group_by_week(self.collected_messages)
+        elif unit == "month":
+            groups = group_by_month(self.collected_messages)
+        else:
+            # 기본값: 일별 그룹화
+            groups = group_by_day(self.collected_messages)
+        
+        # 그룹별 요약 생성
+        summaries = []
+        for period, messages in groups.items():
+            # 간단한 요약 생성
+            brief_summary = self._generate_brief_summary(messages)
+            key_points = self._extract_key_points(messages)
+            
+            # 발신자별 우선순위 계산
+            sender_priority_map = {}
+            for msg in messages:
+                sender = msg.get("sender", "Unknown")
+                # 분석 결과에서 우선순위 찾기
+                priority = "low"
+                for result in self.analysis_results:
+                    if result.get("message", {}).get("msg_id") == msg.get("msg_id"):
+                        priority = result.get("priority", {}).get("priority_level", "low")
+                        break
+                
+                # 최고 우선순위 유지
+                if sender not in sender_priority_map:
+                    sender_priority_map[sender] = priority
+                else:
+                    priority_order = {"high": 3, "medium": 2, "low": 1}
+                    if priority_order.get(priority, 0) > priority_order.get(sender_priority_map[sender], 0):
+                        sender_priority_map[sender] = priority
+            
+            # 그룹화 단위 결정
+            unit_name = "daily" if unit == "day" else ("weekly" if unit == "week" else "monthly")
+            
+            # 기간 시작/종료 계산 (그룹 키 기반)
+            from nlp.message_grouping import get_group_date_range
+            period_start, period_end = get_group_date_range(period, unit_name)
+            
+            if not period_start:
+                continue
+            
+            # GroupedSummary.from_messages 사용
+            summary = GroupedSummary.from_messages(
+                messages=messages,
+                period_start=period_start,
+                period_end=period_end,
+                unit=unit_name,
+                summary_text=brief_summary,
+                key_points=key_points
+            )
+            
+            # sender_priority_map을 summary 딕셔너리에 추가
+            summary_dict = summary.to_dict()
+            summary_dict["sender_priority_map"] = sender_priority_map
+            summary_dict["brief_summary"] = brief_summary  # brief_summary도 추가
+            
+            summaries.append(summary_dict)
+        
+        # MessageSummaryPanel에 표시
+        if hasattr(self, "message_summary_panel"):
+            self.message_summary_panel.display_summaries(summaries)
+    
+    def _generate_brief_summary(self, messages: list) -> str:
+        """간결한 요약 생성 (1-2줄)"""
+        if not messages:
+            return "메시지 없음"
+        
+        total = len(messages)
+        email_count = sum(1 for m in messages if m.get("type") == "email")
+        messenger_count = total - email_count
+        
+        # 주요 발신자
+        senders = [m.get("sender", "Unknown") for m in messages]
+        sender_counts = Counter(senders)
+        top_sender = sender_counts.most_common(1)[0] if sender_counts else ("Unknown", 0)
+        
+        return f"총 {total}건 (이메일 {email_count}, 메신저 {messenger_count}) | 주요 발신자: {top_sender[0]} ({top_sender[1]}건)"
+    
+    def _extract_key_points(self, messages: List[Dict]) -> List[str]:
+        """주요 포인트 추출 (최대 3개)
+        
+        메시지에서 핵심 포인트를 추출합니다.
+        제목이 있으면 제목을 우선 사용하고, 없으면 본문의 첫 문장을 사용합니다.
+        
+        Args:
+            messages: 메시지 리스트
+            
+        Returns:
+            주요 포인트 문자열 리스트 (최대 3개)
+            
+        Examples:
+            >>> points = self._extract_key_points(messages)
+            >>> print(points[0])
+            "Kim Jihoon: 오늘 오전 2일차 작업 진행 상황 점검..."
+        """
+        points = []
+        
+        # 최대 3개 메시지에서 포인트 추출
+        for msg in messages[:3]:
+            # 제목 우선, 없으면 본문 첫 문장
+            subject = msg.get("subject", "")
+            content = msg.get("content", "") or msg.get("body", "")
+            sender = msg.get("sender", "Unknown")
+            
+            if subject:
+                # 제목이 있으면 제목 사용
+                point = f"{sender}: {subject[:80]}"
+            elif content:
+                # 첫 문장 추출 (마침표 기준)
+                first_sentence = content.split(".")[0].strip()
+                if len(first_sentence) > 10:  # 너무 짧은 문장 제외
+                    point = f"{sender}: {first_sentence[:80]}"
+                else:
+                    point = f"{sender}: {content[:80]}"
+            else:
+                # 제목도 본문도 없으면 건너뛰기
+                continue
+            
+            points.append(point)
+        
+        return points
+    
     def start_collection(self):
         """메시지 수집 시작"""
         if self.worker_thread and self.worker_thread.isRunning():
@@ -1564,14 +1792,46 @@ class SmartAssistantGUI(QMainWindow):
                     self.status_message.setText("이번 수집에서 새로운 TODO가 없어 이전 목록을 유지합니다.")
             messages = result.get("messages", [])
             self.collected_messages = list(messages)
-            self.update_message_table(messages)
-            self._update_message_summary(messages)
+            
+            # ✅ 데이터 시간 범위 계산 및 TimeRangeSelector에 설정
+            if messages and hasattr(self, "time_range_selector"):
+                dates = []
+                for msg in messages:
+                    date_str = msg.get("date")
+                    if date_str:
+                        try:
+                            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                            dates.append(dt)
+                        except:
+                            pass
+                
+                if dates:
+                    data_start = min(dates)
+                    data_end = max(dates)
+                    self.time_range_selector.set_data_range(data_start, data_end)
+                    logger.info(f"데이터 시간 범위 설정: {data_start.strftime('%Y-%m-%d')} ~ {data_end.strftime('%Y-%m-%d')}")
+            
+            # ✅ 메시지 요약 업데이트 (MessageSummaryPanel 사용)
+            self._update_message_summaries("day")  # 기본값: 일별 요약
+            
+            # 기존 메시지 테이블 업데이트 (호환성 유지)
+            if hasattr(self, "message_table"):
+                self.update_message_table(messages)
+            if hasattr(self, "message_summary_label"):
+                self._update_message_summary(messages)
+            
             self.update_timeline(messages)
 
             analysis_results = result.get("analysis_results") or []
             self.analysis_results = analysis_results
-            self.update_analysis_tab(result.get("analysis_report_text"), analysis_results)
-            self._update_analysis_summary(todo_list, analysis_results or [])
+            
+            # ✅ AnalysisResultPanel 업데이트
+            if hasattr(self, "analysis_result_panel"):
+                self.analysis_result_panel.update_analysis(analysis_results, messages)
+            
+            # ✅ EmailPanel 업데이트 (TODO에 없는 이메일만 표시)
+            if hasattr(self, "email_panel"):
+                self.email_panel.update_emails(messages, items)
 
             total = len(items)
             self.status_bar.showMessage(f"수집 완료: {total}개 TODO 생성")
@@ -1603,36 +1863,14 @@ class SmartAssistantGUI(QMainWindow):
             
     #         self.todo_list.addItem(list_item)
     #         self.todo_list.setItemWidget(list_item, todo_widget)
-    # # main_window.py - class SmartAssistantGUI 내부 어딘가(분석/메시지 업데이트 메서드들 근처)에 추가
-
-    def update_analysis_tab(self, analysis_report_text: Optional[str], analysis_results: Optional[list]):
-        """
-        분석결과 탭에 최종 텍스트를 채운다.
-        - 우선적으로 main.py에서 만들어둔 self.analysis_report_text(=analysis_report_text)를 사용
-        - 없으면 기존 방식으로 top 10 간단 요약을 만들어서 출력(폴백)
-        """
-        text = analysis_report_text or getattr(self.assistant, "analysis_report_text", "") or ""
-        if not text:
-            # 폴백: 기존 간단 요약
-            buf = []
-            buf.append("📊 분석 결과 요약")
-            buf.append("=" * 50)
-            buf.append("")
-            for i, result in enumerate((analysis_results or [])[:10], 1):
-                msg = result["message"]
-                priority = result["priority"]
-                summary = result.get("summary")
-                buf.append(f"{i}. [{priority['priority_level'].upper()}] {msg.get('sender','')}")
-                buf.append(f"   플랫폼: {msg.get('platform','')}")
-                buf.append(f"   우선순위 점수: {priority.get('overall_score',0):.2f}")
-                if summary:
-                    buf.append(f"   요약: {summary.get('summary','')}")
-                buf.append(f"   액션: {len(result.get('actions',[]))}개")
-                buf.append("")
-            text = "\n".join(buf)
-
-        # PlainText로 넣어야 ASCII 구분선과 레이아웃이 깔끔
-        self.analysis_text.setPlainText(text)
+    # ✅ 이전 버전 호환성을 위해 유지 (현재는 AnalysisResultPanel 사용)
+    # def update_analysis_tab(self, analysis_report_text: Optional[str], analysis_results: Optional[list]):
+    #     """
+    #     분석결과 탭에 최종 텍스트를 채운다.
+    #     - 우선적으로 main.py에서 만들어둔 self.analysis_report_text(=analysis_report_text)를 사용
+    #     - 없으면 기존 방식으로 top 10 간단 요약을 만들어서 출력(폴백)
+    #     """
+    #     pass  # AnalysisResultPanel로 대체됨
 
     
     def auto_refresh(self):

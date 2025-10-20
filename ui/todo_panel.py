@@ -28,6 +28,7 @@ TOP3_RULE_DEFAULT = {
     "deadline_base": 1.0,
     "evidence_per_item": 0.1,
     "evidence_max_bonus": 0.5,
+    "recipient_type_cc_penalty": 0.7,  # 참조(CC)로 받은 경우 가중치 (0.7 = 30% 감소)
 }
 _TOP3_RULES = deepcopy(TOP3_RULE_DEFAULT)
 _TOP3_LAST_INSTRUCTION = ""
@@ -37,6 +38,35 @@ _KOREAN_PARTICLES = (
     "을", "를", "도", "만", "부터", "까지", "에게서", "밖에", "로서", "로써",
     "이라서", "라서", "이라도", "라도", "이며", "이며도"
 )
+
+def _create_recipient_type_badge(recipient_type: str) -> Optional[QLabel]:
+    """수신 타입 배지 생성 헬퍼 함수
+    
+    Args:
+        recipient_type: 수신 타입 ("to", "cc", "bcc")
+        
+    Returns:
+        QLabel 배지 위젯 또는 None (직접 수신인 경우)
+    """
+    recipient_type = (recipient_type or "to").lower()
+    
+    if recipient_type == "cc":
+        badge = QLabel("참조(CC)")
+        badge.setStyleSheet(
+            "color:#92400E; background:#FEF3C7; "
+            "padding:2px 6px; border-radius:8px; font-weight:600;"
+        )
+        return badge
+    elif recipient_type == "bcc":
+        badge = QLabel("숨은참조(BCC)")
+        badge.setStyleSheet(
+            "color:#92400E; background:#FEF3C7; "
+            "padding:2px 6px; border-radius:8px; font-weight:600;"
+        )
+        return badge
+    
+    return None  # 직접 수신(TO)인 경우 배지 없음
+
 
 def _normalize_korean_name(token: str) -> str:
     base = token.strip()
@@ -486,9 +516,19 @@ def init_db(conn: sqlite3.Connection) -> None:
         draft_subject TEXT,
         draft_body TEXT,
         evidence TEXT,
-        deadline_confidence TEXT
+        deadline_confidence TEXT,
+        recipient_type TEXT DEFAULT 'to'
     )
     """)
+    
+    # 기존 테이블에 recipient_type 컬럼 추가 (마이그레이션)
+    try:
+        cur.execute("ALTER TABLE todos ADD COLUMN recipient_type TEXT DEFAULT 'to'")
+        conn.commit()
+    except sqlite3.OperationalError:
+        # 컬럼이 이미 존재하면 무시
+        pass
+    
     conn.commit()
 
 def check_snoozes_and_deadlines(conn: sqlite3.Connection) -> None:
@@ -602,7 +642,15 @@ def _score_for_top3(todo: dict) -> float:
         priority_floor = 0.0
     priority_term = max(0.1, w_priority + priority_bonus, priority_floor)
 
-    return (priority_term * rule_multiplier) * w_deadline * w_evidence
+    # 참조(CC) 패널티 적용
+    recipient_type = (todo.get("recipient_type") or "to").lower()
+    cc_penalty = 1.0
+    if recipient_type == "cc":
+        cc_penalty = rules.get("recipient_type_cc_penalty", 0.7)
+    elif recipient_type == "bcc":
+        cc_penalty = rules.get("recipient_type_cc_penalty", 0.7) * 0.9  # BCC는 더 낮게
+
+    return (priority_term * rule_multiplier) * w_deadline * w_evidence * cc_penalty
 
 def _pick_top3(items: List[dict]) -> List[str]:
     cand = [
@@ -923,6 +971,11 @@ class BasicTodoItem(QWidget):
         status = QLabel((todo.get("status") or "pending").capitalize())
         status.setStyleSheet("background:#E0E7FF; color:#3730A3; padding:2px 8px; border-radius:999px; font-weight:600;")
         top.addWidget(status, 0)
+        
+        # 수신 타입 배지 추가 (v1.2.1+)
+        recipient_badge = _create_recipient_type_badge(todo.get("recipient_type"))
+        if recipient_badge:
+            top.addWidget(recipient_badge, 0)
 
         self.close_button = QPushButton("✕")
         self.close_button.setObjectName("closeButton")
@@ -974,6 +1027,12 @@ class BasicTodoItem(QWidget):
         for widget in (req, typ):
             widget.setStyleSheet("color:#374151; background:#F3F4F6; padding:2px 6px; border-radius:8px;")
             meta.addWidget(widget, 0)
+        
+        # 수신 타입 표시 (참조/직접 수신)
+        recipient_badge = _create_recipient_type_badge(todo.get("recipient_type"))
+        if recipient_badge:
+            meta.addWidget(recipient_badge, 0)
+        
         if todo.get("deadline"):
             deadline_lbl = QLabel(f"마감 · {todo.get('deadline')}")
             deadline_lbl.setStyleSheet("color:#9F1239; background:#FFE4E6; padding:2px 6px; border-radius:8px;")
@@ -1210,6 +1269,7 @@ class TodoPanel(QWidget):
                 "draft_body": "",
                 "evidence": "[]",
                 "deadline_confidence": "mid",
+                "recipient_type": "to",  # 기본값: 직접 수신
             }
             todo = {**base, **(raw or {})}
 
@@ -1625,6 +1685,16 @@ class TodoDetailDialog(QDialog):
         add_info("우선순위", (todo.get("priority") or "").capitalize())
         add_info("요청자", todo.get("requester"))
         add_info("유형", todo.get("type"))
+        
+        # 수신 타입 표시
+        recipient_type = (todo.get("recipient_type") or "to").lower()
+        if recipient_type == "cc":
+            add_info("수신 타입", "참조(CC)")
+        elif recipient_type == "bcc":
+            add_info("수신 타입", "숨은참조(BCC)")
+        else:
+            add_info("수신 타입", "직접 수신(TO)")
+        
         add_info("마감", todo.get("deadline") or todo.get("deadline_ts"))
         
         main_layout.addLayout(info_layout)
