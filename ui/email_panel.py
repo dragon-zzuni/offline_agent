@@ -31,7 +31,11 @@ class EmailItem(QWidget):
     def _init_ui(self):
         """UI 초기화"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+        
+        # 최소 높이 설정으로 레이아웃 깨짐 방지
+        self.setMinimumHeight(120)
         
         # 상단: 제목 + 발신자
         top = QHBoxLayout()
@@ -129,6 +133,7 @@ class EmailPanel(QWidget):
                 background: transparent;
             }
         """)
+        self.email_list.itemClicked.connect(self._on_email_clicked)
         layout.addWidget(self.email_list)
     
     def clear(self):
@@ -174,6 +179,8 @@ class EmailPanel(QWidget):
         for email in filtered_emails:
             item = QListWidgetItem(self.email_list)
             widget = EmailItem(email, self)
+            # 위젯의 실제 크기를 계산하여 설정
+            widget.adjustSize()
             item.setSizeHint(widget.sizeHint())
             self.email_list.addItem(item)
             self.email_list.setItemWidget(item, widget)
@@ -200,5 +207,47 @@ class EmailPanel(QWidget):
         
         logger.info(f"📧 TODO에 없는 이메일: {len(filtered)}건 (전체 {len(emails)}건)")
         return filtered
+    
+    def _on_email_clicked(self, item: QListWidgetItem):
+        """이메일 클릭 이벤트 핸들러
+        
+        클릭된 이메일의 상세 내용을 다이얼로그로 표시합니다.
+        """
+        try:
+            # 클릭된 아이템의 인덱스 가져오기
+            row = self.email_list.row(item)
+            
+            # TODO에 없는 이메일 목록에서 해당 이메일 찾기
+            filtered_emails = self._filter_non_todo_emails(self.emails)
+            
+            if row < 0 or row >= len(filtered_emails):
+                logger.warning(f"유효하지 않은 이메일 인덱스: {row}")
+                return
+            
+            email = filtered_emails[row]
+            
+            # MessageDetailDialog를 사용하여 이메일 상세 표시
+            from ui.message_detail_dialog import MessageDetailDialog
+            
+            # 단일 이메일을 위한 요약 그룹 데이터 생성
+            summary_group = {
+                "period_label": email.get("subject", "이메일 상세"),
+                "statistics_summary": f"발신: {email.get('sender', 'Unknown')}",
+                "total_messages": 1,
+                "email_count": 1,
+                "messenger_count": 0
+            }
+            
+            # 다이얼로그 생성 및 표시
+            dialog = MessageDetailDialog(summary_group, [email], self)
+            dialog.exec()
+            
+        except Exception as e:
+            logger.error(f"이메일 클릭 처리 오류: {e}", exc_info=True)
+            QMessageBox.warning(
+                self,
+                "오류",
+                f"이메일을 표시하는 중 오류가 발생했습니다:\n{str(e)}"
+            )
     
 

@@ -705,7 +705,9 @@ class SmartAssistantGUI(QMainWindow):
         summary_layout.addWidget(self.daily_summary_button)
         summary_layout.addWidget(self.weekly_summary_button)
         layout.addWidget(summary_group)
-        QTimer.singleShot(100, lambda: self.fetch_weather("서울"))
+        # 날씨 API 자동 호출 비활성화 - 네트워크 오류 시 앱 종료 방지
+        # 사용자가 수동으로 "날씨 업데이트" 버튼을 클릭하여 날씨 정보를 가져올 수 있습니다
+        # QTimer.singleShot(100, lambda: self.fetch_weather("서울"))
         
         layout.addStretch()
         
@@ -1296,11 +1298,11 @@ class SmartAssistantGUI(QMainWindow):
         except requests.RequestException as exc:
             self.weather_status_label.setText("날씨 정보를 가져오지 못했습니다.")
             self.weather_tip_label.setText("날씨 팁을 불러오지 못했습니다. 기본적으로 우산과 마스크를 준비해 주세요.")
-            print(f"[weather] request error: {exc}")
+            logger.warning(f"날씨 API 요청 오류: {exc}")
         except Exception as exc:
             self.weather_status_label.setText("날씨 정보를 처리하는 중 오류가 발생했습니다.")
             self.weather_tip_label.setText("날씨 팁을 불러오지 못했습니다. 기본적으로 우산과 마스크를 준비해 주세요.")
-            print(f"[weather] parse error: {exc}")
+            logger.error(f"날씨 정보 처리 오류: {exc}")
 
     def _describe_kma_weather(self, sky: Optional[str], pty: Optional[str]) -> str:
         try:

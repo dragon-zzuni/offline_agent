@@ -203,10 +203,14 @@ class MessageDetailDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # 섹션 헤더
-        header_label = QLabel("  메시지 상세")
-        header_label.setFont(QFont(Fonts.FAMILY, Fonts.SIZE_BASE, QFont.Weight.Bold))
-        header_label.setStyleSheet(f"""
+        # 섹션 헤더 (메시지 타입에 따라 텍스트 변경)
+        # 모든 메시지가 이메일인지 확인
+        is_all_email = all(msg.get("type") == "email" for msg in self.messages) if self.messages else False
+        header_text = "  이메일 상세" if is_all_email else "  메시지 상세"
+        
+        self.detail_header_label = QLabel(header_text)
+        self.detail_header_label.setFont(QFont(Fonts.FAMILY, Fonts.SIZE_BASE, QFont.Weight.Bold))
+        self.detail_header_label.setStyleSheet(f"""
             QLabel {{
                 background-color: {Colors.BG_SECONDARY};
                 color: {Colors.TEXT_PRIMARY};
@@ -214,7 +218,7 @@ class MessageDetailDialog(QDialog):
                 border-bottom: 1px solid {Colors.BORDER_LIGHT};
             }}
         """)
-        layout.addWidget(header_label)
+        layout.addWidget(self.detail_header_label)
         
         # 스크롤 영역
         scroll_area = QScrollArea()
@@ -233,15 +237,7 @@ class MessageDetailDialog(QDialog):
         )
         self.detail_layout.setSpacing(Spacing.MD)
         
-        # 초기 메시지
-        empty_label = QLabel("메시지를 선택하세요")
-        empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty_label.setStyleSheet(f"""
-            color: {Colors.TEXT_SECONDARY};
-            font-size: {Fonts.SIZE_BASE}px;
-            padding: {Spacing.XL}px;
-        """)
-        self.detail_layout.addWidget(empty_label)
+        # 초기 메시지 제거 - 첫 번째 메시지가 자동으로 선택되므로 불필요
         self.detail_layout.addStretch()
         
         scroll_area.setWidget(self.detail_container)
