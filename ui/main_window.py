@@ -475,7 +475,7 @@ class SmartAssistantGUI(QMainWindow):
     
     def init_ui(self):
         """UI 초기화"""
-        self.setWindowTitle("Smart Assistant v1.0")
+        self.setWindowTitle("OFFLINE AGENT v2.0")
         self.setGeometry(100, 100, 1400, 900)
         
         # 중앙 위젯 설정
@@ -520,7 +520,7 @@ class SmartAssistantGUI(QMainWindow):
         layout.setSpacing(10)  # 간격 축소
         
         # 제목
-        title = QLabel("Smart Assistant")
+        title = QLabel("OFFLINE-AGENT")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))  # 16 → 14로 축소
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("color: #2c3e50; margin: 8px;")  # margin도 축소
@@ -2328,7 +2328,7 @@ class Chip(QLabel):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Smart Assistant")
+    app.setApplicationName("OFFLINE Agent")
     app.setApplicationVersion("1.0")
 
     # 1) OS 일관 테마
