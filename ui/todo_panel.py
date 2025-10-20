@@ -1,7 +1,7 @@
 ﻿# ui/todo_panel.py
 from __future__ import annotations
 
-import os, sys, uuid, json, sqlite3, subprocess, re, logging
+import os, sys, uuid, json, sqlite3, subprocess, re, logging, requests
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Callable, Optional, Tuple
 
@@ -291,8 +291,6 @@ def _try_llm_parse_rules(text: str) -> tuple[Optional[dict], str]:
         "Do not add prose; reply with json only."
     )
     try:
-        import requests
-
         payload: Dict[str, object] = {
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -951,6 +949,23 @@ class BasicTodoItem(QWidget):
         self.close_button.clicked.connect(self._emit_mark_done)
         top.addWidget(self.close_button, 0)
         root.addLayout(top)
+        
+        # 간단한 요약 추가 (회색 박스)
+        description = todo.get("description", "")
+        if description:
+            summary = self._create_brief_summary(description)
+            if summary:
+                summary_label = QLabel(summary)
+                summary_label.setStyleSheet("""
+                    color:#6B7280; 
+                    background:#F9FAFB; 
+                    padding:6px 10px; 
+                    border-radius:6px;
+                    border:1px solid #E5E7EB;
+                """)
+                summary_label.setWordWrap(True)
+                summary_label.setMaximumHeight(50)
+                root.addWidget(summary_label)
 
         meta = QHBoxLayout()
         meta.setSpacing(12)
@@ -988,6 +1003,24 @@ class BasicTodoItem(QWidget):
             root.addLayout(chips_row)
 
         self.set_unread(unread)
+    
+    def _create_brief_summary(self, description: str) -> str:
+        """설명을 간단하게 요약 (첫 줄만 표시)"""
+        if not description:
+            return ""
+        
+        # 줄바꿈 제거 및 공백 정리
+        cleaned = " ".join(description.split())
+        
+        # 첫 문장만 추출
+        sentences = cleaned.replace("。", ".").split(".")
+        first_sentence = sentences[0].strip() if sentences else cleaned
+        
+        # 최대 100자로 제한 (첫 줄이 이미 보이므로 간단하게)
+        if len(first_sentence) > 100:
+            return first_sentence[:97] + "..."
+        
+        return first_sentence
 
     def set_unread(self, unread: bool) -> None:
         self._unread = unread
@@ -1015,7 +1048,12 @@ class TodoPanel(QWidget):
         self.conn = get_conn(db_path)
         init_db(self.conn)
 
+        # 애플리케이션 시작 시 오래된 TODO만 정리 (14일 이상)
+        logger.info("애플리케이션 시작: 오래된 TODO 데이터 정리")
         self._cleanup_old_rows(days=14)
+        
+        # 기존 TODO 유지 (삭제하지 않음)
+        # 사용자가 원하면 수동으로 "모두 삭제" 버튼 사용 가능
         self._top3_cache: List[dict] = []
         self._all_rows: List[dict] = []
         self._top3_all: List[dict] = []
@@ -1026,7 +1064,7 @@ class TodoPanel(QWidget):
         self._top3_updated_cb: Optional[Callable[[List[dict]], None]] = top3_callback
 
         self.setup_ui()
-        self.refresh_todo_list()
+        # refresh_todo_list() 호출 제거 - 초기화 상태 유지
         self._refresh_rule_tooltip()
 
         self.snooze_timer = QTimer(self)
@@ -1049,10 +1087,21 @@ class TodoPanel(QWidget):
             print(f"[TodoPanel] auto-cleanup error: {e}")
 
     def clear_all_todos(self) -> None:
+        """모든 TODO 삭제 (UI 새로고침 포함)"""
         cur = self.conn.cursor()
         cur.execute("DELETE FROM todos")
         self.conn.commit()
         self.refresh_todo_list()
+    
+    def clear_all_todos_silent(self) -> None:
+        """모든 TODO 삭제 (UI 새로고침 없음, 초기화용)"""
+        try:
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM todos")
+            self.conn.commit()
+            logger.info("기존 TODO 데이터 삭제 완료")
+        except Exception as e:
+            logger.error(f"TODO 데이터 삭제 실패: {e}")
 
     def setup_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -1550,68 +1599,392 @@ class TodoPanel(QWidget):
 
 
 class TodoDetailDialog(QDialog):
+    """TODO 상세 다이얼로그 - 상하 분할 레이아웃"""
+    
     def __init__(self, todo: dict, parent=None):
         super().__init__(parent)
         self.todo = todo
         self.setWindowTitle(todo.get("title") or "TODO 상세")
-        self.setMinimumSize(420, 520)
+        self.setMinimumSize(600, 700)
 
-        layout = QVBoxLayout(self)
-
+        main_layout = QVBoxLayout(self)
+        
+        # 상단: 원본 메시지 영역
+        upper_group = QLabel("📄 원본 메시지")
+        upper_group.setStyleSheet("font-weight:700; font-size:14px; color:#1F2937; padding:8px; background:#F3F4F6; border-radius:6px;")
+        main_layout.addWidget(upper_group)
+        
+        # 원본 메시지 정보
+        info_layout = QVBoxLayout()
+        
         def add_info(label: str, value: str | None):
             lbl = QLabel(f"{label}: {value or '-'}")
-            lbl.setStyleSheet("font-weight:600; color:#1F2937;")
-            layout.addWidget(lbl)
-
+            lbl.setStyleSheet("font-weight:600; color:#374151; padding:4px;")
+            info_layout.addWidget(lbl)
+        
         add_info("우선순위", (todo.get("priority") or "").capitalize())
-        add_info("상태", todo.get("status") or "pending")
         add_info("요청자", todo.get("requester"))
         add_info("유형", todo.get("type"))
         add_info("마감", todo.get("deadline") or todo.get("deadline_ts"))
-
-        evidence = todo.get("evidence")
-        try:
-            evidence_list = json.loads(evidence or "[]") if not isinstance(evidence, list) else evidence
-        except Exception:
-            evidence_list = []
-        if evidence_list:
-            ev_label = QLabel("근거 목록:")
-            ev_label.setStyleSheet("font-weight:600; color:#1F2937;")
-            layout.addWidget(ev_label)
-            ev_text = QTextEdit()
-            ev_text.setReadOnly(True)
-            ev_text.setPlainText("\n".join(f"- {e}" for e in evidence_list))
-            layout.addWidget(ev_text)
-
-        desc_text = QTextEdit()
-        desc_text.setReadOnly(True)
-        desc_text.setPlaceholderText("설명")
-        desc_body = todo.get("description") or ""
-        desc_text.setPlainText(desc_body)
-        layout.addWidget(desc_text)
-
-        draft_text = QTextEdit()
-        draft_text.setReadOnly(True)
-        draft_text.setPlaceholderText("초안")
-        draft_text.setPlainText(todo.get("draft_body") or "")
-        layout.addWidget(draft_text)
-
+        
+        main_layout.addLayout(info_layout)
+        
+        # 원본 메시지 내용
         src = _source_message_dict(todo)
         if src:
-            add_info("원본 발신자", src.get("sender"))
-            add_info("원본 제목", src.get("subject"))
-            add_info("플랫폼", src.get("platform"))
+            src_info_layout = QVBoxLayout()
+            add_info_src = lambda label, value: src_info_layout.addWidget(
+                QLabel(f"{label}: {value or '-'}").setStyleSheet("color:#6B7280; padding:2px;") or QLabel(f"{label}: {value or '-'}")
+            )
+            
+            sender_lbl = QLabel(f"발신자: {src.get('sender') or '-'}")
+            sender_lbl.setStyleSheet("color:#6B7280; padding:2px;")
+            src_info_layout.addWidget(sender_lbl)
+            
+            if src.get("subject"):
+                subject_lbl = QLabel(f"제목: {src.get('subject')}")
+                subject_lbl.setStyleSheet("color:#6B7280; padding:2px;")
+                src_info_layout.addWidget(subject_lbl)
+            
+            if src.get("platform"):
+                platform_lbl = QLabel(f"플랫폼: {src.get('platform')}")
+                platform_lbl.setStyleSheet("color:#6B7280; padding:2px;")
+                src_info_layout.addWidget(platform_lbl)
+            
+            main_layout.addLayout(src_info_layout)
+            
             content = src.get("content") or src.get("body")
             if content:
-                msg_text = QTextEdit()
-                msg_text.setReadOnly(True)
-                msg_text.setPlaceholderText("원본 메시지")
-                msg_text.setPlainText(content)
-                layout.addWidget(msg_text)
-
+                self.original_message = QTextEdit()
+                self.original_message.setReadOnly(True)
+                self.original_message.setPlainText(content)
+                self.original_message.setStyleSheet("background:#FFFFFF; border:1px solid #E5E7EB; border-radius:6px; padding:8px;")
+                self.original_message.setMinimumHeight(200)
+                main_layout.addWidget(self.original_message)
+        
+        # 구분선
+        separator = QLabel()
+        separator.setStyleSheet("background:#D1D5DB; min-height:2px; max-height:2px;")
+        main_layout.addWidget(separator)
+        
+        # 하단: 요약 및 액션 영역
+        lower_group = QLabel("📝 요약 및 액션")
+        lower_group.setStyleSheet("font-weight:700; font-size:14px; color:#1F2937; padding:8px; background:#F3F4F6; border-radius:6px;")
+        main_layout.addWidget(lower_group)
+        
+        # 요약 표시 영역
+        self.summary_text = QTextEdit()
+        self.summary_text.setReadOnly(True)
+        self.summary_text.setPlaceholderText("요약이 생성되지 않았습니다. '요약 생성' 버튼을 클릭하세요.")
+        self.summary_text.setStyleSheet("background:#F9FAFB; border:1px solid #E5E7EB; border-radius:6px; padding:8px;")
+        self.summary_text.setMinimumHeight(120)
+        
+        # 기존 요약이 있으면 표시
+        existing_summary = self._get_existing_summary()
+        if existing_summary:
+            self.summary_text.setPlainText(existing_summary)
+        
+        main_layout.addWidget(self.summary_text)
+        
+        # 액션 버튼들
+        action_layout = QHBoxLayout()
+        
+        self.generate_summary_btn = QPushButton("📋 요약 생성")
+        self.generate_summary_btn.setStyleSheet("""
+            QPushButton {
+                background:#3B82F6; color:white; padding:8px 16px; 
+                border-radius:6px; font-weight:600;
+            }
+            QPushButton:hover {
+                background:#2563EB;
+            }
+            QPushButton:disabled {
+                background:#9CA3AF; color:#E5E7EB;
+            }
+        """)
+        self.generate_summary_btn.clicked.connect(self._generate_summary)
+        action_layout.addWidget(self.generate_summary_btn)
+        
+        self.generate_reply_btn = QPushButton("✉️ 회신 초안 작성")
+        self.generate_reply_btn.setStyleSheet("""
+            QPushButton {
+                background:#10B981; color:white; padding:8px 16px; 
+                border-radius:6px; font-weight:600;
+            }
+            QPushButton:hover {
+                background:#059669;
+            }
+            QPushButton:disabled {
+                background:#9CA3AF; color:#E5E7EB;
+            }
+        """)
+        self.generate_reply_btn.clicked.connect(self._generate_reply)
+        action_layout.addWidget(self.generate_reply_btn)
+        
+        main_layout.addLayout(action_layout)
+        
+        # 회신 초안 표시 영역 (처음에는 숨김)
+        self.reply_text = QTextEdit()
+        self.reply_text.setPlaceholderText("회신 초안이 여기에 생성됩니다...")
+        self.reply_text.setStyleSheet("background:#FFFFFF; border:1px solid #E5E7EB; border-radius:6px; padding:8px;")
+        self.reply_text.setMinimumHeight(150)
+        self.reply_text.setVisible(False)
+        main_layout.addWidget(self.reply_text)
+        
+        # 닫기 버튼
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        main_layout.addWidget(buttons)
+    
+    def _get_existing_summary(self) -> str:
+        """기존 요약 가져오기"""
+        desc = self.todo.get("description", "")
+        if desc and len(desc) > 10:
+            # 간단한 요약 생성 (첫 3문장)
+            sentences = desc.replace("。", ".").split(".")
+            summary_sentences = [s.strip() for s in sentences[:3] if s.strip()]
+            if summary_sentences:
+                return "\n".join(f"• {s}" for s in summary_sentences)
+        return ""
+    
+    def _generate_summary(self):
+        """LLM을 사용하여 요약 생성"""
+        self.generate_summary_btn.setEnabled(False)
+        self.generate_summary_btn.setText("⏳ 생성 중...")
+        self.summary_text.setPlainText("요약을 생성하는 중입니다...")
+        
+        # 원본 메시지 내용 가져오기
+        src = _source_message_dict(self.todo)
+        content = ""
+        if src:
+            content = src.get("content") or src.get("body") or ""
+        
+        if not content:
+            content = self.todo.get("description", "")
+        
+        if not content:
+            self.summary_text.setPlainText("요약할 내용이 없습니다.")
+            self.generate_summary_btn.setEnabled(True)
+            self.generate_summary_btn.setText("📋 요약 생성")
+            return
+        
+        try:
+            # LLM 호출
+            summary = self._call_llm_for_summary(content)
+            self.summary_text.setPlainText(summary)
+        except Exception as e:
+            logger.error(f"요약 생성 실패: {e}")
+            self.summary_text.setPlainText(f"요약 생성 중 오류가 발생했습니다:\n{str(e)}")
+        finally:
+            self.generate_summary_btn.setEnabled(True)
+            self.generate_summary_btn.setText("📋 요약 생성")
+    
+    def _generate_reply(self):
+        """LLM을 사용하여 회신 초안 생성"""
+        self.generate_reply_btn.setEnabled(False)
+        self.generate_reply_btn.setText("⏳ 생성 중...")
+        self.reply_text.setVisible(True)
+        self.reply_text.setPlainText("회신 초안을 생성하는 중입니다...")
+        
+        # 원본 메시지 내용 가져오기
+        src = _source_message_dict(self.todo)
+        content = ""
+        sender = ""
+        if src:
+            content = src.get("content") or src.get("body") or ""
+            sender = src.get("sender", "")
+        
+        if not content:
+            content = self.todo.get("description", "")
+        
+        if not content:
+            self.reply_text.setPlainText("회신할 내용이 없습니다.")
+            self.generate_reply_btn.setEnabled(True)
+            self.generate_reply_btn.setText("✉️ 회신 초안 작성")
+            return
+        
+        try:
+            # LLM 호출
+            reply = self._call_llm_for_reply(content, sender)
+            self.reply_text.setPlainText(reply)
+        except Exception as e:
+            logger.error(f"회신 초안 생성 실패: {e}")
+            self.reply_text.setPlainText(f"회신 초안 생성 중 오류가 발생했습니다:\n{str(e)}")
+        finally:
+            self.generate_reply_btn.setEnabled(True)
+            self.generate_reply_btn.setText("✉️ 회신 초안 작성")
+    
+    def _call_llm_for_summary(self, content: str) -> str:
+        """LLM을 호출하여 요약 생성
+        
+        원본 메시지를 3-5개의 불릿 포인트로 간결하게 요약합니다.
+        
+        Args:
+            content: 요약할 메시지 내용 (최대 2000자)
+            
+        Returns:
+            생성된 요약 텍스트
+            
+        Raises:
+            ValueError: LLM 설정이 완료되지 않은 경우
+            requests.RequestException: API 호출 실패 시
+        """
+        provider = (LLM_CONFIG.get("provider") or "azure").lower()
+        
+        system_prompt = "당신은 업무 메시지를 간결하게 요약하는 전문가입니다. 핵심 내용만 3-5개의 불릿 포인트로 요약하세요."
+        user_prompt = f"다음 메시지를 간결하게 요약해주세요:\n\n{content[:2000]}"
+        
+        response_text = self._call_llm(system_prompt, user_prompt, provider)
+        return response_text
+    
+    def _call_llm_for_reply(self, content: str, sender: str) -> str:
+        """LLM을 호출하여 회신 초안 생성
+        
+        원본 메시지를 분석하여 정중하고 명확한 회신 초안을 작성합니다.
+        
+        Args:
+            content: 원본 메시지 내용 (최대 2000자)
+            sender: 발신자 이름
+            
+        Returns:
+            생성된 회신 초안 텍스트
+            
+        Raises:
+            ValueError: LLM 설정이 완료되지 않은 경우
+            requests.RequestException: API 호출 실패 시
+        """
+        provider = (LLM_CONFIG.get("provider") or "azure").lower()
+        
+        system_prompt = "당신은 업무 이메일 회신을 작성하는 전문가입니다. 정중하고 명확한 회신을 작성하세요."
+        user_prompt = f"다음 메시지에 대한 회신 초안을 작성해주세요:\n\n발신자: {sender}\n\n내용:\n{content[:2000]}"
+        
+        response_text = self._call_llm(system_prompt, user_prompt, provider)
+        return response_text
+    
+    def _call_llm(self, system_prompt: str, user_prompt: str, provider: str) -> str:
+        """LLM API 호출 (공통)
+        
+        공급자별로 최적화된 파라미터를 사용하여 LLM API를 호출합니다.
+        
+        Args:
+            system_prompt: 시스템 프롬프트
+            user_prompt: 사용자 프롬프트
+            provider: LLM 공급자 ("azure", "openai", "openrouter")
+            
+        Returns:
+            LLM 응답 텍스트
+            
+        Raises:
+            ValueError: 설정이 완료되지 않았거나 지원되지 않는 공급자인 경우
+            requests.HTTPError: API 호출 실패 시
+            
+        Note:
+            Azure OpenAI는 max_completion_tokens를 사용하고 temperature는 deployment 설정을 따릅니다.
+            OpenAI와 OpenRouter는 max_tokens와 temperature를 명시적으로 설정합니다.
+        """
+        model = LLM_CONFIG.get("model") or "gpt-4"
+        headers: Dict[str, str] = {}
+        url: Optional[str] = None
+        payload_model: Optional[str] = model
+        
+        # 공급자별 API 설정
+        if provider == "azure":
+            api_key = LLM_CONFIG.get("azure_api_key") or os.getenv("AZURE_OPENAI_KEY")
+            endpoint = (LLM_CONFIG.get("azure_endpoint") or os.getenv("AZURE_OPENAI_ENDPOINT") or "").rstrip("/")
+            deployment = LLM_CONFIG.get("azure_deployment") or os.getenv("AZURE_OPENAI_DEPLOYMENT")
+            # 안정적인 API 버전 사용 (2024-08-01-preview 권장)
+            api_version = LLM_CONFIG.get("azure_api_version") or os.getenv("AZURE_OPENAI_API_VERSION") or "2024-08-01-preview"
+            
+            if not api_key or not endpoint or not deployment:
+                raise ValueError("Azure OpenAI 설정이 완료되지 않았습니다. (api_key, endpoint, deployment 필요)")
+            
+            url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+            headers = {"api-key": api_key, "Content-Type": "application/json"}
+            payload_model = None  # Azure는 deployment에서 모델 지정
+        
+        elif provider == "openai":
+            api_key = LLM_CONFIG.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError("OpenAI API 키가 설정되지 않았습니다.")
+            
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        
+        elif provider == "openrouter":
+            api_key = LLM_CONFIG.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY")
+            if not api_key:
+                raise ValueError("OpenRouter API 키가 설정되지 않았습니다.")
+            
+            base_url = LLM_CONFIG.get("openrouter_base_url") or "https://openrouter.ai/api/v1"
+            url = f"{base_url}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+        else:
+            raise ValueError(f"지원되지 않는 LLM 공급자: {provider}")
+        
+        # 기본 페이로드 구성
+        payload: Dict[str, object] = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        
+        # 공급자별 파라미터 설정
+        # Azure: max_completion_tokens 사용, temperature는 deployment 설정 사용
+        # OpenAI/OpenRouter: max_tokens, temperature 명시적 설정
+        if provider == "azure":
+            payload["max_completion_tokens"] = 500
+        else:
+            payload["temperature"] = 0.7
+            payload["max_tokens"] = 500
+        
+        # 모델 지정 (Azure는 deployment에서 지정하므로 제외)
+        if payload_model:
+            payload["model"] = payload_model
+        
+        # API 호출
+        logger.info(f"[TodoDetail][LLM] provider={provider} URL={url[:80]}... 요약/회신 생성 중...")
+        logger.debug(f"[TodoDetail][LLM] payload={json.dumps(payload, ensure_ascii=False)[:300]}")
+        
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            logger.info(f"[TodoDetail][LLM] 응답 수신 (status={response.status_code})")
+            response.raise_for_status()
+        except requests.exceptions.Timeout:
+            logger.error("[TodoDetail][LLM] 타임아웃 (60초 초과)")
+            raise ValueError("LLM 응답 시간이 초과되었습니다 (60초). 잠시 후 다시 시도해주세요.")
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"[TodoDetail][LLM] HTTP 오류: {e.response.status_code} - {e.response.text[:500]}")
+            raise ValueError(f"LLM API 오류 ({e.response.status_code}): {e.response.text[:200]}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[TodoDetail][LLM] API 호출 실패: {type(e).__name__} - {str(e)}")
+            raise ValueError(f"LLM API 호출 실패: {str(e)}")
+        
+        # 응답 파싱
+        try:
+            resp_json = response.json()
+            logger.debug(f"[TodoDetail][LLM] 응답 JSON: {json.dumps(resp_json, ensure_ascii=False)[:500]}")
+        except json.JSONDecodeError as e:
+            logger.error(f"[TodoDetail][LLM] JSON 파싱 실패: {e}")
+            raise ValueError(f"LLM 응답 파싱 실패: {str(e)}")
+        
+        choices = resp_json.get("choices") or []
+        if not choices:
+            logger.error("[TodoDetail][LLM] choices가 비어있음")
+            raise ValueError("LLM 응답이 비어있습니다.")
+        
+        message = choices[0].get("message") or {}
+        content = message.get("content") or ""
+        
+        if not content:
+            logger.error("[TodoDetail][LLM] content가 비어있음")
+            raise ValueError("LLM 응답 내용이 비어있습니다.")
+        
+        logger.info(f"[TodoDetail][LLM] 생성 완료 (길이: {len(content)}자)")
+        return content.strip()
 
 
 

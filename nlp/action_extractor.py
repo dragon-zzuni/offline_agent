@@ -108,12 +108,35 @@ class ActionExtractor:
             "low": ["여유", "편한", "시간"]
         }
     
-    def extract_actions(self, message_data: Dict) -> List[ActionItem]:
-        """메시지에서 액션 추출"""
+    def extract_actions(self, message_data: Dict, user_email: str = "pm.1@quickchat.dev") -> List[ActionItem]:
+        """메시지에서 액션 추출
+        
+        Args:
+            message_data: 메시지 데이터
+            user_email: 사용자(PM) 이메일 주소 (기본값: pm.1@quickchat.dev)
+            
+        Returns:
+            액션 아이템 리스트
+            
+        Note:
+            사용자(PM)에게 **온** 메시지만 TODO로 변환합니다.
+            사용자가 **보낸** 메시지는 제외됩니다.
+        """
         content = message_data.get("body", "") or message_data.get("content", "")
         subject = message_data.get("subject", "")
         sender = message_data.get("sender", "")
+        sender_email = message_data.get("sender_email", "")
         msg_id = message_data.get("msg_id", f"msg_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        
+        # ✅ 중요: 사용자(PM)가 보낸 메시지는 TODO로 만들지 않음
+        if sender_email and sender_email.lower() == user_email.lower():
+            logger.debug(f"⏭️ 사용자가 보낸 메시지 스킵: {msg_id}")
+            return []
+        
+        # 이메일 주소가 없는 경우 sender 이름으로 체크 (chat 메시지)
+        if not sender_email and sender and "kim jihoon" in sender.lower():
+            logger.debug(f"⏭️ 사용자가 보낸 메시지 스킵 (이름 기반): {msg_id}")
+            return []
         
         actions = []
         
@@ -127,7 +150,8 @@ class ActionExtractor:
         # 중복 제거 및 정리
         actions = self._deduplicate_actions(actions)
         
-        logger.info(f"🎯 {len(actions)}개의 액션 추출: {msg_id}")
+        if actions:
+            logger.info(f"🎯 {len(actions)}개의 액션 추출: {msg_id} (발신자: {sender})")
         return actions
     
     def _extract_action_type(self, content: str, subject: str, sender: str, 
@@ -246,27 +270,17 @@ class ActionExtractor:
         return context
     
     def _generate_action_title(self, action_type: str, context: str) -> str:
-        """액션 제목 생성"""
+        """액션 제목 생성 - 한 단어로 간결하게"""
         titles = {
-            "meeting": "미팅 참석",
-            "task": "업무 처리",
-            "deadline": "마감 작업",
-            "review": "문서 검토",
-            "response": "답변 작성"
+            "meeting": "미팅참석",
+            "task": "업무처리",
+            "deadline": "마감작업",
+            "review": "문서검토",
+            "response": "답변작성"
         }
         
-        base_title = titles.get(action_type, "액션 수행")
-        
-        # 문맥에서 구체적인 내용 추출
-        if len(context) > 50:
-            # 첫 번째 문장 추출
-            sentences = context.split('.')
-            if sentences:
-                first_sentence = sentences[0].strip()
-                if len(first_sentence) > 20:
-                    return f"{base_title}: {first_sentence[:50]}..."
-        
-        return base_title
+        # 한 단어로 간결하게 반환
+        return titles.get(action_type, "액션수행")
     
     def _determine_priority(self, text: str) -> str:
         """우선순위 결정"""
@@ -385,13 +399,21 @@ class ActionExtractor:
         
         return unique_actions
     
-    async def batch_extract_actions(self, messages: List[Dict]) -> List[ActionItem]:
-        """여러 메시지에서 액션 일괄 추출"""
+    async def batch_extract_actions(self, messages: List[Dict], user_email: str = "pm.1@quickchat.dev") -> List[ActionItem]:
+        """여러 메시지에서 액션 일괄 추출
+        
+        Args:
+            messages: 메시지 리스트
+            user_email: 사용자(PM) 이메일 주소
+            
+        Returns:
+            액션 아이템 리스트
+        """
         all_actions = []
         
         for message in messages:
             try:
-                actions = self.extract_actions(message)
+                actions = self.extract_actions(message, user_email=user_email)
                 all_actions.extend(actions)
             except Exception as e:
                 logger.error(f"메시지 액션 추출 오류: {e}")

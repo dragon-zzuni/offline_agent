@@ -15,11 +15,30 @@ from pathlib import Path
 
 from datetime import datetime, timezone, timedelta
 from collections import Counter
-import math, uuid, json, sqlite3, time
+import math, uuid, json, sqlite3
 import requests
 
 from PyQt6.QtGui import QFont, QFontDatabase
 from PyQt6.QtWidgets import QApplication, QStyleFactory
+
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+def _make_http_session():
+    retry = Retry(
+        total=3, connect=3, read=3,
+        backoff_factor=0.6,
+        status_forcelist=(502, 503, 504),
+        allowed_methods=("GET", "POST"),
+        raise_on_status=False,
+    )
+    s = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter); s.mount("http://", adapter)
+    return s
+
 
 TODO_DB_PATH = os.path.join("data", "mobile_4week_ko", "todos_cache.db")
 
@@ -59,7 +78,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
     QPushButton, QLabel, QTextEdit, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QGroupBox, QLineEdit, QProgressBar, QStatusBar,
     QFrame, QMessageBox, QStyleFactory, QListWidget, QListWidgetItem,
-    QDialog, QDialogButtonBox, QSizePolicy, QScrollArea)
+    QDialog, QDialogButtonBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QPalette, QColor
 from pathlib import Path
@@ -420,23 +439,12 @@ class SmartAssistantGUI(QMainWindow):
         self.analysis_results: List[Dict] = []
         self.collected_messages: List[Dict] = []
         self.kma_api_key = os.environ.get("KMA_API_KEY")
-        try:
-            connect_timeout = float(os.environ.get("WEATHER_CONNECT_TIMEOUT", "5"))
-        except ValueError:
-            connect_timeout = 5.0
-        try:
-            read_timeout = float(os.environ.get("WEATHER_READ_TIMEOUT", "20"))
-        except ValueError:
-            read_timeout = 20.0
-        self.weather_timeout = (max(1.0, connect_timeout), max(5.0, read_timeout))
-        try:
-            self.weather_retry = max(0, int(os.environ.get("WEATHER_MAX_RETRIES", "1")))
-        except ValueError:
-            self.weather_retry = 1
-        self.latest_top3: List[Dict] = []
         self.init_ui()
         self.setup_timers()
         self.initialize_online_state()
+        # SmartAssistantGUI.__init__() 안
+        self.http = _make_http_session()
+
     
     def init_ui(self):
         """UI 초기화"""
@@ -466,24 +474,27 @@ class SmartAssistantGUI(QMainWindow):
     
     def create_left_panel(self):
         """좌측 패널 생성"""
-        container = QFrame()
-        container.setFrameStyle(QFrame.Shape.StyledPanel)
-        container.setMaximumWidth(360)
-
-        layout = QVBoxLayout(container)
-
+        panel = QFrame()
+        panel.setFrameStyle(QFrame.Shape.StyledPanel)
+        panel.setMaximumWidth(350)
+        
+        layout = QVBoxLayout(panel)
+        
+        # 제목
         title = QLabel("Smart Assistant")
         title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("color: #2c3e50; margin: 10px;")
         layout.addWidget(title)
-
+        
+        # 상태 표시기
         status_group = QGroupBox("연결 상태")
         status_layout = QVBoxLayout(status_group)
-
+        
         self.status_indicator = StatusIndicator()
         status_layout.addWidget(self.status_indicator)
-
+        
+        # 상태 토글 버튼
         self.status_button = QPushButton("오프라인 → 온라인")
         self.status_button.clicked.connect(self.toggle_status)
         self.status_button.setStyleSheet("""
@@ -500,9 +511,10 @@ class SmartAssistantGUI(QMainWindow):
             }
         """)
         status_layout.addWidget(self.status_button)
-
+        
         layout.addWidget(status_group)
-
+        
+        # 데이터셋 정보
         dataset_group = QGroupBox("데이터 소스")
         dataset_layout = QVBoxLayout(dataset_group)
         dataset_layout.addWidget(QLabel("사용 중인 데이터 폴더:"))
@@ -529,10 +541,12 @@ class SmartAssistantGUI(QMainWindow):
         dataset_layout.addWidget(self.reload_dataset_button)
 
         layout.addWidget(dataset_group)
-
+        
+        # 제어 버튼
         control_group = QGroupBox("제어")
         control_layout = QVBoxLayout(control_group)
-
+        
+        # 시작 버튼
         self.start_button = QPushButton("🔄 메시지 수집 시작")
         self.start_button.clicked.connect(self.start_collection)
         self.start_button.setStyleSheet("""
@@ -553,7 +567,8 @@ class SmartAssistantGUI(QMainWindow):
             }
         """)
         control_layout.addWidget(self.start_button)
-
+        
+        # 중지 버튼
         self.stop_button = QPushButton("⏹️ 수집 중지")
         self.stop_button.clicked.connect(self.stop_collection)
         self.stop_button.setEnabled(False)
@@ -575,7 +590,8 @@ class SmartAssistantGUI(QMainWindow):
             }
         """)
         control_layout.addWidget(self.stop_button)
-
+        
+        # 오프라인 정리 버튼
         self.cleanup_button = QPushButton("🧹 오프라인 정리")
         self.cleanup_button.clicked.connect(self.offline_cleanup)
         self.cleanup_button.setStyleSheet("""
@@ -592,33 +608,28 @@ class SmartAssistantGUI(QMainWindow):
             }
         """)
         control_layout.addWidget(self.cleanup_button)
-
+        
         layout.addWidget(control_group)
-
+        
+        # 진행률 표시
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
-
+        
+        # 상태 메시지
         self.status_message = QLabel("준비됨")
         self.status_message.setStyleSheet("color: #666; font-size: 12px; padding: 5px;")
         layout.addWidget(self.status_message)
 
+        # 날씨 위젯
         weather_group = QGroupBox("오늘/내일 날씨")
         weather_layout = QVBoxLayout(weather_group)
-        weather_layout.setContentsMargins(8, 8, 8, 8)
         self.weather_input = QLineEdit()
         self.weather_input.setPlaceholderText("도시 또는 지역 (예: 서울, Seoul)")
         self.weather_input.setText("서울")
-        weather_row = QHBoxLayout()
-        weather_row.setSpacing(6)
-        weather_row.addWidget(self.weather_input, 1)
         self.weather_button = QPushButton("날씨 업데이트")
         self.weather_button.clicked.connect(lambda: self.fetch_weather())
         self.weather_button.setStyleSheet("padding:6px 10px; font-weight:600;")
-        self.weather_button.setFixedHeight(self.weather_input.sizeHint().height())
-        self.weather_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        weather_row.addWidget(self.weather_button)
-        weather_layout.addLayout(weather_row)
         self.daily_summary_button = QPushButton("일일 요약")
         self.daily_summary_button.setStyleSheet("padding:6px 10px; font-weight:600;")
         self.daily_summary_button.clicked.connect(self.show_daily_summary)
@@ -628,15 +639,11 @@ class SmartAssistantGUI(QMainWindow):
         self.weather_status_label = QLabel("위치를 입력하고 업데이트를 눌러주세요.")
         self.weather_status_label.setWordWrap(True)
         self.weather_status_label.setStyleSheet("color:#1F2937; background:#F5F3FF; padding:6px; border-radius:6px;")
-        self.weather_status_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.weather_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.weather_tip_label = QLabel("날씨 팁을 준비 중입니다.")
         self.weather_tip_label.setWordWrap(True)
         self.weather_tip_label.setStyleSheet("color:#4C1D95; background:#F5F3FF; padding:6px; border-radius:6px; font-size:12px;")
-        self.weather_tip_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.weather_tip_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self._adjust_label_height(self.weather_status_label)
-        self._adjust_label_height(self.weather_tip_label)
+        weather_layout.addWidget(self.weather_input)
+        weather_layout.addWidget(self.weather_button)
         weather_layout.addWidget(self.weather_status_label)
         weather_layout.addWidget(self.weather_tip_label)
         layout.addWidget(weather_group)
@@ -646,31 +653,11 @@ class SmartAssistantGUI(QMainWindow):
         summary_layout.addWidget(self.daily_summary_button)
         summary_layout.addWidget(self.weekly_summary_button)
         layout.addWidget(summary_group)
-
-        top3_group = QGroupBox("Top-3 즉시 처리")
-        top3_layout = QVBoxLayout(top3_group)
-        self.top3_summary_label = QLabel()
-        self.top3_summary_label.setWordWrap(True)
-        self.top3_summary_label.setStyleSheet("color:#7C2D12; background:#FEF3C7; padding:6px; border-radius:6px; font-size:12px;")
-        self.top3_summary_label.setTextFormat(Qt.TextFormat.RichText)
-        self.top3_summary_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        self.top3_summary_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.top3_summary_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        self._update_top3_summary_label("<div>Top-3 즉시 처리 항목이 없습니다.</div>")
-        top3_layout.addWidget(self.top3_summary_label)
-        layout.addWidget(top3_group)
-
         QTimer.singleShot(100, lambda: self.fetch_weather("서울"))
+        
         layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(container)
-        scroll.setMinimumWidth(360)
-        scroll.setMaximumWidth(380)
-        return scroll
+        
+        return panel
     
     def mark_dataset_reload_needed(self):
         """데이터셋을 다시 읽도록 표시"""
@@ -1070,39 +1057,6 @@ class SmartAssistantGUI(QMainWindow):
             f"TODO {total}건 · High {high} · Medium {medium} · Low {low} · 추출된 액션 {actions}건"
         )
 
-    def _weather_request(self, url: str, **kwargs) -> requests.Response:
-        """
-        Wi-Fi 환경과 같이 응답이 느려질 수 있는 상황을 고려해
-        요청마다 동일한 타임아웃/재시도 정책을 적용한다.
-        """
-        timeout = kwargs.pop("timeout", None) or self.weather_timeout
-        attempts = max(1, self.weather_retry + 1)
-        last_error: Optional[Exception] = None
-        for attempt in range(attempts):
-            try:
-                return requests.get(url, timeout=timeout, **kwargs)
-            except requests.Timeout as exc:
-                last_error = exc
-                if attempt + 1 >= attempts:
-                    raise
-                time.sleep(1.0 * (attempt + 1))
-        if last_error:
-            raise last_error
-        raise RuntimeError("weather request failed without raising timeout")
-
-    def _adjust_label_height(self, label: QLabel) -> None:
-        if not label:
-            return
-        label.ensurePolished()
-        hint_height = label.sizeHint().height()
-        width = max(0, label.width())
-        if label.wordWrap() and width > 0:
-            hint_height = max(hint_height, label.heightForWidth(width))
-        if hint_height <= 0:
-            hint_height = 24
-        label.setMinimumHeight(hint_height + 6)
-        label.setMaximumHeight(16777215)
-
     def _fetch_weather_from_kma(self, location: str) -> bool:
         grid = None
         resolved_name = location
@@ -1143,7 +1097,18 @@ class SmartAssistantGUI(QMainWindow):
             "nx": nx,
             "ny": ny,
         }
-        resp = self._weather_request(service_url, params=params)
+                # KMA
+        resp = self.http.get(service_url, params=params, timeout=(3.05, 20))
+
+        # geocoding
+        geo_resp = self.http.get("https://geocoding-api.open-meteo.com/v1/search",
+                                params={...}, timeout=(3.05, 20))
+
+        # forecast
+        forecast_resp = self.http.get("https://api.open-meteo.com/v1/forecast",
+                                    params={...}, timeout=(3.05, 20))
+
+        resp = requests.get(service_url, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         items = (
@@ -1195,8 +1160,6 @@ class SmartAssistantGUI(QMainWindow):
             f"내일 오전 {fmt_temp(temp_tomorrow)} · {tomorrow_desc}"
         )
         self.weather_tip_label.setText(self._weather_tip(temp_tomorrow, pty_code=pty_tomorrow))
-        self._adjust_label_height(self.weather_status_label)
-        self._adjust_label_height(self.weather_tip_label)
         return True
 
     def fetch_weather(self, preset_location: Optional[str] = None):
@@ -1209,15 +1172,10 @@ class SmartAssistantGUI(QMainWindow):
             QMessageBox.warning(self, "입력 오류", "지역을 입력해주세요.")
             return
         self.weather_status_label.setText("날씨 정보를 불러오는 중입니다...")
-        self._adjust_label_height(self.weather_status_label)
         if self.kma_api_key:
             try:
                 if self._fetch_weather_from_kma(location):
                     return
-            except requests.Timeout as exc:
-                print(f"[weather] KMA timeout: {exc}")
-                self.weather_status_label.setText("기상청 API 응답이 지연되어 다른 서비스로 전환합니다...")
-                self._adjust_label_height(self.weather_status_label)
             except Exception as exc:
                 print(f"[weather] KMA fetch error: {exc}")
         try:
@@ -1228,9 +1186,10 @@ class SmartAssistantGUI(QMainWindow):
                 candidates.append(alias)
             for candidate in candidates:
                 for lang in ("ko", "en"):
-                    geo_resp = self._weather_request(
+                    geo_resp = requests.get(
                         "https://geocoding-api.open-meteo.com/v1/search",
                         params={"name": candidate, "count": 1, "language": lang, "format": "json"},
+                        timeout=10,
                     )
                     geo_resp.raise_for_status()
                     geo_json = geo_resp.json()
@@ -1242,15 +1201,13 @@ class SmartAssistantGUI(QMainWindow):
             if not results:
                 self.weather_status_label.setText("해당 위치를 찾을 수 없습니다. 영어/한국어 표기로 다시 시도해 주세요.")
                 self.weather_tip_label.setText("날씨 팁을 불러오지 못했습니다. 기본적으로 우산과 마스크를 준비해 주세요.")
-                self._adjust_label_height(self.weather_status_label)
-                self._adjust_label_height(self.weather_tip_label)
                 return
             top = results[0]
             lat = top.get("latitude")
             lon = top.get("longitude")
             resolved_name = ", ".join(filter(None, [top.get("name"), top.get("country")]))
 
-            forecast_resp = self._weather_request(
+            forecast_resp = requests.get(
                 "https://api.open-meteo.com/v1/forecast",
                 params={
                     "latitude": lat,
@@ -1260,6 +1217,7 @@ class SmartAssistantGUI(QMainWindow):
                     "forecast_days": 2,
                     "timezone": "auto",
                 },
+                timeout=10,
             )
             forecast_resp.raise_for_status()
             forecast_json = forecast_resp.json()
@@ -1279,25 +1237,13 @@ class SmartAssistantGUI(QMainWindow):
                 f"내일 오전 {tomorrow_temp_text} · {tomorrow_desc}"
             )
             self.weather_tip_label.setText(self._weather_tip(tomorrow_temp, weather_code=tomorrow_code))
-            self._adjust_label_height(self.weather_status_label)
-            self._adjust_label_height(self.weather_tip_label)
-        except requests.Timeout as exc:
-            self.weather_status_label.setText("날씨 API 응답이 지연되고 있습니다. 네트워크 상태를 확인한 뒤 다시 시도해주세요.")
-            self.weather_tip_label.setText("네트워크 지연으로 인해 날씨 팁을 불러오지 못했습니다.")
-            self._adjust_label_height(self.weather_status_label)
-            self._adjust_label_height(self.weather_tip_label)
-            print(f"[weather] timeout: {exc}")
         except requests.RequestException as exc:
             self.weather_status_label.setText("날씨 정보를 가져오지 못했습니다.")
             self.weather_tip_label.setText("날씨 팁을 불러오지 못했습니다. 기본적으로 우산과 마스크를 준비해 주세요.")
-            self._adjust_label_height(self.weather_status_label)
-            self._adjust_label_height(self.weather_tip_label)
             print(f"[weather] request error: {exc}")
         except Exception as exc:
             self.weather_status_label.setText("날씨 정보를 처리하는 중 오류가 발생했습니다.")
             self.weather_tip_label.setText("날씨 팁을 불러오지 못했습니다. 기본적으로 우산과 마스크를 준비해 주세요.")
-            self._adjust_label_height(self.weather_status_label)
-            self._adjust_label_height(self.weather_tip_label)
             print(f"[weather] parse error: {exc}")
 
     def _describe_kma_weather(self, sky: Optional[str], pty: Optional[str]) -> str:
@@ -1613,7 +1559,6 @@ class SmartAssistantGUI(QMainWindow):
                 except Exception as e:
                     if hasattr(self, "status_message"):
                         self.status_message.setText(f"DB 저장 경고: {e}")
-                    QMessageBox.warning(self, "DB 저장 경고", f"TODO 데이터를 저장하는 중 문제가 발생했습니다.\n\n{e}")
             else:
                 if hasattr(self, "status_message"):
                     self.status_message.setText("이번 수집에서 새로운 TODO가 없어 이전 목록을 유지합니다.")
@@ -1634,50 +1579,9 @@ class SmartAssistantGUI(QMainWindow):
         else:
             QMessageBox.critical(self, "오류", "수집 중 오류가 발생했습니다.")
 
-    def _update_top3_summary_label(self, html: str) -> None:
-        if not hasattr(self, "top3_summary_label"):
-            return
-        self.top3_summary_label.setText(html)
-        self._adjust_label_height(self.top3_summary_label)
-
     def _on_top3_updated(self, top3: list[dict]) -> None:
-        self.latest_top3 = list(top3 or [])
-        if not hasattr(self, "top3_summary_label"):
+        if not hasattr(self, "todo_panel"):
             return
-        if not top3:
-            self._update_top3_summary_label("<div>Top-3 즉시 처리 항목이 없습니다.</div>")
-            return
-
-        items_html: List[str] = []
-        for idx, todo in enumerate(top3[:3], start=1):
-            title = (todo.get("title") or "(제목 없음)").strip()
-            if len(title) > 40:
-                title = title[:37] + "..."
-            priority = (todo.get("priority") or "low").capitalize()
-            deadline = todo.get("deadline") or todo.get("deadline_ts")
-            requester = todo.get("requester")
-            detail_parts: List[str] = []
-            if deadline:
-                detail_parts.append(f"마감 {deadline}")
-            if requester:
-                detail_parts.append(f"요청자 {requester}")
-            detail_html = ""
-            if detail_parts:
-                detail_html = (
-                    "<br/><span style='color:#4B5563;'>"
-                    + " · ".join(detail_parts)
-                    + "</span>"
-                )
-            items_html.append(
-                f"<li><span style='font-weight:600;'>{idx}. [{priority}]</span> {title}{detail_html}</li>"
-            )
-        self._update_top3_summary_label(
-            "<ol style='margin:0 0 0 16px; padding:0; font-size:12px;'>"
-            + "".join(items_html)
-            + "</ol>"
-        )
-        if hasattr(self, "status_bar"):
-            self.status_bar.showMessage(f"Top-3 즉시 처리 카드 {len(top3)}건 업데이트", 5000)
     
     def handle_error(self, error_message):
         """오류 처리"""
@@ -1777,7 +1681,7 @@ class SmartAssistantGUI(QMainWindow):
         
         event.accept()
 
-class Chip(QLabel):
+class Chip(QLabel):timer
     def __init__(self, text, bg="#E5E7EB", fg="#111827"):
         super().__init__(text)
         self.setProperty("chip", True)

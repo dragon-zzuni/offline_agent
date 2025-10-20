@@ -6,7 +6,7 @@ import asyncio
 import logging
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
 import functools
@@ -455,6 +455,119 @@ class MessageSummarizer:
             meeting_info["location"] = location_matches[0]
         
         return meeting_info
+    
+    async def summarize_group(
+        self,
+        messages: List[Dict],
+        group_label: str = ""
+    ) -> Dict[str, Any]:
+        """
+        그룹화된 메시지들을 통합하여 요약
+        이메일과 메신저 메시지를 모두 포함하여 처리
+        
+        Args:
+            messages: 그룹 내 메시지 리스트
+            group_label: 그룹 레이블 (예: "2025-01-15", "2025년 1월 3주차")
+            
+        Returns:
+            요약 정보 딕셔너리
+        """
+        if not messages:
+            return {
+                "summary": "",
+                "key_points": [],
+                "decisions": [],
+                "unresolved": [],
+                "risks": [],
+                "action_items": []
+            }
+        
+        # 메시지 타입별 분류
+        email_messages = [m for m in messages if m.get("type") == "email"]
+        messenger_messages = [m for m in messages if m.get("type") == "messenger"]
+        
+        logger.info(
+            f"📝 그룹 요약 시작 ({group_label}): "
+            f"이메일 {len(email_messages)}건, 메신저 {len(messenger_messages)}건"
+        )
+        
+        # 통합 요약 생성 (대화 요약 메서드 활용)
+        summary_result = await self.summarize_conversation(messages)
+        
+        # 추가 메타데이터 포함
+        summary_result["group_label"] = group_label
+        summary_result["total_messages"] = len(messages)
+        summary_result["email_count"] = len(email_messages)
+        summary_result["messenger_count"] = len(messenger_messages)
+        
+        return summary_result
+    
+    async def batch_summarize_groups(
+        self,
+        grouped_messages: Dict[str, List[Dict]],
+        unit: str = "daily"
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        여러 그룹의 메시지를 동시에 요약
+        
+        Args:
+            grouped_messages: 그룹 키를 키로 하는 메시지 그룹 딕셔너리
+            unit: 그룹화 단위 ("daily", "weekly", "monthly")
+            
+        Returns:
+            그룹 키를 키로 하는 요약 결과 딕셔너리
+        """
+        if not grouped_messages:
+            return {}
+        
+        logger.info(f"📊 {len(grouped_messages)}개 그룹 요약 시작 (단위: {unit})")
+        
+        # 동시 실행 제한
+        CONCURRENCY = 3
+        sem = asyncio.Semaphore(CONCURRENCY)
+        
+        results: Dict[str, Dict[str, Any]] = {}
+        
+        async def summarize_one_group(group_key: str, messages: List[Dict]):
+            try:
+                async with sem:
+                    # 그룹 레이블 생성
+                    if unit == "daily":
+                        label = f"{group_key} (일별)"
+                    elif unit == "weekly":
+                        label = f"{group_key} 주 (주별)"
+                    elif unit == "monthly":
+                        label = f"{group_key} (월별)"
+                    else:
+                        label = group_key
+                    
+                    summary = await self.summarize_group(messages, label)
+                    results[group_key] = summary
+                    
+            except Exception as e:
+                logger.error(f"그룹 요약 오류 ({group_key}): {e}")
+                results[group_key] = {
+                    "summary": f"요약 생성 실패: {str(e)}",
+                    "key_points": [],
+                    "decisions": [],
+                    "unresolved": [],
+                    "risks": [],
+                    "action_items": [],
+                    "group_label": group_key,
+                    "total_messages": len(messages),
+                    "email_count": sum(1 for m in messages if m.get("type") == "email"),
+                    "messenger_count": sum(1 for m in messages if m.get("type") == "messenger")
+                }
+        
+        # 모든 그룹 동시 요약
+        tasks = [
+            summarize_one_group(group_key, messages)
+            for group_key, messages in grouped_messages.items()
+        ]
+        await asyncio.gather(*tasks)
+        
+        logger.info(f"✅ {len(results)}개 그룹 요약 완료")
+        return results
 
 
 # 테스트 함수

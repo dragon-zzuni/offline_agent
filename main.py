@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
 from nlp.draft import build_email_draft
+from utils.datetime_utils import parse_iso_datetime, is_in_time_range, ensure_utc_aware
 
 # 프로젝트 루트를 Python 경로에 추가
 project_root = Path(__file__).parent
@@ -408,13 +409,165 @@ class SmartAssistant:
         _include_system: bool = False,
         overall_limit: Optional[int] = None,
         force_reload: bool = False,
+        time_range: Optional[Dict[str, Any]] = None,
     ):
-        """오프라인 데이터셋에서 메시지를 수집한 뒤 공통 포맷으로 반환"""
+        """오프라인 데이터셋에서 메시지를 수집한 뒤 공통 포맷으로 반환
+        
+        Args:
+            email_limit: 이메일 최대 개수
+            messenger_limit: 메신저 최대 개수
+            json_limit: JSON 최대 개수 (하위 호환)
+            _rooms: 룸 필터 (사용 안 함)
+            _include_system: 시스템 메시지 포함 여부
+            overall_limit: 전체 메시지 최대 개수
+            force_reload: 강제 리로드 여부
+            time_range: 시간 범위 필터 {"start": datetime, "end": datetime}
+        """
         logger.info("📥 메시지 수집 시작 (mobile_4week_ko)")
         self._ensure_dataset(force_reload=force_reload)
 
         chat_messages = list(self._chat_messages)
         email_messages = list(self._email_messages)
+
+        # PM 수신 메시지 필터링 (성능 최적화)
+        pm_email = (self.user_profile or {}).get("email_address", "pm.1@quickchat.dev").lower()
+        pm_handle = (self.user_profile or {}).get("chat_handle", "pm").lower()
+        
+        logger.info(f"👤 PM 필터링: email={pm_email}, handle={pm_handle}")
+        
+        def _is_pm_recipient(msg: Dict[str, Any]) -> bool:
+            """PM이 수신자인지 확인"""
+            msg_type = msg.get("type", "")
+            
+            if msg_type == "email":
+                # 이메일: to, cc, bcc에 PM이 포함되어 있는지 확인
+                recipients = msg.get("recipients", []) or []
+                cc = msg.get("cc", []) or []
+                bcc = msg.get("bcc", []) or []
+                all_recipients = [r.lower() for r in (recipients + cc + bcc)]
+                return pm_email in all_recipients
+            
+            elif msg_type == "messenger":
+                # 메신저: room_slug에 PM handle이 포함되어 있는지 확인
+                # dm:designer:dev → PM(dev)이 아니므로 제외
+                # dm:pm:designer → PM이 포함되므로 포함
+                room_slug = (msg.get("room_slug") or "").lower()
+                
+                # DM 룸인 경우 PM handle이 포함되어 있는지 확인
+                if room_slug.startswith("dm:"):
+                    room_parts = room_slug.split(":")
+                    return pm_handle in room_parts
+                
+                # 그룹 채팅은 일단 포함 (추후 개선 가능)
+                return True
+            
+            return False
+        
+        # PM 수신 메시지만 필터링
+        original_chat_count = len(chat_messages)
+        original_email_count = len(email_messages)
+        
+        chat_messages = [m for m in chat_messages if _is_pm_recipient(m)]
+        email_messages = [m for m in email_messages if _is_pm_recipient(m)]
+        
+        logger.info(
+            "👤 PM 수신 메시지 필터링 완료: chat %d→%d, email %d→%d",
+            original_chat_count, len(chat_messages),
+            original_email_count, len(email_messages)
+        )
+        
+        # 시간 범위 필터링
+        if time_range:
+            start_time = ensure_utc_aware(time_range.get("start"))
+            end_time = ensure_utc_aware(time_range.get("end"))
+            
+            # 시작 또는 종료 시간이 지정된 경우에만 필터링 수행
+            if start_time or end_time:
+                logger.info(
+                    "⏰ 시간 범위 필터링 시작: %s ~ %s",
+                    start_time.isoformat() if start_time else "제한없음",
+                    end_time.isoformat() if end_time else "제한없음"
+                )
+                
+                # 첫 번째 메시지로 디버깅
+                if chat_messages:
+                    first_msg = chat_messages[0]
+                    first_date = parse_iso_datetime(first_msg.get("date", ""))
+                    logger.info(
+                        "🔍 첫 번째 chat 메시지 날짜: %s (원본: %s)",
+                        first_date.isoformat() if first_date else "None",
+                        first_msg.get("date", "")
+                    )
+                
+                if email_messages:
+                    first_msg = email_messages[0]
+                    first_date = parse_iso_datetime(first_msg.get("date", ""))
+                    logger.info(
+                        "🔍 첫 번째 email 메시지 날짜: %s (원본: %s)",
+                        first_date.isoformat() if first_date else "None",
+                        first_msg.get("date", "")
+                    )
+                
+                def _filter_by_time_range(msg: Dict[str, Any]) -> bool:
+                    """메시지가 지정된 시간 범위 내에 있는지 확인
+                    
+                    Args:
+                        msg: 메시지 딕셔너리
+                        
+                    Returns:
+                        시간 범위 내에 있으면 True, 그렇지 않으면 False
+                    """
+                    try:
+                        # 메시지 날짜를 datetime 객체로 변환
+                        msg_date = parse_iso_datetime(msg.get("date", ""))
+                        if not msg_date:
+                            logger.debug(f"날짜 파싱 실패: {msg.get('msg_id')} - date={msg.get('date')}")
+                            return False
+                        
+                        # 시간 범위 체크 (유틸리티 함수 사용)
+                        result = is_in_time_range(msg_date, start_time, end_time)
+                        
+                        # 처음 몇 개만 상세 로그
+                        if not hasattr(_filter_by_time_range, 'log_count'):
+                            _filter_by_time_range.log_count = 0
+                        
+                        if _filter_by_time_range.log_count < 3:
+                            logger.info(
+                                "🔍 메시지 필터링: %s | 날짜=%s | 범위=(%s ~ %s) | 결과=%s",
+                                msg.get('msg_id', 'unknown')[:30],
+                                msg_date.isoformat(),
+                                start_time.isoformat() if start_time else "None",
+                                end_time.isoformat() if end_time else "None",
+                                "포함" if result else "제외"
+                            )
+                            _filter_by_time_range.log_count += 1
+                        
+                        return result
+                    except Exception as e:
+                        # 날짜 파싱 실패 시 제외
+                        logger.debug(f"날짜 필터링 예외: {msg.get('msg_id')} - {e}")
+                        return False
+                
+                # 필터링 전 메시지 수 기록
+                original_chat_count = len(chat_messages)
+                original_email_count = len(email_messages)
+                
+                # 시간 범위 내의 메시지만 필터링
+                chat_messages = [m for m in chat_messages if _filter_by_time_range(m)]
+                email_messages = [m for m in email_messages if _filter_by_time_range(m)]
+                
+                logger.info(
+                    "⏰ 시간 범위 필터링 완료: chat %d→%d, email %d→%d",
+                    original_chat_count, len(chat_messages),
+                    original_email_count, len(email_messages)
+                )
+                
+                # 필터링 후 메시지가 없으면 경고
+                if len(chat_messages) == 0 and len(email_messages) == 0:
+                    logger.warning(
+                        "⚠️ 시간 범위 내에 메시지가 없습니다. "
+                        "시간 범위를 확인하거나 '전체 기간' 옵션을 선택하세요."
+                    )
 
         def _apply_limit(items: List[Dict[str, Any]], limit: Optional[int]) -> List[Dict[str, Any]]:
             if not limit:
@@ -442,17 +595,6 @@ class SmartAssistant:
             len(email_messages),
         )
         return self.collected_messages
-        # 4) 최신순 정렬 → 전체 상한
-        all_messages = coalesce_messages(all_messages, window_seconds=90, max_chars=1200)
-        all_messages.sort(key=_sort_key, reverse=True)
-
-        if overall_limit:
-            all_messages = all_messages[:overall_limit]
-
-        self.collected_messages = all_messages
-        logger.info(f"📥 총 {len(all_messages)}개 메시지 수집 완료")
-        return all_messages
-    # main.py (핵심 흐름 정리 예시)
 
     async def analyze_messages(self):
         if not self.collected_messages:
@@ -465,7 +607,8 @@ class SmartAssistant:
         logger.info("🎯 우선순위 분류 중...")
         self.ranked_messages = await self.priority_ranker.rank_messages(self.collected_messages)
 
-        TOP_N = 60
+        # 성능 개선: 상위 20개만 요약 (TODO 생성에 필요한 핵심 메시지만)
+        TOP_N = 20
         top_msgs = [m for (m, _) in self.ranked_messages][:TOP_N]
 
         # 2) 상위 N개 요약
@@ -479,9 +622,10 @@ class SmartAssistant:
                 s.original_id = m.get("msg_id")
             summary_by_id[m["msg_id"]] = s
 
-        # 3) 액션 추출
+        # 3) 액션 추출 (사용자 이메일 전달)
         logger.info("⚡ 액션 추출 중...")
-        actions = await self.action_extractor.batch_extract_actions(top_msgs)
+        user_email = (self.user_profile or {}).get("email_address", "pm.1@quickchat.dev")
+        actions = await self.action_extractor.batch_extract_actions(top_msgs, user_email=user_email)
         self.extracted_actions = actions
 
         actions_by_id = {}
@@ -506,29 +650,34 @@ class SmartAssistant:
                 "analysis_timestamp": datetime.now().isoformat()
             })
 
-        # 5) 전체 메시지(메신저+이메일) 요약 텍스트 생성
+        # 5) 전체 메시지 요약 (성능 개선: 메시지가 많을 경우 스킵)
         conv_text = ""
         self.conversation_summary = None
-        try:
-            all_msgs = sorted(self.collected_messages, key=_sort_key)
-            if all_msgs:
-                conv = await self.summarizer.summarize_conversation(all_msgs)
-                summary_line = ""
-                if isinstance(conv, dict):
-                    self.conversation_summary = conv
-                    summary_line = conv.get("summary", "") or ""
-                elif hasattr(conv, "summary"):
-                    summary_line = getattr(conv, "summary", "") or ""
-                    maybe_dict = getattr(conv, "__dict__", None)
-                    if isinstance(maybe_dict, dict):
-                        self.conversation_summary = maybe_dict
-                elif isinstance(conv, str):
-                    summary_line = conv
-                summary_line = (summary_line or "").strip()
-                if summary_line:
-                    conv_text = "■ 대화 흐름 요약\n" + ("═" * 60) + f"\n{summary_line}"
-        except Exception as e:
-            logger.warning(f"대화 요약 실패: {e}")
+        
+        # 메시지가 50개 이하일 때만 전체 대화 요약 수행
+        if len(self.collected_messages) <= 50:
+            try:
+                all_msgs = sorted(self.collected_messages, key=_sort_key)
+                if all_msgs:
+                    conv = await self.summarizer.summarize_conversation(all_msgs)
+                    summary_line = ""
+                    if isinstance(conv, dict):
+                        self.conversation_summary = conv
+                        summary_line = conv.get("summary", "") or ""
+                    elif hasattr(conv, "summary"):
+                        summary_line = getattr(conv, "summary", "") or ""
+                        maybe_dict = getattr(conv, "__dict__", None)
+                        if isinstance(maybe_dict, dict):
+                            self.conversation_summary = maybe_dict
+                    elif isinstance(conv, str):
+                        summary_line = conv
+                    summary_line = (summary_line or "").strip()
+                    if summary_line:
+                        conv_text = "■ 대화 흐름 요약\n" + ("═" * 60) + f"\n{summary_line}"
+            except Exception as e:
+                logger.warning(f"대화 요약 실패: {e}")
+        else:
+            logger.info(f"메시지가 {len(self.collected_messages)}개로 많아 전체 대화 요약을 스킵합니다.")
 
 
         # 6) 분석 결과 탭 텍스트 생성 (우선순위 섹션 포함)
@@ -709,24 +858,47 @@ class SmartAssistant:
         dataset_config: Optional[Dict[str, Any]] = None,
         collect_options: Optional[Dict[str, Any]] = None,
     ) -> Dict:
-        """전체 사이클 실행"""
+        """전체 사이클 실행
+        
+        데이터셋 초기화부터 TODO 생성까지 전체 워크플로우를 실행합니다.
+        
+        Args:
+            dataset_config: 데이터셋 설정 딕셔너리
+            collect_options: 메시지 수집 옵션 딕셔너리
+            
+        Returns:
+            실행 결과 딕셔너리:
+            - success (bool): 성공 여부
+            - todo_list (Dict): 생성된 TODO 리스트
+            - analysis_results (List[Dict]): 분석 결과 리스트
+            - collected_messages (int): 수집된 메시지 수
+            - messages (List[Dict]): 수집된 메시지 원본 데이터 (v1.1.1+)
+            - error (str): 오류 메시지 (실패 시)
+        """
         try:
+            # 데이터셋 초기화
             await self.initialize(dataset_config)
 
+            # 메시지 수집
             collect_kwargs = collect_options or {}
             messages = await self.collect_messages(**collect_kwargs)
 
             if not messages:
                 return {"error": "수집된 메시지가 없습니다."}
 
+            # 메시지 분석
             analysis_results = await self.analyze_messages()
+            
+            # TODO 생성
             todo_list = await self.generate_todo_list(analysis_results)
 
+            # 결과 반환
             return {
                 "success": True,
                 "todo_list": todo_list,
                 "analysis_results": analysis_results,
                 "collected_messages": len(messages),
+                "messages": messages,  # GUI에서 사용 (v1.1.1+)
             }
 
         except Exception as e:
@@ -780,7 +952,7 @@ async def test_smart_assistant():
 
 if __name__ == "__main__":
     # 간단한 테스트 실행
-    print("Smart Assistant v1.0")
+    print("Smart Assistant v1.1.5")
     print("=" * 50)
     
     # 환경변수 확인
