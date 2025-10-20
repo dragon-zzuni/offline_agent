@@ -98,8 +98,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
     QPushButton, QLabel, QTextEdit, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QGroupBox, QLineEdit, QProgressBar, QStatusBar,
     QFrame, QMessageBox, QStyleFactory, QListWidget, QListWidgetItem,
-    QDialog, QDialogButtonBox, QScrollArea)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+    QDialog, QDialogButtonBox, QScrollArea, QSizePolicy)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QEvent
 from PyQt6.QtGui import QFont, QPalette, QColor
 from pathlib import Path
 import asyncio, json, os, sys
@@ -779,9 +779,11 @@ class SmartAssistantGUI(QMainWindow):
                 background-color: #F9FAFB;
             }
         """)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
         # 내용 컨테이너
         content_widget = QWidget()
+        content_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(Spacing.MD, Spacing.MD, Spacing.MD, Spacing.MD)
         content_layout.setSpacing(Spacing.SM)
@@ -791,6 +793,7 @@ class SmartAssistantGUI(QMainWindow):
         current_section = None
         section_widget = None
         section_layout = None
+        content_labels: List[QLabel] = []
         
         for line in lines:
             line = line.strip()
@@ -811,6 +814,7 @@ class SmartAssistantGUI(QMainWindow):
                         border: 1px solid {Colors.BORDER_LIGHT};
                     }}
                 """)
+                section_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
                 section_layout = QVBoxLayout(section_widget)
                 section_layout.setContentsMargins(Spacing.MD, Spacing.SM, Spacing.MD, Spacing.SM)
                 section_layout.setSpacing(Spacing.XS)
@@ -833,6 +837,7 @@ class SmartAssistantGUI(QMainWindow):
                             border: 1px solid {Colors.BORDER_LIGHT};
                         }}
                     """)
+                    section_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
                     section_layout = QVBoxLayout(section_widget)
                     section_layout.setContentsMargins(Spacing.MD, Spacing.SM, Spacing.MD, Spacing.SM)
                     section_layout.setSpacing(Spacing.XS)
@@ -841,7 +846,10 @@ class SmartAssistantGUI(QMainWindow):
                 content_label.setFont(QFont(Fonts.FAMILY, Fonts.SIZE_SM))
                 content_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; padding: 2px 0;")
                 content_label.setWordWrap(True)
+                content_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+                content_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
                 section_layout.addWidget(content_label)
+                content_labels.append(content_label)
         
         # 마지막 섹션 추가
         if section_widget:
@@ -850,6 +858,23 @@ class SmartAssistantGUI(QMainWindow):
         content_layout.addStretch()
         scroll.setWidget(content_widget)
         layout.addWidget(scroll)
+        
+        class _WrapHelper(QObject):
+            def __init__(self, labels, padding):
+                super().__init__()
+                self.labels = labels
+                self.padding = padding
+            
+            def eventFilter(self, obj, event):
+                if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+                    available = max(obj.width() - self.padding * 2, 200)
+                    for lbl in self.labels:
+                        lbl.setMaximumWidth(available)
+                return False
+        
+        wrap_helper = _WrapHelper(content_labels, Spacing.MD)
+        scroll.viewport().installEventFilter(wrap_helper)
+        dialog._wrap_helper = wrap_helper  # keep reference
         
         # 하단 버튼
         button_container = QWidget()
