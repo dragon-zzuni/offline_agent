@@ -6,7 +6,7 @@ MessageSummaryPanel - 메시지 요약 패널
 """
 
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
@@ -284,7 +284,6 @@ class MessageSummaryPanel(QWidget):
             QFrame:hover {{
                 border-color: {Colors.BORDER_MEDIUM};
                 background-color: {Colors.GRAY_50};
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
             }}
         """)
         
@@ -406,11 +405,13 @@ class MessageSummaryPanel(QWidget):
             return start.strftime("%Y년 %m월 %d일 (%a)")
         elif unit == "weekly":
             if end:
-                # 주간: 시작일 ~ 종료일 (년도 포함)
-                if start.year == end.year:
-                    return f"{start.strftime('%Y년 %m/%d')} ~ {end.strftime('%m/%d')}"
+                # 주간: 시작일 ~ 종료일 (실제 마지막 날짜 표시)
+                # end는 다음 주 월요일 직전이므로 하루 빼기
+                actual_end = end - timedelta(days=1) if end.hour == 23 else end
+                if start.year == actual_end.year:
+                    return f"{start.strftime('%Y년 %m/%d')} ~ {actual_end.strftime('%m/%d')}"
                 else:
-                    return f"{start.strftime('%Y년 %m/%d')} ~ {end.strftime('%Y년 %m/%d')}"
+                    return f"{start.strftime('%Y년 %m/%d')} ~ {actual_end.strftime('%Y년 %m/%d')}"
             return start.strftime("%Y년 %W주차")
         elif unit == "monthly":
             # 월별: 년도와 월만 표시

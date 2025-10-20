@@ -91,6 +91,9 @@ if sys.platform == "win32":
     os.environ['PYTHONIOENCODING'] = 'utf-8'
     os.environ['PYTHONUTF8'] = '1'
 
+# Qt CSS 경고 억제 (box-shadow 등 지원하지 않는 속성)
+os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.qpa.*=false'
+
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QGroupBox, QLineEdit, QProgressBar, QStatusBar,
@@ -1575,13 +1578,25 @@ class SmartAssistantGUI(QMainWindow):
         메시지를 새로운 단위로 그룹화하고 요약을 업데이트합니다.
         
         Args:
-            unit: 요약 단위 ("day", "week", "month")
+            unit: 요약 단위 ("daily", "weekly", "monthly")
         """
         if not self.collected_messages:
+            self.status_message.setText("메시지를 먼저 수집해주세요.")
             return
         
+        # 단위 변환: "daily" → "day", "weekly" → "week", "monthly" → "month"
+        unit_map = {"daily": "day", "weekly": "week", "monthly": "month"}
+        converted_unit = unit_map.get(unit, "day")
+        
+        # 로그 출력
+        unit_name_kr = {"day": "일별", "week": "주별", "month": "월별"}.get(converted_unit, converted_unit)
+        logger.info(f"📊 요약 단위 변경: {unit_name_kr}")
+        self.status_message.setText(f"{unit_name_kr} 요약으로 전환 중...")
+        
         # 메시지 그룹화 및 요약 업데이트
-        self._update_message_summaries(unit)
+        self._update_message_summaries(converted_unit)
+        
+        self.status_message.setText(f"{unit_name_kr} 요약 표시 완료")
     
     def _update_message_summaries(self, unit: str = "day"):
         """메시지 그룹화 및 요약 생성

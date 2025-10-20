@@ -627,11 +627,12 @@ class SmartAssistant:
         self.ranked_messages = await self.priority_ranker.rank_messages(self.collected_messages)
 
         # 성능 개선: 상위 20개만 요약 (TODO 생성에 필요한 핵심 메시지만)
+        # 참고: 전체 메시지는 수집되었으며, 우선순위가 높은 상위 20개만 상세 분석합니다
         TOP_N = 20
         top_msgs = [m for (m, _) in self.ranked_messages][:TOP_N]
 
         # 2) 상위 N개 요약
-        logger.info(f"📝 상위 {TOP_N}개 메시지 요약 중...")
+        logger.info(f"📝 우선순위 상위 {TOP_N}개 메시지 상세 분석 중... (전체 {len(self.collected_messages)}건 수집 완료)")
         self.summaries = await self.summarizer.batch_summarize(top_msgs)
 
         # msg_id → summary 맵
