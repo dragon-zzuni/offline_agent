@@ -289,7 +289,6 @@ class MessageSummaryPanel(QWidget):
             QFrame:hover {{
                 border-color: {Colors.BORDER_MEDIUM};
                 background-color: {Colors.GRAY_50};
-                cursor: pointer;
             }}
         """)
         

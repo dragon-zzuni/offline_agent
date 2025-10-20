@@ -98,7 +98,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
     QPushButton, QLabel, QTextEdit, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QGroupBox, QLineEdit, QProgressBar, QStatusBar,
     QFrame, QMessageBox, QStyleFactory, QListWidget, QListWidgetItem,
-    QDialog, QDialogButtonBox)
+    QDialog, QDialogButtonBox, QScrollArea)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QPalette, QColor
 from pathlib import Path
@@ -741,17 +741,143 @@ class SmartAssistantGUI(QMainWindow):
     #             return None
 
     def _show_summary_popup(self, title: str, text: str) -> None:
+        """요약 다이얼로그 표시 (개선된 UI)"""
+        from ui.styles import Colors, Fonts, FontSizes, FontWeights, Spacing, BorderRadius
+        
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
+        dialog.setMinimumSize(600, 500)
+        
         layout = QVBoxLayout(dialog)
-        editor = QTextEdit()
-        editor.setReadOnly(True)
-        editor.setPlainText(text.strip() or "표시할 요약이 없습니다.")
-        layout.addWidget(editor)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        dialog.resize(540, 400)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # 헤더
+        header = QWidget()
+        header.setStyleSheet(f"""
+            QWidget {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {Colors.PRIMARY}, stop:1 {Colors.PRIMARY_DARK});
+                padding: {Spacing.MD}px;
+            }}
+        """)
+        header_layout = QVBoxLayout(header)
+        
+        title_label = QLabel(title)
+        title_label.setFont(QFont(Fonts.FAMILY, Fonts.SIZE_XXL, QFont.Weight.Bold))
+        title_label.setStyleSheet("color: white;")
+        header_layout.addWidget(title_label)
+        
+        layout.addWidget(header)
+        
+        # 스크롤 영역
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: #F9FAFB;
+            }
+        """)
+        
+        # 내용 컨테이너
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(Spacing.MD, Spacing.MD, Spacing.MD, Spacing.MD)
+        content_layout.setSpacing(Spacing.SM)
+        
+        # 텍스트를 파싱하여 섹션별로 표시
+        lines = (text.strip() or "표시할 요약이 없습니다.").split('\n')
+        current_section = None
+        section_widget = None
+        section_layout = None
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line == '=' * 40:
+                continue
+            
+            # 섹션 제목 감지
+            if line.endswith(':') or '요약' in line or 'TOP' in line or '발신자' in line or '액션' in line:
+                # 새 섹션 시작
+                if section_widget:
+                    content_layout.addWidget(section_widget)
+                
+                section_widget = QWidget()
+                section_widget.setStyleSheet(f"""
+                    QWidget {{
+                        background-color: white;
+                        border-radius: {BorderRadius.BASE}px;
+                        border: 1px solid {Colors.BORDER_LIGHT};
+                    }}
+                """)
+                section_layout = QVBoxLayout(section_widget)
+                section_layout.setContentsMargins(Spacing.MD, Spacing.SM, Spacing.MD, Spacing.SM)
+                section_layout.setSpacing(Spacing.XS)
+                
+                # 섹션 제목
+                section_title = QLabel(line)
+                section_title.setFont(QFont(Fonts.FAMILY, Fonts.SIZE_BASE, QFont.Weight.Bold))
+                section_title.setStyleSheet(f"color: {Colors.PRIMARY}; padding-bottom: 4px;")
+                section_layout.addWidget(section_title)
+                current_section = line
+            else:
+                # 섹션 내용
+                if not section_widget:
+                    # 첫 번째 라인 (날짜 등)
+                    section_widget = QWidget()
+                    section_widget.setStyleSheet(f"""
+                        QWidget {{
+                            background-color: white;
+                            border-radius: {BorderRadius.BASE}px;
+                            border: 1px solid {Colors.BORDER_LIGHT};
+                        }}
+                    """)
+                    section_layout = QVBoxLayout(section_widget)
+                    section_layout.setContentsMargins(Spacing.MD, Spacing.SM, Spacing.MD, Spacing.SM)
+                    section_layout.setSpacing(Spacing.XS)
+                
+                content_label = QLabel(line)
+                content_label.setFont(QFont(Fonts.FAMILY, Fonts.SIZE_SM))
+                content_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; padding: 2px 0;")
+                content_label.setWordWrap(True)
+                section_layout.addWidget(content_label)
+        
+        # 마지막 섹션 추가
+        if section_widget:
+            content_layout.addWidget(section_widget)
+        
+        content_layout.addStretch()
+        scroll.setWidget(content_widget)
+        layout.addWidget(scroll)
+        
+        # 하단 버튼
+        button_container = QWidget()
+        button_container.setStyleSheet(f"background-color: {Colors.BG_SECONDARY}; padding: {Spacing.SM}px;")
+        button_layout = QHBoxLayout(button_container)
+        button_layout.addStretch()
+        
+        close_button = QPushButton("닫기")
+        close_button.setMinimumWidth(100)
+        close_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.PRIMARY};
+                color: white;
+                border: none;
+                border-radius: {BorderRadius.BASE}px;
+                padding: {Spacing.SM}px {Spacing.MD}px;
+                font-size: {FontSizes.BASE};
+                font-weight: {FontWeights.SEMIBOLD};
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.PRIMARY_DARK};
+            }}
+        """)
+        close_button.clicked.connect(dialog.accept)
+        button_layout.addWidget(close_button)
+        
+        layout.addWidget(button_container)
+        
         dialog.exec()
 
     def show_daily_summary(self):
