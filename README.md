@@ -1,6 +1,6 @@
 # Smart Assistant
 
-오프라인 데이터셋(`data/mobile_4week_ko`)을 기반으로 모바일 앱 팀의 이메일·메신저 대화를 분석하고, PM 시점의 TODO를 자동 생성하는 데스크톱 도우미입니다. 네트워크가 없는 환경에서도 최신 데이터를 수동으로 불러오고, 온라인으로 전환되면 한 번 자동으로 전체 분석을 수행합니다.
+오프라인 데이터셋(`data/multi_project_8week_ko`)을 기반으로 멀티 프로젝트 팀의 이메일·메신저 대화를 분석하고, PM 시점의 TODO를 자동 생성하는 데스크톱 도우미입니다. 네트워크가 없는 환경에서도 최신 데이터를 수동으로 불러오고, 온라인으로 전환되면 한 번 자동으로 전체 분석을 수행합니다.
 
 ## 🚀 주요 기능
 - **🎨 일관된 UI 디자인 시스템**: Tailwind CSS 기반의 색상 팔레트와 재사용 가능한 스타일 컴포넌트로 통일된 사용자 경험을 제공합니다 (v1.1.8)
@@ -67,7 +67,8 @@
 smart_assistant/
 ├── config/                 # 전역 설정 (경로, LLM, UI 등)
 ├── data/
-│   └── mobile_4week_ko/    # 오프라인 데이터셋 (chat/email/persona/final_state)
+│   ├── mobile_4week_ko/    # 레거시 데이터셋 (4주 데이터)
+│   └── multi_project_8week_ko/  # 현재 데이터셋 (8주 데이터, 기본값)
 ├── docs/                   # 문서
 │   ├── UI_STYLES.md        # UI 스타일 시스템 가이드 ✨ NEW (v1.1.8)
 │   ├── EMAIL_PANEL.md      # 이메일 패널 가이드
@@ -407,6 +408,13 @@ for group_key, group_messages in daily_groups.items():
 ```
 
 ## 📂 데이터셋 구성
+
+### 현재 데이터셋 (multi_project_8week_ko)
+- **기간**: 8주 데이터
+- **팀 구성**: PM, 디자이너, 개발자, DevOps (4명)
+- **PM 이메일**: pm.1@multiproject.dev
+- **프로젝트**: 멀티 프로젝트 환경
+
 | 파일 | 설명 |
 | --- | --- |
 | `chat_communications.json` | 팀 DM 로그 (sender, room_slug, sent_at 등) |
@@ -414,7 +422,14 @@ for group_key, group_messages in daily_groups.items():
 | `team_personas.json` | PM/디자이너/개발자/DevOps 인물 정보 |
 | `final_state.json` | 시뮬레이션 상태 (tick, sim_time 등) |
 
+### 레거시 데이터셋 (mobile_4week_ko)
+- **기간**: 4주 데이터
+- **팀 구성**: 모바일 앱 팀
+- **상태**: 지원 종료 (v1.2.0부터)
+
 애플리케이션은 이 JSON들만으로 동작하며, 로그인이나 외부 API 호출이 필요 없습니다.
+
+**데이터셋 마이그레이션 가이드**: [DATASET_MIGRATION.md](docs/DATASET_MIGRATION.md)
 
 ## 📊 출력 예시
 ```
@@ -429,7 +444,7 @@ for group_key, group_messages in daily_groups.items():
 ```
 
 ## 🔄 TODO 저장소
-- 생성된 TODO는 `data/mobile_4week_ko/todos_cache.db`(SQLite)에 저장됩니다.
+- 생성된 TODO는 `data/multi_project_8week_ko/todos_cache.db`(SQLite)에 저장됩니다.
 - `ui/todo_panel.py`에서 항목 상태 변경, 스누즈, Top3 재계산 등을 지원합니다.
 - Top-3 TODO는 우선순위, 데드라인, 근거 수를 기반으로 자동 계산됩니다.
 
@@ -516,7 +531,7 @@ TODO 상세 다이얼로그의 LLM 호출은 상세한 로그를 출력합니다
 - **TODO는 앱 재시작 후에도 유지됩니다** (v1.1.9+)
 - 14일 이상 된 오래된 TODO는 자동으로 정리됩니다
 - 모든 TODO를 삭제하려면 "모두 삭제" 버튼을 사용하세요
-- TODO 데이터는 `data/mobile_4week_ko/todos_cache.db`에 저장됩니다
+- TODO 데이터는 `data/multi_project_8week_ko/todos_cache.db`에 저장됩니다
 
 ## 🐛 알려진 이슈
 - Windows 환경에서 한글 출력을 위해 UTF-8 인코딩이 강제 설정됩니다.

@@ -40,7 +40,7 @@ def _make_http_session():
     return s
 
 
-TODO_DB_PATH = os.path.join("data", "mobile_4week_ko", "todos_cache.db")
+TODO_DB_PATH = os.path.join("data", "multi_project_8week_ko", "todos_cache.db")  # v1.2.0: 데이터셋 변경
 
 KMA_CITY_GRID = {
     "서울": (60, 127),
@@ -1681,7 +1681,7 @@ class SmartAssistantGUI(QMainWindow):
         
         event.accept()
 
-class Chip(QLabel):timer
+class Chip(QLabel):
     def __init__(self, text, bg="#E5E7EB", fg="#111827"):
         super().__init__(text)
         self.setProperty("chip", True)

@@ -12,7 +12,8 @@ smart_assistant/
 │   └── settings_rules.json # 규칙 저장소
 │
 ├── data/                  # 데이터 저장소
-│   └── mobile_4week_ko/   # 오프라인 데이터셋
+│   ├── mobile_4week_ko/   # 레거시 데이터셋 (4주)
+│   └── multi_project_8week_ko/  # 현재 데이터셋 (8주, 기본값)
 │       ├── chat_communications.json
 │       ├── email_communications.json
 │       ├── team_personas.json
@@ -482,7 +483,7 @@ os.environ['QT_DEBUG_PLUGINS'] = '1'
 
 ### SQLite 데이터베이스 확인
 ```bash
-sqlite3 data/mobile_4week_ko/todos_cache.db
+sqlite3 data/multi_project_8week_ko/todos_cache.db
 .tables
 SELECT * FROM todos;
 ```

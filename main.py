@@ -18,7 +18,7 @@ from utils.datetime_utils import parse_iso_datetime, is_in_time_range, ensure_ut
 # 프로젝트 루트를 Python 경로에 추가
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
-DEFAULT_DATASET_ROOT = project_root / "data" / "mobile_4week_ko"
+DEFAULT_DATASET_ROOT = project_root / "data" / "multi_project_8week_ko"
 
 # # Windows 한글 출력 설정
 # import sys
@@ -423,14 +423,15 @@ class SmartAssistant:
             force_reload: 강제 리로드 여부
             time_range: 시간 범위 필터 {"start": datetime, "end": datetime}
         """
-        logger.info("📥 메시지 수집 시작 (mobile_4week_ko)")
+        logger.info("📥 메시지 수집 시작 (multi_project_8week_ko - 이민주 PM)")
         self._ensure_dataset(force_reload=force_reload)
 
         chat_messages = list(self._chat_messages)
         email_messages = list(self._email_messages)
 
         # PM 수신 메시지 필터링 (성능 최적화)
-        pm_email = (self.user_profile or {}).get("email_address", "pm.1@quickchat.dev").lower()
+        # 이민주 PM의 정보 사용
+        pm_email = (self.user_profile or {}).get("email_address", "pm.1@multiproject.dev").lower()
         pm_handle = (self.user_profile or {}).get("chat_handle", "pm").lower()
         
         logger.info(f"👤 PM 필터링: email={pm_email}, handle={pm_handle}")

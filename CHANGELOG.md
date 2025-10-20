@@ -8,6 +8,14 @@ Smart Assistant의 모든 주요 변경사항이 이 파일에 문서화됩니�
 ## [Unreleased]
 
 ### 변경됨
+- **📁 데이터셋 변경**: 기본 데이터셋을 `multi_project_8week_ko`로 변경 (v1.2.0)
+  - 기존: mobile_4week_ko (4주 데이터, 모바일 앱 팀)
+  - 신규: multi_project_8week_ko (8주 데이터, 멀티 프로젝트 팀)
+  - PM 이메일: pm.1@multiproject.dev
+  - 팀 구성: PM, 디자이너, 개발자, DevOps (4명)
+  - 마이그레이션 가이드: [DATASET_MIGRATION.md](docs/DATASET_MIGRATION.md)
+
+### 변경됨
 - **💾 TODO 영구 저장**: 앱 재시작 시에도 TODO가 유지됩니다 (v1.1.9+)
   - 기존: 앱 시작 시 모든 TODO 자동 삭제
   - 개선: 앱 시작 시 TODO 유지 (14일 이상 된 것만 자동 정리)
@@ -39,6 +47,13 @@ Smart Assistant의 모든 주요 변경사항이 이 파일에 문서화됩니�
   - OpenAI 및 OpenRouter는 기존 파라미터 유지
 
 ### 추가됨
+- **📁 데이터셋 마이그레이션**: multi_project_8week_ko 데이터셋으로 전환 (v1.2.0)
+  - `docs/DATASET_MIGRATION.md`: 마이그레이션 가이드 문서
+  - 기존: mobile_4week_ko (4주 데이터)
+  - 신규: multi_project_8week_ko (8주 데이터)
+  - PM: 이민주 (pm.1@multiproject.dev)
+  - 팀 구성: PM, 디자이너, 개발자, 데보옵스 (4명)
+
 - **📊 분석 결과 탭 개선 방안 문서**: 대시보드 스타일 제안 (v1.1.9)
   - `docs/ANALYSIS_TAB_IMPROVEMENT.md`: 3가지 개선 옵션 제시
   - 옵션 1: 대시보드 스타일 (카드 + 차트)

@@ -18,7 +18,7 @@ from config.settings import LLM_CONFIG, CONFIG_STORE_PATH
 
 logger = logging.getLogger(__name__)
 
-TODO_DB_PATH = os.path.join("data", "mobile_4week_ko", "todos_cache.db")
+TODO_DB_PATH = os.path.join("data", "multi_project_8week_ko", "todos_cache.db")
 
 TOP3_RULE_DEFAULT = {
     "priority_high": 3.0,
