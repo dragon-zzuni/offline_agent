@@ -112,8 +112,10 @@ from main import SmartAssistant, DEFAULT_DATASET_ROOT
 from ui.todo_panel import TodoPanel   # ✅ TodoPanel 사용
 from ui.time_range_selector import TimeRangeSelector  # ✅ TimeRangeSelector 추가
 from ui.message_summary_panel import MessageSummaryPanel  # ✅ MessageSummaryPanel 추가
+from ui.message_detail_dialog import MessageDetailDialog  # ✅ MessageDetailDialog 추가
 from ui.email_panel import EmailPanel  # ✅ EmailPanel 추가
 from ui.analysis_result_panel import AnalysisResultPanel  # ✅ AnalysisResultPanel 추가
+from utils.datetime_utils import parse_iso_datetime  # ✅ 날짜 파싱 유틸리티
 
 
 # 한 번만 실행(어디든 붙여서 호출)
@@ -177,16 +179,17 @@ def _init_todo_schema(conn: sqlite3.Connection):
     """)
     conn.commit()
 
-def _parse_iso_dt(s: str | None):
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except Exception:
-        try:
-            return datetime.fromisoformat(s)
-        except Exception:
-            return None
+# ✅ utils/datetime_utils.py의 parse_iso_datetime 사용으로 대체됨
+# def _parse_iso_dt(s: str | None):
+#     if not s:
+#         return None
+#     try:
+#         return datetime.fromisoformat(s.replace("Z", "+00:00"))
+#     except Exception:
+#         try:
+#             return datetime.fromisoformat(s)
+#         except Exception:
+#             return None
 
 
 def _score_for_top3(t: dict) -> float:
@@ -667,6 +670,9 @@ class SmartAssistantGUI(QMainWindow):
         time_range_layout.addWidget(self.time_range_selector)
         layout.addWidget(time_range_group)
         
+        # 데이터셋의 시간 범위를 자동으로 설정
+        self._initialize_data_time_range()
+        
         # 날씨 위젯
         weather_group = QGroupBox("오늘/내일 날씨")
         weather_layout = QVBoxLayout(weather_group)
@@ -717,19 +723,20 @@ class SmartAssistantGUI(QMainWindow):
         if hasattr(self, "status_message"):
             self.status_message.setText("데이터를 다시 읽도록 준비되었습니다. '메시지 수집 시작'을 눌러주세요.")
 
-    def _parse_iso_datetime(self, value: Optional[str]) -> Optional[datetime]:
-        if not value:
-            return None
-        value = value.strip()
-        if not value:
-            return None
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except Exception:
-            try:
-                return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                return None
+    # ✅ utils/datetime_utils.py의 parse_iso_datetime 사용으로 대체됨
+    # def _parse_iso_datetime(self, value: Optional[str]) -> Optional[datetime]:
+    #     if not value:
+    #         return None
+    #     value = value.strip()
+    #     if not value:
+    #         return None
+    #     try:
+    #         return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    #     except Exception:
+    #         try:
+    #             return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    #         except Exception:
+    #             return None
 
     def _show_summary_popup(self, title: str, text: str) -> None:
         dialog = QDialog(self)
@@ -752,7 +759,7 @@ class SmartAssistantGUI(QMainWindow):
             return
         parsed = []
         for msg in messages:
-            dt = self._parse_iso_datetime(msg.get("date"))
+            dt = parse_iso_datetime(msg.get("date"))
             if dt:
                 parsed.append((dt, msg))
         if not parsed:
@@ -839,7 +846,7 @@ class SmartAssistantGUI(QMainWindow):
             return
         parsed = []
         for msg in messages:
-            dt = self._parse_iso_datetime(msg.get("date"))
+            dt = parse_iso_datetime(msg.get("date"))
             if dt:
                 parsed.append((dt, msg))
         if not parsed:
@@ -1410,6 +1417,7 @@ class SmartAssistantGUI(QMainWindow):
         # ✅ MessageSummaryPanel 사용
         self.message_summary_panel = MessageSummaryPanel()
         self.message_summary_panel.summary_unit_changed.connect(self._on_summary_unit_changed)
+        self.message_summary_panel.summary_card_clicked.connect(self._on_summary_card_clicked)
         layout.addWidget(self.message_summary_panel)
         
         return tab
@@ -1547,6 +1555,128 @@ class SmartAssistantGUI(QMainWindow):
                 self.status_bar.showMessage("오프라인 모드")
             self.status_message.setText("오프라인 모드입니다. 필요 시 다시 온라인으로 전환하세요.")
     
+    def _initialize_data_time_range(self):
+        """데이터셋의 시간 범위를 자동으로 설정
+        
+        데이터셋 파일을 읽어서 가장 오래된 메시지와 가장 최근 메시지의 시간을 찾아
+        TimeRangeSelector에 설정합니다.
+        """
+        try:
+            import json
+            from pathlib import Path
+            
+            # 데이터셋 경로
+            dataset_path = Path("data/multi_project_8week_ko")
+            logger.info(f"📂 데이터셋 경로: {dataset_path.absolute()}")
+            
+            dates = []
+            
+            # 채팅 메시지 파일 읽기
+            chat_file = dataset_path / "chat_communications.json"
+            logger.info(f"채팅 파일 확인: {chat_file.absolute()} (존재: {chat_file.exists()})")
+            
+            if chat_file.exists():
+                with open(chat_file, 'r', encoding='utf-8') as f:
+                    chat_data = json.load(f)
+                    rooms = chat_data.get("rooms", [])
+                    logger.info(f"채팅 방 수: {len(rooms)} (type: {type(rooms).__name__})")
+                    
+                    if isinstance(rooms, dict):
+                        room_iter = rooms.values()
+                    elif isinstance(rooms, list):
+                        room_iter = rooms
+                    else:
+                        logger.warning(f"지원되지 않는 rooms 타입: {type(rooms)}")
+                        room_iter = []
+                    
+                    for room in room_iter:
+                        if isinstance(room, dict) and "entries" in room:
+                            entries = room.get("entries", [])
+                        elif isinstance(room, list):
+                            entries = room
+                        else:
+                            logger.debug(f"알 수 없는 채팅 룸 구조: {room}")
+                            continue
+                        
+                        for entry in entries:
+                            if not isinstance(entry, dict):
+                                logger.debug(f"채팅 엔트리 구조 오류: {entry}")
+                                continue
+                            
+                            sent_at = entry.get("sent_at")
+                            if sent_at:
+                                try:
+                                    dt = datetime.fromisoformat(sent_at.replace("Z", "+00:00"))
+                                    if dt.tzinfo is None:
+                                        dt = dt.replace(tzinfo=timezone.utc)
+                                    else:
+                                        dt = dt.astimezone(timezone.utc)
+                                    dates.append(dt)
+                                except Exception as e:
+                                    logger.debug(f"채팅 날짜 파싱 오류: {sent_at} - {e}")
+                    
+                    logger.info(f"채팅에서 수집된 날짜 수: {len(dates)}")
+            
+            # 이메일 파일 읽기
+            email_file = dataset_path / "email_communications.json"
+            logger.info(f"이메일 파일 확인: {email_file.absolute()} (존재: {email_file.exists()})")
+            
+            if email_file.exists():
+                email_dates_before = len(dates)
+                with open(email_file, 'r', encoding='utf-8') as f:
+                    email_data = json.load(f)
+                    mailboxes = email_data.get("mailboxes", [])
+                    logger.info(f"메일박스 수: {len(mailboxes)} (type: {type(mailboxes).__name__})")
+                    
+                    if isinstance(mailboxes, dict):
+                        mailbox_iter = mailboxes.values()
+                    elif isinstance(mailboxes, list):
+                        mailbox_iter = mailboxes
+                    else:
+                        logger.warning(f"지원되지 않는 mailboxes 타입: {type(mailboxes)}")
+                        mailbox_iter = []
+                    
+                    for mailbox in mailbox_iter:
+                        if isinstance(mailbox, dict) and "entries" in mailbox:
+                            entries = mailbox.get("entries", [])
+                        elif isinstance(mailbox, list):
+                            entries = mailbox
+                        else:
+                            logger.debug(f"알 수 없는 메일박스 구조: {mailbox}")
+                            continue
+                        
+                        for entry in entries:
+                            if not isinstance(entry, dict):
+                                logger.debug(f"이메일 엔트리 구조 오류: {entry}")
+                                continue
+                            
+                            sent_at = entry.get("sent_at")
+                            if sent_at:
+                                try:
+                                    dt = datetime.fromisoformat(sent_at.replace("Z", "+00:00"))
+                                    if dt.tzinfo is None:
+                                        dt = dt.replace(tzinfo=timezone.utc)
+                                    else:
+                                        dt = dt.astimezone(timezone.utc)
+                                    dates.append(dt)
+                                except Exception as e:
+                                    logger.debug(f"이메일 날짜 파싱 오류: {sent_at} - {e}")
+                    
+                    logger.info(f"이메일에서 수집된 날짜 수: {len(dates) - email_dates_before}")
+            
+            logger.info(f"총 수집된 날짜 수: {len(dates)}")
+            
+            if dates:
+                data_start = min(dates)
+                data_end = max(dates)
+                self.time_range_selector.set_data_range(data_start, data_end)
+                logger.info(f"📅 데이터 시간 범위 자동 설정: {data_start.strftime('%Y-%m-%d %H:%M')} ~ {data_end.strftime('%Y-%m-%d %H:%M')}")
+            else:
+                logger.warning("⚠️ 데이터셋에서 시간 정보를 찾을 수 없습니다")
+                
+        except Exception as e:
+            logger.error(f"❌ 데이터 시간 범위 초기화 오류: {e}", exc_info=True)
+    
     def _on_time_range_changed(self, start: datetime, end: datetime):
         """시간 범위 변경 핸들러
         
@@ -1597,6 +1727,115 @@ class SmartAssistantGUI(QMainWindow):
         self._update_message_summaries(converted_unit)
         
         self.status_message.setText(f"{unit_name_kr} 요약 표시 완료")
+    
+    def _on_summary_card_clicked(self, summary: Dict):
+        """요약 카드 클릭 핸들러
+        
+        MessageSummaryPanel에서 요약 카드가 클릭되면 호출됩니다.
+        클릭된 그룹의 원본 메시지를 조회하여 MessageDetailDialog를 표시합니다.
+        
+        Args:
+            summary: 클릭된 요약 그룹 데이터
+        """
+        try:
+            # message_ids 추출
+            message_ids = summary.get("message_ids", [])
+            
+            logger.info(f"요약 카드 클릭: message_ids 수 = {len(message_ids)}, 전체 메시지 수 = {len(self.collected_messages)}")
+            
+            if not message_ids:
+                logger.warning("요약 그룹에 message_ids가 없습니다")
+                logger.debug(f"summary 내용: {summary}")
+                QMessageBox.warning(
+                    self,
+                    "메시지 없음",
+                    "이 그룹에 메시지가 없습니다."
+                )
+                return
+            
+            # 원본 메시지 조회
+            messages = []
+            for msg in self.collected_messages:
+                # 다양한 ID 필드 시도 (msg_id가 주요 필드)
+                msg_id = msg.get("msg_id") or msg.get("id") or msg.get("message_id") or msg.get("_id")
+                if msg_id and str(msg_id) in message_ids:
+                    messages.append(msg)
+            
+            logger.info(f"조회된 메시지 수: {len(messages)}/{len(message_ids)}")
+            
+            if not messages:
+                logger.warning(f"message_ids에 해당하는 메시지를 찾을 수 없습니다")
+                logger.debug(f"찾으려는 message_ids (처음 3개): {message_ids[:3]}")
+                
+                # 디버깅: 실제 메시지의 ID 필드 확인
+                if self.collected_messages:
+                    sample_msg = self.collected_messages[0]
+                    logger.debug(f"샘플 메시지 ID 필드: msg_id={sample_msg.get('msg_id')}, id={sample_msg.get('id')}, message_id={sample_msg.get('message_id')}")
+                
+                QMessageBox.warning(
+                    self,
+                    "메시지 조회 실패",
+                    "메시지를 불러올 수 없습니다. 다시 시도해주세요."
+                )
+                return
+            
+            # 기간 라벨 생성
+            period_start = summary.get("period_start")
+            period_end = summary.get("period_end")
+            unit = summary.get("unit", "daily")
+            
+            if isinstance(period_start, str):
+                try:
+                    period_start_dt = datetime.fromisoformat(period_start.replace("Z", "+00:00"))
+                except Exception:
+                    period_start_dt = None
+            else:
+                period_start_dt = period_start
+            
+            if period_start_dt:
+                if unit == "daily":
+                    period_label = period_start_dt.strftime("%Y년 %m월 %d일")
+                elif unit == "weekly":
+                    if isinstance(period_end, str):
+                        try:
+                            period_end_dt = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
+                            actual_end = period_end_dt - timedelta(days=1)
+                            period_label = f"{period_start_dt.strftime('%Y년 %m/%d')} ~ {actual_end.strftime('%m/%d')}"
+                        except Exception:
+                            period_label = period_start_dt.strftime("%Y년 %W주차")
+                    else:
+                        period_label = period_start_dt.strftime("%Y년 %W주차")
+                elif unit == "monthly":
+                    period_label = period_start_dt.strftime("%Y년 %m월")
+                else:
+                    period_label = period_start_dt.strftime("%Y-%m-%d")
+            else:
+                period_label = "메시지 상세"
+            
+            # summary에 period_label 추가
+            summary_with_label = summary.copy()
+            summary_with_label["period_label"] = period_label
+            
+            # 통계 정보 추가
+            stats_summary = summary.get("statistics_summary", "")
+            if not stats_summary:
+                total = summary.get("total_messages", len(messages))
+                email_count = summary.get("email_count", 0)
+                messenger_count = summary.get("messenger_count", 0)
+                stats_summary = f"총 {total}건 | 이메일 {email_count}건, 메신저 {messenger_count}건"
+            summary_with_label["statistics_summary"] = stats_summary
+            
+            # MessageDetailDialog 생성 및 표시
+            dialog = MessageDetailDialog(summary_with_label, messages, self)
+            dialog.exec()
+            
+        except Exception as e:
+            logger.error(f"요약 카드 클릭 처리 오류: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "오류",
+                f"메시지를 표시하는 중 오류가 발생했습니다:\n{str(e)}"
+            )
     
     def _update_message_summaries(self, unit: str = "day"):
         """메시지 그룹화 및 요약 생성

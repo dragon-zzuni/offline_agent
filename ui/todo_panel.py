@@ -555,16 +555,20 @@ def _open_path_cross_platform(path: str) -> None:
     except Exception as e:
         print(f"[open] failed: {e}")
 
-def _parse_iso_dt(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except Exception:
-        try:
-            return datetime.fromisoformat(value)
-        except Exception:
-            return None
+# ✅ utils/datetime_utils.py의 parse_iso_datetime 사용으로 대체됨
+# def _parse_iso_dt(value: str | None) -> datetime | None:
+#     if not value:
+#         return None
+#     try:
+#         return datetime.fromisoformat(value.replace("Z", "+00:00"))
+#     except Exception:
+#         try:
+#             return datetime.fromisoformat(value)
+#         except Exception:
+#             return None
+
+# utils 함수 import
+from utils.datetime_utils import parse_iso_datetime as _parse_iso_dt
 
 def _created_ts(todo: dict) -> float:
     dt = _parse_iso_dt(todo.get("created_at"))

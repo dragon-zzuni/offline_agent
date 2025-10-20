@@ -377,6 +377,37 @@ from ui.styles import Styles
 button.setStyleSheet(Styles.button_primary())
 ```
 
+### 색상 상수 표준화 예시
+
+#### Before (비표준 상수)
+```python
+from ui.styles import Colors
+
+header.setStyleSheet(f"""
+    QWidget {{
+        background-color: {Colors.SURFACE};
+        border-bottom: 1px solid {Colors.BORDER};
+    }}
+""")
+```
+
+#### After (표준 상수)
+```python
+from ui.styles import Colors
+
+header.setStyleSheet(f"""
+    QWidget {{
+        background-color: {Colors.BG_SECONDARY};
+        border-bottom: 1px solid {Colors.BORDER_LIGHT};
+    }}
+""")
+```
+
+**개선 사항:**
+- `Colors.SURFACE` → `Colors.BG_SECONDARY`: 명확한 의미 전달
+- `Colors.BORDER` → `Colors.BORDER_LIGHT`: 테두리 강도 명시
+- 모든 UI 컴포넌트가 동일한 색상 팔레트 사용
+
 ## 향후 개선 사항
 
 - [ ] 다크 모드 지원

@@ -433,13 +433,47 @@ logger = logging.getLogger(__name__)
 logger.debug("상세 디버깅 정보")
 logger.info("일반 정보")
 logger.warning("경고 메시지")
-logger.error("오류 발생")
+logger.error("오류 발생", exc_info=True)  # 스택 트레이스 포함
 ```
 
 #### 주요 로깅 위치
-- `ui/main_window.py`: GUI 이벤트 및 사용자 액션
+- `ui/main_window.py`: GUI 이벤트, 사용자 액션, 데이터 로딩
 - `main.py`: 메시지 수집 및 분석 파이프라인
 - `nlp/` 모듈: NLP 처리 과정
+
+#### 데이터 로딩 로깅 (v1.2.1+++++++++++++++++++++)
+데이터셋 시간 범위 자동 감지 시 상세한 로그를 출력합니다:
+
+```python
+# ui/main_window.py의 _initialize_data_time_range() 메서드
+logger.info(f"📂 데이터셋 경로: {dataset_path.absolute()}")
+logger.info(f"채팅 파일 확인: {chat_file.absolute()} (존재: {chat_file.exists()})")
+logger.info(f"채팅 방 수: {len(rooms)}")
+logger.info(f"채팅에서 수집된 날짜 수: {len(dates)}")
+logger.debug(f"채팅 날짜 파싱 오류: {sent_at} - {e}")
+logger.warning("⚠️ 데이터셋에서 시간 정보를 찾을 수 없습니다")
+logger.error(f"❌ 데이터 시간 범위 초기화 오류: {e}", exc_info=True)
+```
+
+**로그 출력 예시:**
+```
+📂 데이터셋 경로: C:\Projects\smart_assistant\data\multi_project_8week_ko
+채팅 파일 확인: C:\...\chat_communications.json (존재: True)
+채팅 방 수: 5
+채팅에서 수집된 날짜 수: 150
+이메일 파일 확인: C:\...\email_communications.json (존재: True)
+메일박스 수: 3
+이메일에서 수집된 날짜 수: 80
+총 수집된 날짜 수: 230
+📅 데이터 시간 범위 자동 설정: 2024-10-01 09:00 ~ 2024-11-20 18:30
+```
+
+**로깅 베스트 프랙티스:**
+1. **이모지 아이콘 사용**: 로그 가독성 향상 (📂, 📅, ⚠️, ❌, ✅)
+2. **명확한 메시지**: 무엇을 하는지, 결과가 무엇인지 명시
+3. **컨텍스트 포함**: 파일 경로, 개수, 상태 등 구체적 정보
+4. **예외 처리**: `exc_info=True`로 스택 트레이스 포함
+5. **적절한 레벨**: DEBUG(상세), INFO(일반), WARNING(주의), ERROR(오류)
 
 #### 로그 레벨 변경
 ```bash

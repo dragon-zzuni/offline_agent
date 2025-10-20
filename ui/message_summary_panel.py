@@ -13,7 +13,10 @@ from PyQt6.QtWidgets import (
     QRadioButton, QButtonGroup, QScrollArea, QFrame
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QCursor
+import logging
+
+logger = logging.getLogger(__name__)
 
 from ui.styles import (
     Colors, FontSizes, FontWeights, Styles, Spacing, BorderRadius,
@@ -28,9 +31,11 @@ class MessageSummaryPanel(QWidget):
     
     Signals:
         summary_unit_changed: 요약 단위가 변경되었을 때 발생 (str: "daily", "weekly", "monthly")
+        summary_card_clicked: 요약 카드가 클릭되었을 때 발생 (dict: 요약 그룹 데이터)
     """
     
     summary_unit_changed = pyqtSignal(str)
+    summary_card_clicked = pyqtSignal(dict)
     
     def __init__(self, parent=None):
         """
@@ -284,8 +289,13 @@ class MessageSummaryPanel(QWidget):
             QFrame:hover {{
                 border-color: {Colors.BORDER_MEDIUM};
                 background-color: {Colors.GRAY_50};
+                cursor: pointer;
             }}
         """)
+        
+        # 클릭 가능하도록 설정
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        card.mousePressEvent = lambda event: self._on_card_clicked(summary)
         
         layout = QVBoxLayout(card)
         layout.setSpacing(Spacing.SM)
@@ -585,3 +595,12 @@ class MessageSummaryPanel(QWidget):
             layout.addWidget(point_label)
         
         return container
+    
+    def _on_card_clicked(self, summary: Dict):
+        """카드 클릭 이벤트 핸들러
+        
+        Args:
+            summary: 클릭된 요약 그룹 데이터
+        """
+        logger.info(f"요약 카드 클릭: {summary.get('period_start', 'Unknown')}")
+        self.summary_card_clicked.emit(summary)

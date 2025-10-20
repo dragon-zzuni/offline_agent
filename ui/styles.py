@@ -103,6 +103,33 @@ class FontWeights:
     EXTRABOLD = "800"
 
 
+class Fonts:
+    """Qt 위젯 및 CSS에서 사용할 폰트 설정"""
+    # 주요 폰트 패밀리 (설치되지 않은 경우 시스템 기본 폰트로 대체됨)
+    FAMILY = "Pretendard"
+    FALLBACK_FAMILY = "Noto Sans KR"
+    
+    # QFont 생성 등에 사용할 정수 사이즈 (px 기준)
+    SIZE_XS = 11
+    SIZE_SM = 12
+    SIZE_BASE = 14
+    SIZE_MD = 15
+    SIZE_LG = 16
+    SIZE_XL = 18
+    SIZE_XXL = 20
+    SIZE_XXXL = 24
+    
+    @staticmethod
+    def to_points(size: str) -> int:
+        """FontSizes 값(px 문자열)을 정수 포인트로 변환"""
+        if isinstance(size, str) and size.endswith("px"):
+            try:
+                return int(size[:-2])
+            except ValueError:
+                pass
+        return int(size)
+
+
 # ============================================================================
 # 간격 및 여백
 # ============================================================================
