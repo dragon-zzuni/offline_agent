@@ -9,12 +9,12 @@ PyQt6==6.6.1
 
 
 # Database & Storage
-faiss-cpu==1.7.4
+faiss-cpu==1.12.0
 
 # NLP & LLM
 openai==1.3.7
 transformers==4.36.0
-torch==2.1.1
+torch==2.5.1
 sentence-transformers==2.2.2
 
 # Scheduler

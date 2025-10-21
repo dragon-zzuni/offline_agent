@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import logging
 
-from ui.styles import (
+from .styles import (
     Colors, Fonts, FontSizes, FontWeights, Spacing, BorderRadius, Icons,
     get_message_type_icon, get_priority_icon
 )

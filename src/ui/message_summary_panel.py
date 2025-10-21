@@ -18,7 +18,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from ui.styles import (
+from .styles import (
     Colors, FontSizes, FontWeights, Styles, Spacing, BorderRadius,
     get_priority_colors, Icons, get_priority_icon, get_message_type_icon
 )

@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QDateTime
 
-from ui.styles import Colors, FontSizes, FontWeights, Styles, Spacing, BorderRadius
+from .styles import Colors, FontSizes, FontWeights, Styles, Spacing, BorderRadius
 
 
 class TimeRangeSelector(QWidget):

@@ -18,8 +18,8 @@ if sys.platform == "win32":
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-# GUI 실행
-from ui.main_window import main
+# GUI 실행 (src wrapper)
+from src.ui.main_window import main
 
 if __name__ == "__main__":
     main()

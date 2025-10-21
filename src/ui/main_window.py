@@ -109,12 +109,12 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from main import SmartAssistant, DEFAULT_DATASET_ROOT
-from ui.todo_panel import TodoPanel   # ✅ TodoPanel 사용
-from ui.time_range_selector import TimeRangeSelector  # ✅ TimeRangeSelector 추가
-from ui.message_summary_panel import MessageSummaryPanel  # ✅ MessageSummaryPanel 추가
-from ui.message_detail_dialog import MessageDetailDialog  # ✅ MessageDetailDialog 추가
-from ui.email_panel import EmailPanel  # ✅ EmailPanel 추가
-from ui.analysis_result_panel import AnalysisResultPanel  # ✅ AnalysisResultPanel 추가
+from .todo_panel import TodoPanel   # ✅ TodoPanel 사용
+from .time_range_selector import TimeRangeSelector  # ✅ TimeRangeSelector 추가
+from .message_summary_panel import MessageSummaryPanel  # ✅ MessageSummaryPanel 추가
+from .message_detail_dialog import MessageDetailDialog  # ✅ MessageDetailDialog 추가
+from .email_panel import EmailPanel  # ✅ EmailPanel 추가
+from .analysis_result_panel import AnalysisResultPanel  # ✅ AnalysisResultPanel 추가
 from utils.datetime_utils import parse_iso_datetime  # ✅ 날짜 파싱 유틸리티
 
 
@@ -2287,7 +2287,7 @@ class SmartAssistantGUI(QMainWindow):
     
     def offline_cleanup(self):
         """오프라인 정리"""
-        from ui.offline_cleaner import OfflineCleanupDialog
+        from .offline_cleaner import OfflineCleanupDialog
         
         dialog = OfflineCleanupDialog(self)
         dialog.exec()

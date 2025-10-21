@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
-from ui.styles import (
+from .styles import (
     Colors, FontSizes, FontWeights, Styles, Spacing, BorderRadius,
     get_priority_colors, Icons, get_priority_icon, get_message_type_icon
 )

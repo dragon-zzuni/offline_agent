@@ -12,12 +12,13 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
-from nlp.draft import build_email_draft
-from utils.datetime_utils import parse_iso_datetime, is_in_time_range, ensure_utc_aware
-
-# 프로젝트 루트를 Python 경로에 추가
+# 프로젝트 루트를 Python 경로에 추가 (src/ 포함) — 반드시 내부 모듈 임포트보다 먼저 실행
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / "src"))
+
+from nlp.draft import build_email_draft
+from utils.datetime_utils import parse_iso_datetime, is_in_time_range, ensure_utc_aware
 DEFAULT_DATASET_ROOT = project_root / "data" / "multi_project_8week_ko"
 
 # # Windows 한글 출력 설정
