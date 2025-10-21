@@ -507,11 +507,11 @@ class SmartAssistantGUI(QMainWindow):
         # 스크롤 영역 생성
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setMaximumWidth(200)  # 220 → 200으로 더 축소
-        scroll_area.setMinimumWidth(280)  # 최소 너비 설정
+        # 폭 계산은 패널 구성 후 sizeHint 기준으로 설정하여 잘림 방지
         scroll_area.setFrameStyle(QFrame.Shape.NoFrame)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # 수평 스크롤 비활성화
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)  # 수직 스크롤만 필요시 표시
+        # 수평 스크롤은 필요 시 표시(안전망)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
         # 실제 컨텐츠 패널
         panel = QWidget()
@@ -711,8 +711,16 @@ class SmartAssistantGUI(QMainWindow):
         
         layout.addStretch()
         
-        # 스크롤 영역에 패널 설정
+        # 스크롤 영역에 패널 설정 및 추천 폭 산출
         scroll_area.setWidget(panel)
+        try:
+            panel.adjustSize()
+            width_hint = panel.sizeHint().width()
+            cushion = 48  # 여백 및 스크롤바 폭 대비
+            fixed_w = max(320, width_hint + cushion)
+            scroll_area.setFixedWidth(fixed_w)
+        except Exception:
+            scroll_area.setFixedWidth(340)
         
         return scroll_area
     
@@ -2372,11 +2380,21 @@ def main():
     pal.setColor(QPalette.ColorRole.Base,   QColor("#FFFFFF"))
     pal.setColor(QPalette.ColorRole.Text,   QColor("#222222"))
     pal.setColor(QPalette.ColorRole.Button, QColor("#FFFFFF"))
+    # 탭/라벨 등의 텍스트 컬러를 명확히 지정 (화이트 텍스트 문제 방지)
+    pal.setColor(QPalette.ColorRole.WindowText, QColor("#111827"))
+    pal.setColor(QPalette.ColorRole.ButtonText, QColor("#111827"))
     app.setPalette(pal)
 
     # 4) 전역 스타일시트(여백/모서리/폰트크기 통일)
     app.setStyleSheet("""
         * { font-size: 12px; }
+        /* PoC: 모든 일반 텍스트를 검정으로 강제하여 가독성 확보 */
+        QWidget { color: #000000; }
+        QLabel { color: #000000; }
+        QLineEdit, QTextEdit, QPlainTextEdit { color: #000000; }
+        QListWidget, QListView, QTreeView, QTableWidget, QTableView { color: #000000; }
+        QTabBar::tab { color: #000000; }
+        QHeaderView::section { color: #000000; }
         QGroupBox { font-weight: 600; border: 1px solid #E5E7EB; border-radius: 8px; margin-top: 8px; }
         QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color:#111827; }
         QLabel[role="title"] { font-size: 18px; font-weight: 800; color:#1F2937; }
