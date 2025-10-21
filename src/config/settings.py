@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 
 
 
-# 프로젝트 루트 디렉토리
-PROJECT_ROOT = Path(__file__).parent.parent
-load_dotenv(PROJECT_ROOT / ".env",override=True)
+# 프로젝트 루트 디렉토리 (offline_agent/)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 # 데이터베이스 경로
 DATABASE_PATH = PROJECT_ROOT / "data" / "assistant.db"
 FAISS_INDEX_PATH = PROJECT_ROOT / "data" / "faiss_index"

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Smart Assistant 메인 GUI 윈도우
 """
@@ -86,8 +86,13 @@ KMA_CITY_ALIAS = {
 # Windows 한글 출력 설정
 if sys.platform == "win32":
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    try:
+        if hasattr(sys.stdout, 'buffer') and not sys.stdout.closed:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        if hasattr(sys.stderr, 'buffer') and not sys.stderr.closed:
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    except (AttributeError, ValueError, OSError):
+        pass
     os.environ['PYTHONIOENCODING'] = 'utf-8'
     os.environ['PYTHONUTF8'] = '1'
 
@@ -115,6 +120,7 @@ from .message_summary_panel import MessageSummaryPanel  # ✅ MessageSummaryPane
 from .message_detail_dialog import MessageDetailDialog  # ✅ MessageDetailDialog 추가
 from .email_panel import EmailPanel  # ✅ EmailPanel 추가
 from .analysis_result_panel import AnalysisResultPanel  # ✅ AnalysisResultPanel 추가
+from .styles import Colors, Fonts, FontSizes, FontWeights, Spacing, BorderRadius
 from utils.datetime_utils import parse_iso_datetime  # ✅ 날짜 파싱 유틸리티
 
 
@@ -750,7 +756,6 @@ class SmartAssistantGUI(QMainWindow):
 
     def _show_summary_popup(self, title: str, text: str) -> None:
         """요약 다이얼로그 표시 (개선된 UI)"""
-        from ui.styles import Colors, Fonts, FontSizes, FontWeights, Spacing, BorderRadius
         
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
@@ -2417,6 +2422,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
 
 
 
