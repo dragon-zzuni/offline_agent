@@ -3057,9 +3057,9 @@ class SmartAssistantGUI(QMainWindow):
                         original_messages = getattr(self.assistant, 'collected_messages', [])
                         self.assistant.collected_messages = new_messages
                         
-                        # 분석 실행
+                        # 분석 실행 (파라미터 없이 호출)
                         result = loop.run_until_complete(
-                            self.assistant.run_full_cycle(force_reload=False)
+                            self.assistant.run_full_cycle()
                         )
                         
                         # 원본 메시지 복원
