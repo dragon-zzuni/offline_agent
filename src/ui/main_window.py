@@ -3182,23 +3182,30 @@ class SmartAssistantGUI(QMainWindow):
         logger.error(f"❌ 폴링 오류: {error_msg}")
         self.statusBar().showMessage(f"⚠️ 데이터 수집 오류: {error_msg}", 10000)
     
-    def on_sim_status_updated(self, status: dict):
+    def on_sim_status_updated(self, status):
         """시뮬레이션 상태 업데이트 핸들러
         
         Args:
-            status: {
-                "current_tick": int,
-                "sim_time": str,
-                "is_running": bool,
-                "auto_tick": bool
-            }
+            status: SimulationStatus 객체 또는 딕셔너리
         """
         try:
-            current_tick = status['current_tick']
+            # SimulationStatus 객체인지 딕셔너리인지 확인
+            if hasattr(status, 'current_tick'):
+                # SimulationStatus 객체인 경우
+                current_tick = status.current_tick
+                is_running = status.is_running
+                auto_tick = status.auto_tick
+                sim_time = status.sim_time
+            else:
+                # 딕셔너리인 경우 (하위 호환성)
+                current_tick = status['current_tick']
+                is_running = status['is_running']
+                auto_tick = status['auto_tick']
+                sim_time = status['sim_time']
             
             # 실행 상태 표시 업데이트 (아이콘 + 텍스트)
             if hasattr(self, 'sim_running_status'):
-                if status['is_running']:
+                if is_running:
                     self.sim_running_status.setText("🟢 실행 중")
                     self.sim_running_status.setStyleSheet("""
                         QLabel {
@@ -3235,7 +3242,7 @@ class SmartAssistantGUI(QMainWindow):
                 self.sim_progress_bar.setFormat(f"Tick: {current_tick:,}")
                 
                 # 실행 상태에 따라 진행률 바 색상 변경
-                if status['is_running']:
+                if is_running:
                     self.sim_progress_bar.setStyleSheet("""
                         QProgressBar {
                             border: 1px solid #10B981;
@@ -3273,18 +3280,18 @@ class SmartAssistantGUI(QMainWindow):
                     """)
             
             # 상세 정보 표시 업데이트
-            auto_tick_icon = "✅" if status['auto_tick'] else "⏸️"
+            auto_tick_icon = "✅" if auto_tick else "⏸️"
             status_text = (
                 f"🕐 Tick: {current_tick:,}\n"
-                f"📅 시간: {status['sim_time']}\n"
-                f"{auto_tick_icon} 자동 틱: {'활성화' if status['auto_tick'] else '비활성화'}"
+                f"📅 시간: {sim_time}\n"
+                f"{auto_tick_icon} 자동 틱: {'활성화' if auto_tick else '비활성화'}"
             )
             
             if hasattr(self, 'sim_status_display'):
                 self.sim_status_display.setText(status_text)
                 
                 # 실행 상태에 따라 배경 색상 변경
-                if status['is_running']:
+                if is_running:
                     self.sim_status_display.setStyleSheet("""
                         QLabel {
                             color: #065F46;
@@ -3311,12 +3318,12 @@ class SmartAssistantGUI(QMainWindow):
             
             # 폴링 간격 조정 (시뮬레이션이 일시정지되면 폴링 간격 증가)
             if self.polling_worker:
-                if status['is_running']:
+                if is_running:
                     self.polling_worker.set_polling_interval(5)  # 5초
                 else:
                     self.polling_worker.set_polling_interval(10)  # 10초
             
-            logger.debug(f"시뮬레이션 상태 업데이트: Tick {current_tick}, 실행={status['is_running']}")
+            logger.debug(f"시뮬레이션 상태 업데이트: Tick {current_tick}, 실행={is_running}")
             
         except Exception as e:
             logger.error(f"❌ 시뮬레이션 상태 업데이트 오류: {e}", exc_info=True)
