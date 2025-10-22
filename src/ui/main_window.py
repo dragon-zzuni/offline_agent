@@ -3010,6 +3010,10 @@ class SmartAssistantGUI(QMainWindow):
                 self._update_progress_bar(100)
                 self._hide_progress_bar()
             
+            # TODO: 새 메시지에 대한 분석 및 TODO 생성 (백그라운드에서 처리)
+            if total_new > 0:
+                self._process_new_messages_async(all_messages)
+            
             # 상태바에 알림 표시
             self.statusBar().showMessage(
                 f"📬 새 데이터 도착: 메일 {len(emails)}개, 메시지 {len(messages)}개 ({timestamp})",
@@ -3022,6 +3026,95 @@ class SmartAssistantGUI(QMainWindow):
             logger.error(f"❌ 새 데이터 처리 오류: {e}", exc_info=True)
             if hasattr(self, '_progress_bar') and self._progress_bar:
                 self._hide_progress_bar()
+    
+    def _process_new_messages_async(self, new_messages: list):
+        """새 메시지에 대한 분석 및 TODO 생성 (백그라운드 처리)
+        
+        Args:
+            new_messages: 새로 수집된 메시지 리스트
+        """
+        try:
+            if not new_messages:
+                return
+            
+            logger.info(f"🔄 새 메시지 분석 시작: {len(new_messages)}개")
+            
+            # 백그라운드에서 분석 실행
+            from PyQt6.QtCore import QTimer
+            
+            def run_analysis():
+                try:
+                    # SmartAssistant의 분석 파이프라인 실행
+                    import asyncio
+                    
+                    # 새 이벤트 루프 생성
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    try:
+                        # 새 메시지에 대해서만 분석 실행
+                        # 임시로 collected_messages를 새 메시지로 설정
+                        original_messages = getattr(self.assistant, 'collected_messages', [])
+                        self.assistant.collected_messages = new_messages
+                        
+                        # 분석 실행
+                        result = loop.run_until_complete(
+                            self.assistant.run_full_cycle(force_reload=False)
+                        )
+                        
+                        # 원본 메시지 복원
+                        self.assistant.collected_messages = original_messages
+                        
+                        if result.get("success"):
+                            # TODO 업데이트
+                            todo_list = result.get("todo_list") or {}
+                            new_items = todo_list.get("items", [])
+                            
+                            if new_items and hasattr(self, "todo_panel"):
+                                # 기존 TODO에 새 항목 추가
+                                self.todo_panel.populate_from_items(new_items)
+                                logger.info(f"✅ 새 TODO {len(new_items)}개 추가됨")
+                            
+                            # 분석 결과 업데이트
+                            analysis_results = result.get("analysis_results") or []
+                            if analysis_results:
+                                # 기존 분석 결과에 추가
+                                if hasattr(self, 'analysis_results'):
+                                    self.analysis_results.extend(analysis_results)
+                                else:
+                                    self.analysis_results = analysis_results
+                                
+                                # AnalysisResultPanel 업데이트
+                                if hasattr(self, "analysis_result_panel"):
+                                    self.analysis_result_panel.update_analysis(
+                                        self.analysis_results, 
+                                        self.collected_messages
+                                    )
+                                
+                                logger.info(f"✅ 새 분석 결과 {len(analysis_results)}개 추가됨")
+                            
+                            # 메시지 요약 업데이트
+                            if hasattr(self, 'message_summary_panel'):
+                                self._update_message_summaries("day")
+                            
+                            # 상태바 업데이트
+                            self.statusBar().showMessage(
+                                f"✅ 새 메시지 분석 완료: TODO {len(new_items)}개, 분석 {len(analysis_results)}개",
+                                3000
+                            )
+                        
+                    finally:
+                        loop.close()
+                        
+                except Exception as e:
+                    logger.error(f"❌ 새 메시지 분석 오류: {e}", exc_info=True)
+                    self.statusBar().showMessage(f"⚠️ 새 메시지 분석 오류: {e}", 3000)
+            
+            # 1초 후 분석 시작 (UI 업데이트 완료 후)
+            QTimer.singleShot(1000, run_analysis)
+            
+        except Exception as e:
+            logger.error(f"❌ 새 메시지 분석 준비 오류: {e}", exc_info=True)
     
     def _show_visual_notification(self):
         """시각적 알림 효과 표시
