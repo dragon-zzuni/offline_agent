@@ -874,11 +874,33 @@ def _source_message_dict(todo: dict) -> dict:
     return {}
 
 def _is_unread(todo: dict) -> bool:
+    # 이미 확인한 TODO는 읽음 처리
     if todo.get("_viewed"):
         return False
+    
+    # 생성된 지 5분 이상 지난 TODO는 자동으로 읽음 처리
+    created_at = todo.get("created_at")
+    if created_at:
+        try:
+            from utils.datetime_utils import parse_iso_datetime
+            from datetime import datetime, timezone, timedelta
+            
+            created_dt = parse_iso_datetime(created_at)
+            if created_dt:
+                now = datetime.now(timezone.utc)
+                # 5분 이상 지난 TODO는 읽음 처리
+                if (now - created_dt).total_seconds() > 300:  # 5분 = 300초
+                    return False
+        except Exception:
+            pass
+    
+    # 소스 메시지 확인
     src = _source_message_dict(todo)
     if not src:
+        # 소스 메시지가 없으면 기본적으로 읽음 처리
         return False
+    
+    # 소스 메시지의 is_read 상태 확인 (기본값: True = 읽음)
     return not src.get("is_read", True)
 
 
@@ -1132,11 +1154,7 @@ class BasicTodoItem(QWidget):
         status.setStyleSheet("background:#E0E7FF; color:#3730A3; padding:2px 8px; border-radius:999px; font-weight:600;")
         top.addWidget(status, 0)
         
-        # 소스 타입 배지 추가 (메일/메시지)
-        source_badge = _create_source_type_badge(todo.get("source_type"))
-        top.addWidget(source_badge, 0)
-        
-        # 수신 타입 배지 추가 (v1.2.1+)
+        # 수신 타입 배지 추가 (상단에는 중요한 정보만)
         recipient_badge = _create_recipient_type_badge(todo.get("recipient_type"))
         if recipient_badge:
             top.addWidget(recipient_badge, 0)
@@ -1201,6 +1219,21 @@ class BasicTodoItem(QWidget):
         if recipient_badge:
             meta.addWidget(recipient_badge, 0)
         
+        # 수신 시간 표시
+        if todo.get("created_at"):
+            from utils.datetime_utils import parse_iso_datetime
+            created_dt = parse_iso_datetime(todo.get("created_at"))
+            if created_dt:
+                # 한국 시간으로 변환하여 표시
+                from datetime import timezone, timedelta
+                kst = timezone(timedelta(hours=9))
+                created_kst = created_dt.astimezone(kst)
+                created_str = created_kst.strftime("%m/%d %H:%M")
+                created_lbl = QLabel(f"수신 · {created_str}")
+                created_lbl.setStyleSheet("color:#059669; background:#D1FAE5; padding:2px 6px; border-radius:8px;")
+                meta.addWidget(created_lbl, 0)
+        
+        # 마감 시간 표시
         if todo.get("deadline"):
             deadline_lbl = QLabel(f"마감 · {todo.get('deadline')}")
             deadline_lbl.setStyleSheet("color:#9F1239; background:#FFE4E6; padding:2px 6px; border-radius:8px;")
@@ -1254,9 +1287,23 @@ class BasicTodoItem(QWidget):
         if unread:
             self.new_badge.show()
             self.setStyleSheet(self._unread_style)
+            
+            # 10초 후 자동으로 읽음 처리 (알람 효과 자동 해제)
+            if not hasattr(self, '_auto_read_timer'):
+                from PyQt6.QtCore import QTimer
+                self._auto_read_timer = QTimer()
+                self._auto_read_timer.setSingleShot(True)
+                self._auto_read_timer.timeout.connect(lambda: self.set_unread(False))
+            
+            self._auto_read_timer.start(10000)  # 10초
         else:
             self.new_badge.hide()
             self.setStyleSheet(self._read_style)
+            
+            # 타이머 정리
+            if hasattr(self, '_auto_read_timer'):
+                self._auto_read_timer.stop()
+            
             try:
                 if isinstance(self.todo, dict):
                     self.todo["_viewed"] = True

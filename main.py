@@ -676,8 +676,10 @@ class SmartAssistant:
                         "subject": source_msg.get("subject"),
                         "platform": source_msg.get("platform"),
                         "recipient_type": recipient_type,
+                        "is_read": True,  # 새로 생성된 TODO는 기본적으로 읽음 처리
                     },
                     "created_at": action.get("created_at"),
+                    "_viewed": False,  # 아직 사용자가 확인하지 않음
                 }
 
                 # ❶ 각 todo_item 별로 초안 생성
