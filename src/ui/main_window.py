@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
 
 
 from typing import Dict, List, Optional
@@ -287,6 +288,8 @@ def _save_todos_to_db(items: list[dict], db_path=TODO_DB_PATH):
             "draft_body": "",
             "evidence": "[]",
             "deadline_confidence": "mid",
+            "recipient_type": "to",
+            "source_type": "메시지",
         }, **(t or {})}
 
         # ID 없으면 자동 생성
@@ -317,8 +320,8 @@ def _save_todos_to_db(items: list[dict], db_path=TODO_DB_PATH):
         INSERT OR REPLACE INTO todos
         (id, title, description, priority, deadline, deadline_ts, requester, type, status,
          source_message, created_at, updated_at, snooze_until, is_top3,
-         draft_subject, draft_body, evidence, deadline_confidence)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         draft_subject, draft_body, evidence, deadline_confidence, recipient_type, source_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             t["id"],
             t["title"],
@@ -338,6 +341,8 @@ def _save_todos_to_db(items: list[dict], db_path=TODO_DB_PATH):
             t["draft_body"],
             t["evidence"],
             t["deadline_confidence"],
+            t.get("recipient_type", "to"),
+            t.get("source_type", "메시지"),
         ))
 
     conn.commit()
@@ -489,6 +494,12 @@ class SmartAssistantGUI(QMainWindow):
         self.selected_persona: Optional[PersonaInfo] = None
         self.data_source_type: str = "json"  # "json" or "virtualoffice"
         self.polling_worker: Optional[PollingWorker] = None
+        
+        # 캐시 시스템 (성능 개선)
+        self._persona_cache: Dict[str, Dict] = {}  # 페르소나별 캐시된 데이터
+        self._last_simulation_tick: Optional[int] = None  # 마지막 시뮬레이션 틱
+        self._simulation_running: bool = False  # 시뮬레이션 실행 상태
+        self._cache_valid_until: Dict[str, float] = {}  # 캐시 유효 시간 (페르소나별)
         self.sim_monitor: Optional[SimulationMonitor] = None
         self.vo_config: Optional[VirtualOfficeConfig] = None
         self.vo_config_path = Path("data/multi_project_8week_ko/virtualoffice_config.json")
@@ -2742,11 +2753,11 @@ class SmartAssistantGUI(QMainWindow):
                 logger.info("PollingWorker 시작 중...")
                 data_source = self.assistant.data_source_manager.current_source
                 if data_source:
-                    self.polling_worker = PollingWorker(data_source)
+                    self.polling_worker = PollingWorker(data_source, polling_interval=30)  # 30초
                     self.polling_worker.new_data_received.connect(self.on_new_data_received)
                     self.polling_worker.error_occurred.connect(self.on_polling_error)
                     self.polling_worker.start()
-                    logger.info("✅ PollingWorker 시작됨")
+                    logger.info("✅ PollingWorker 시작됨 (폴링 간격: 30초)")
             
             # 연결 성공 표시
             self.vo_status_label.setText(f"✅ 연결 성공 ({len(personas)}개 페르소나)")
@@ -2829,7 +2840,7 @@ class SmartAssistantGUI(QMainWindow):
             """)
     
     def on_persona_changed(self, index: int):
-        """페르소나 변경 이벤트 핸들러"""
+        """페르소나 변경 이벤트 핸들러 (캐시 최적화)"""
         if index < 0:
             return
         
@@ -2839,28 +2850,36 @@ class SmartAssistantGUI(QMainWindow):
         
         try:
             self.selected_persona = persona
+            persona_key = f"{persona.email_address}_{persona.chat_handle}"
             logger.info(f"페르소나 변경: {persona.name} ({persona.email_address})")
             
             # 데이터 소스 업데이트 (VirtualOffice 모드인 경우에만)
             if self.data_source_type == "virtualoffice":
+                # 캐시된 데이터가 있고 유효한지 확인
+                if self._should_use_cache(persona_key):
+                    logger.info(f"🚀 캐시된 데이터 사용: {persona.name}")
+                    self._load_from_cache(persona_key)
+                    self.status_message.setText(f"페르소나 변경됨 (캐시): {persona.name}")
+                    
+                    # PollingWorker 페르소나 업데이트 (캐시 사용 시에도 필요)
+                    self._update_polling_worker_persona(persona)
+                    return
+                
+                # 캐시가 없거나 무효한 경우 새로 로드
+                logger.info(f"📡 새 데이터 로드: {persona.name}")
+                self.status_message.setText(f"데이터 로드 중: {persona.name}...")
+                
+                # 데이터 소스 업데이트
                 self.assistant.set_virtualoffice_source(self.vo_client, persona)
+                
+                # PollingWorker 업데이트 (재시작 대신 페르소나만 변경)
+                self._update_polling_worker_persona(persona)
+                
+                # 새 데이터 수집 및 캐시 저장 (UI 업데이트 포함)
+                self._collect_and_cache_data(persona_key)
+                
                 self.status_message.setText(f"페르소나 변경됨: {persona.name}")
                 logger.info(f"✅ 데이터 소스가 {persona.name} 페르소나로 업데이트되었습니다.")
-                
-                # PollingWorker 재시작 (이미 실행 중인 경우)
-                if self.polling_worker and self.polling_worker.isRunning():
-                    logger.info("PollingWorker 재시작 중...")
-                    self.polling_worker.stop()
-                    self.polling_worker.wait(2000)
-                    
-                    # 새 데이터 소스로 PollingWorker 재생성
-                    data_source = self.assistant.data_source_manager.current_source
-                    if data_source:
-                        self.polling_worker = PollingWorker(data_source)
-                        self.polling_worker.new_data_received.connect(self.on_new_data_received)
-                        self.polling_worker.error_occurred.connect(self.on_polling_error)
-                        self.polling_worker.start()
-                        logger.info("✅ PollingWorker 재시작됨")
         
         except Exception as e:
             logger.error(f"❌ 페르소나 변경 오류: {e}", exc_info=True)
@@ -2903,11 +2922,11 @@ class SmartAssistantGUI(QMainWindow):
                     logger.info("PollingWorker 시작 중...")
                     data_source = self.assistant.data_source_manager.current_source
                     if data_source:
-                        self.polling_worker = PollingWorker(data_source)
+                        self.polling_worker = PollingWorker(data_source, polling_interval=30)  # 30초
                         self.polling_worker.new_data_received.connect(self.on_new_data_received)
                         self.polling_worker.error_occurred.connect(self.on_polling_error)
                         self.polling_worker.start()
-                        logger.info("✅ PollingWorker 시작됨")
+                        logger.info("✅ PollingWorker 시작됨 (폴링 간격: 30초)")
             else:
                 self.status_message.setText("VirtualOffice 서버에 연결하고 페르소나를 선택해주세요.")
                 logger.warning("⚠️ VirtualOffice 연결 또는 페르소나 선택이 필요합니다.")
@@ -3115,6 +3134,356 @@ class SmartAssistantGUI(QMainWindow):
             
         except Exception as e:
             logger.error(f"❌ 새 메시지 분석 준비 오류: {e}", exc_info=True)
+    
+    def _should_use_cache(self, persona_key: str) -> bool:
+        """캐시 사용 여부 결정
+        
+        Args:
+            persona_key: 페르소나 식별 키
+            
+        Returns:
+            bool: 캐시 사용 가능 여부
+        """
+        try:
+            # 캐시된 데이터가 없으면 False
+            if persona_key not in self._persona_cache:
+                return False
+            
+            # 시뮬레이션 상태 확인
+            current_tick, is_running = self._get_simulation_status()
+            
+            # 시뮬레이션이 실행 중이면 캐시 사용 안 함 (실시간 데이터 필요)
+            if is_running:
+                logger.debug("시뮬레이션 실행 중 - 캐시 사용 안 함")
+                return False
+            
+            # 틱이 변경되었으면 캐시 무효화
+            if self._last_simulation_tick is not None and current_tick != self._last_simulation_tick:
+                logger.debug(f"틱 변경됨 ({self._last_simulation_tick} → {current_tick}) - 캐시 무효화")
+                self._invalidate_all_cache()
+                return False
+            
+            # 캐시 유효 시간 확인 (5분)
+            import time
+            cache_timeout = 300  # 5분
+            if persona_key in self._cache_valid_until:
+                if time.time() > self._cache_valid_until[persona_key]:
+                    logger.debug("캐시 시간 만료 - 캐시 무효화")
+                    return False
+            
+            logger.debug("캐시 사용 가능")
+            return True
+            
+        except Exception as e:
+            logger.error(f"캐시 확인 오류: {e}")
+            return False
+    
+    def _get_simulation_status(self) -> tuple[int, bool]:
+        """시뮬레이션 상태 조회
+        
+        Returns:
+            tuple: (current_tick, is_running)
+        """
+        try:
+            if hasattr(self, 'sim_monitor') and self.sim_monitor:
+                status = self.sim_monitor.get_status()
+                return status.current_tick, status.is_running
+            
+            # SimulationMonitor가 없으면 API 직접 호출
+            if self.vo_client:
+                status = self.vo_client.get_simulation_status()
+                return status.current_tick, status.is_running
+            
+            return 0, False
+            
+        except Exception as e:
+            logger.debug(f"시뮬레이션 상태 조회 실패: {e}")
+            return 0, False
+    
+    def _load_from_cache(self, persona_key: str) -> None:
+        """캐시에서 데이터 로드
+        
+        Args:
+            persona_key: 페르소나 식별 키
+        """
+        try:
+            cached_data = self._persona_cache.get(persona_key, {})
+            
+            # 메시지 데이터 복원
+            if 'messages' in cached_data:
+                self.collected_messages = cached_data['messages']
+                if hasattr(self.assistant, 'collected_messages'):
+                    self.assistant.collected_messages = cached_data['messages']
+            
+            # TODO 데이터 복원
+            if 'todos' in cached_data and hasattr(self, 'todo_panel'):
+                self.todo_panel.populate_from_items(cached_data['todos'])
+            
+            # 분석 결과 복원
+            if 'analysis_results' in cached_data:
+                self.analysis_results = cached_data['analysis_results']
+                if hasattr(self, 'analysis_result_panel'):
+                    self.analysis_result_panel.update_analysis(
+                        self.analysis_results, 
+                        self.collected_messages
+                    )
+            
+            # UI 업데이트
+            self._update_ui_from_cache(cached_data)
+            
+            logger.info(f"✅ 캐시에서 데이터 로드 완료: {len(cached_data.get('messages', []))}개 메시지")
+            
+        except Exception as e:
+            logger.error(f"캐시 로드 오류: {e}")
+    
+    def _collect_and_cache_data(self, persona_key: str) -> None:
+        """데이터 수집 및 캐시 저장
+        
+        Args:
+            persona_key: 페르소나 식별 키
+        """
+        try:
+            # 현재 데이터 수집
+            data_source = self.assistant.data_source_manager.current_source
+            if not data_source:
+                return
+            
+            # 비동기 데이터 수집
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                messages = loop.run_until_complete(
+                    data_source.collect_messages({"incremental": False})
+                )
+                
+                # 캐시에 저장할 데이터 준비
+                cache_data = {
+                    'messages': messages,
+                    'timestamp': time.time(),
+                    'persona': self.selected_persona.__dict__ if self.selected_persona else {}
+                }
+                
+                # TODO와 분석 결과는 별도로 수집 (필요시)
+                if messages:
+                    # 간단한 분석만 수행 (전체 분석은 백그라운드에서)
+                    cache_data['todos'] = []
+                    cache_data['analysis_results'] = []
+                
+                # 현재 UI에 데이터 적용
+                self.collected_messages = messages
+                if hasattr(self.assistant, 'collected_messages'):
+                    self.assistant.collected_messages = messages
+                
+                # 캐시 저장
+                self._persona_cache[persona_key] = cache_data
+                self._cache_valid_until[persona_key] = time.time() + 300  # 5분 후 만료
+                
+                # UI 즉시 업데이트
+                self._update_ui_with_new_data(messages)
+                
+                # 시뮬레이션 상태 업데이트
+                current_tick, is_running = self._get_simulation_status()
+                self._last_simulation_tick = current_tick
+                self._simulation_running = is_running
+                
+                logger.info(f"✅ 데이터 캐시 저장 및 UI 업데이트 완료: {len(messages)}개 메시지")
+                
+            finally:
+                loop.close()
+                
+        except Exception as e:
+            logger.error(f"데이터 수집 및 캐시 저장 오류: {e}")
+    
+    def _update_polling_worker_persona(self, persona) -> None:
+        """PollingWorker의 페르소나만 업데이트 (재시작 없이)
+        
+        Args:
+            persona: 새 페르소나 정보
+        """
+        try:
+            if self.polling_worker and self.polling_worker.isRunning():
+                # 데이터 소스의 페르소나만 변경
+                data_source = self.assistant.data_source_manager.current_source
+                if hasattr(data_source, 'set_selected_persona'):
+                    persona_dict = {
+                        'name': persona.name,
+                        'email_address': persona.email_address,
+                        'chat_handle': persona.chat_handle,
+                        'role': persona.role,
+                        'id': persona.id
+                    }
+                    data_source.set_selected_persona(persona_dict)
+                    logger.info("✅ PollingWorker 페르소나 업데이트 (재시작 없음)")
+                else:
+                    # 재시작이 필요한 경우
+                    self._restart_polling_worker()
+            else:
+                # PollingWorker가 실행되지 않은 경우 시작
+                self._start_polling_worker()
+                
+        except Exception as e:
+            logger.error(f"PollingWorker 페르소나 업데이트 오류: {e}")
+            # 오류 시 재시작 시도
+            self._restart_polling_worker()
+    
+    def _restart_polling_worker(self) -> None:
+        """PollingWorker 재시작"""
+        try:
+            if self.polling_worker and self.polling_worker.isRunning():
+                logger.info("PollingWorker 재시작 중...")
+                self.polling_worker.stop()
+                self.polling_worker.wait(2000)
+            
+            self._start_polling_worker()
+            
+        except Exception as e:
+            logger.error(f"PollingWorker 재시작 오류: {e}")
+    
+    def _start_polling_worker(self) -> None:
+        """PollingWorker 시작"""
+        try:
+            data_source = self.assistant.data_source_manager.current_source
+            if data_source:
+                # 시뮬레이션 상태에 따른 폴링 간격 조정
+                current_tick, is_running = self._get_simulation_status()
+                polling_interval = 30 if is_running else 60  # 실행 중: 30초, 정지: 60초
+                
+                self.polling_worker = PollingWorker(data_source, polling_interval=polling_interval)
+                self.polling_worker.new_data_received.connect(self.on_new_data_received)
+                self.polling_worker.error_occurred.connect(self.on_polling_error)
+                self.polling_worker.start()
+                logger.info(f"✅ PollingWorker 시작됨 (폴링 간격: {polling_interval}초)")
+                
+        except Exception as e:
+            logger.error(f"PollingWorker 시작 오류: {e}")
+    
+    def _update_ui_from_cache(self, cached_data: Dict) -> None:
+        """캐시 데이터로 UI 업데이트
+        
+        Args:
+            cached_data: 캐시된 데이터
+        """
+        try:
+            messages = cached_data.get('messages', [])
+            self._update_ui_with_new_data(messages)
+            logger.debug("UI 캐시 업데이트 완료")
+            
+        except Exception as e:
+            logger.error(f"UI 캐시 업데이트 오류: {e}")
+    
+    def _update_ui_with_new_data(self, messages: List[Dict]) -> None:
+        """새 데이터로 모든 UI 패널 업데이트
+        
+        Args:
+            messages: 메시지 리스트
+        """
+        try:
+            logger.info(f"🔄 UI 업데이트 시작: {len(messages)}개 메시지")
+            
+            # 1. 이메일 패널 업데이트
+            if hasattr(self, 'email_panel'):
+                email_messages = [m for m in messages if m.get("type") == "email"]
+                self.email_panel.update_emails(email_messages)
+                logger.debug(f"이메일 패널 업데이트: {len(email_messages)}개")
+            
+            # 2. 메시지 요약 패널 업데이트
+            if hasattr(self, 'message_summary_panel'):
+                self._update_message_summaries("day")
+                logger.debug("메시지 요약 패널 업데이트")
+            
+            # 3. 타임라인 업데이트
+            if hasattr(self, 'timeline_list'):
+                self._update_timeline_with_badges()
+                logger.debug("타임라인 업데이트")
+            
+            # 4. 분석 결과 패널 업데이트 (기존 분석 결과가 있는 경우)
+            if hasattr(self, 'analysis_result_panel') and hasattr(self, 'analysis_results'):
+                self.analysis_result_panel.update_analysis(
+                    self.analysis_results, 
+                    messages
+                )
+                logger.debug("분석 결과 패널 업데이트")
+            
+            # 5. TODO 패널은 별도 분석 후 업데이트 (백그라운드에서)
+            # 즉시 분석이 필요한 경우 여기서 처리
+            if messages:
+                self._trigger_background_analysis(messages)
+            
+            logger.info("✅ UI 업데이트 완료")
+            
+        except Exception as e:
+            logger.error(f"UI 업데이트 오류: {e}")
+    
+    def _trigger_background_analysis(self, messages: List[Dict]) -> None:
+        """백그라운드에서 분석 실행 (TODO 생성)
+        
+        Args:
+            messages: 분석할 메시지 리스트
+        """
+        try:
+            # 메시지가 많으면 백그라운드에서 처리
+            if len(messages) > 10:
+                logger.info(f"🔄 백그라운드 분석 시작: {len(messages)}개 메시지")
+                self._process_new_messages_async(messages)
+            else:
+                # 메시지가 적으면 즉시 처리
+                logger.info(f"⚡ 즉시 분석: {len(messages)}개 메시지")
+                self._quick_analysis(messages)
+                
+        except Exception as e:
+            logger.error(f"백그라운드 분석 트리거 오류: {e}")
+    
+    def _quick_analysis(self, messages: List[Dict]) -> None:
+        """빠른 분석 (간단한 TODO 생성)
+        
+        Args:
+            messages: 분석할 메시지 리스트
+        """
+        try:
+            # 간단한 키워드 기반 TODO 생성
+            todos = []
+            
+            for msg in messages[-5:]:  # 최근 5개만 빠르게 분석
+                content = msg.get('body', '') or msg.get('subject', '')
+                if not content:
+                    continue
+                
+                # 간단한 키워드 매칭
+                keywords = ['회의', '미팅', '검토', '확인', '완료', '제출', '보고']
+                for keyword in keywords:
+                    if keyword in content:
+                        todo = {
+                            'id': f"quick_{msg.get('msg_id', uuid.uuid4().hex)}",
+                            'title': f"{keyword} 관련: {content[:50]}...",
+                            'description': content[:200],
+                            'priority': 'Medium',
+                            'status': 'pending',
+                            'created_at': datetime.now().isoformat(),
+                            'source_message': msg.get('msg_id'),
+                            'quick_analysis': True
+                        }
+                        todos.append(todo)
+                        break
+            
+            # TODO 패널 업데이트
+            if todos and hasattr(self, 'todo_panel'):
+                self.todo_panel.populate_from_items(todos)
+                logger.info(f"✅ 빠른 분석 완료: {len(todos)}개 TODO 생성")
+            
+        except Exception as e:
+            logger.error(f"빠른 분석 오류: {e}")
+    
+    def _invalidate_all_cache(self) -> None:
+        """모든 캐시 무효화"""
+        try:
+            self._persona_cache.clear()
+            self._cache_valid_until.clear()
+            logger.info("🗑️ 모든 캐시 무효화됨")
+            
+        except Exception as e:
+            logger.error(f"캐시 무효화 오류: {e}")
     
     def _show_visual_notification(self):
         """시각적 알림 효과 표시
@@ -3409,12 +3778,21 @@ class SmartAssistantGUI(QMainWindow):
                         }
                     """)
             
+            # 캐시 관리 (틱 변경 시 캐시 무효화)
+            if self._last_simulation_tick is not None and current_tick != self._last_simulation_tick:
+                logger.info(f"🔄 틱 변경 감지 ({self._last_simulation_tick} → {current_tick}) - 캐시 무효화")
+                self._invalidate_all_cache()
+            
+            # 시뮬레이션 상태 업데이트
+            self._last_simulation_tick = current_tick
+            self._simulation_running = is_running
+            
             # 폴링 간격 조정 (시뮬레이션이 일시정지되면 폴링 간격 증가)
             if self.polling_worker:
                 if is_running:
-                    self.polling_worker.set_polling_interval(5)  # 5초
+                    self.polling_worker.set_polling_interval(30)  # 30초
                 else:
-                    self.polling_worker.set_polling_interval(10)  # 10초
+                    self.polling_worker.set_polling_interval(60)  # 1분
             
             logger.debug(f"시뮬레이션 상태 업데이트: Tick {current_tick}, 실행={is_running}")
             
@@ -3605,7 +3983,7 @@ class SmartAssistantGUI(QMainWindow):
                 email_url=email_url,
                 chat_url=chat_url,
                 sim_url=sim_url,
-                polling_interval=5,  # 기본값
+                polling_interval=30,  # 30초
                 selected_persona=selected_persona_email
             )
             

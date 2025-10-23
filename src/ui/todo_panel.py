@@ -16,6 +16,14 @@ from PyQt6.QtCore import QTimer, pyqtSignal, Qt
 
 from config.settings import LLM_CONFIG, CONFIG_STORE_PATH
 
+# VDOS 연동 import (선택적)
+try:
+    from utils.vdos_connector import get_vdos_connector, is_vdos_available
+    VDOS_AVAILABLE = True
+except ImportError:
+    VDOS_AVAILABLE = False
+    logger.warning("[VDOS] VDOS 연동 모듈을 찾을 수 없습니다. VDOS 기능이 비활성화됩니다.")
+
 logger = logging.getLogger(__name__)
 
 TODO_DB_PATH = os.path.join("data", "multi_project_8week_ko", "todos_cache.db")
@@ -66,6 +74,33 @@ def _create_recipient_type_badge(recipient_type: str) -> Optional[QLabel]:
         return badge
     
     return None  # 직접 수신(TO)인 경우 배지 없음
+
+
+def _create_source_type_badge(source_type: str) -> QLabel:
+    """소스 타입 배지 생성 헬퍼 함수
+    
+    Args:
+        source_type: 소스 타입 ("메일", "메시지")
+        
+    Returns:
+        QLabel 배지 위젯
+    """
+    source_type = (source_type or "메시지").strip()
+    
+    if source_type == "메일":
+        badge = QLabel("📧 메일")
+        badge.setStyleSheet(
+            "color:#1E40AF; background:#DBEAFE; "
+            "padding:2px 6px; border-radius:8px; font-weight:600; font-size:10px;"
+        )
+    else:  # 메시지 또는 기타
+        badge = QLabel("💬 메시지")
+        badge.setStyleSheet(
+            "color:#065F46; background:#D1FAE5; "
+            "padding:2px 6px; border-radius:8px; font-weight:600; font-size:10px;"
+        )
+    
+    return badge
 
 
 def _normalize_korean_name(token: str) -> str:
@@ -230,6 +265,12 @@ def update_entity_rules(new_rules: Dict[str, Dict[str, float]] | None, reset: bo
                 if not candidate_key:
                     continue
                 dest[candidate_key] = max(dest.get(candidate_key, 0.0), bonus_value)
+                
+                # 임호규 특별 처리: 다양한 이름 변형 추가
+                if candidate_key in ["임호규", "hongyu", "imhokyu"]:
+                    hongyu_variations = ["임호규", "hongyu", "imhokyu", "lim", "ho", "gyu"]
+                    for variation in hongyu_variations:
+                        dest[variation] = max(dest.get(variation, 0.0), bonus_value)
 
 
 def describe_top3_rules() -> str:
@@ -306,19 +347,47 @@ def _try_llm_parse_rules(text: str) -> tuple[Optional[dict], str]:
         return None, f"지원되지 않는 LLM 공급자입니다: {provider}"
 
     system_prompt = (
-        "You are a parser that converts natural language rules into a json object.\n"
-        "Return a json object with keys:\n"
+        "You are an intelligent priority rule parser for a Korean workplace TODO management system.\n"
+        "Your task is to understand natural language instructions and convert them into structured priority rules.\n\n"
+        
+        "CONTEXT UNDERSTANDING:\n"
+        "- Korean names (임호규, 김철수, etc.) should be recognized along with their English variations\n"
+        "- Priority keywords: 최우선/긴급/즉시 = highest, 중요/우선 = high, 보통 = medium, 낮음 = low\n"
+        "- Work types: 버그/bug = critical, 회의/meeting = important, 문서/docs = medium\n\n"
+        
+        "INTELLIGENT PARSING:\n"
+        "- If someone mentions a person's name with priority words, create rules for that person\n"
+        "- Recognize name variations (임호규 = hongyu = imhokyu = lim)\n"
+        "- Understand context: '임호규 최우선' means 임호규's requests should have highest priority\n"
+        "- Set appropriate priority weights based on urgency level\n\n"
+        
+        "OUTPUT FORMAT (JSON only, no prose):\n"
         "{\n"
         '  \"priority_weights\": {\"priority_high\": float, \"priority_medium\": float, \"priority_low\": float},\n'
         '  \"entity_rules\": {\n'
-        '      \"requester\": {\"match\": bonus},\n'
-        '      \"keyword\": {\"match\": bonus},\n'
-        '      \"type\": {\"match\": bonus}\n'
-        "  },\n"
-        '  \"reset\": bool\n'
-        "}\n"
-        "Use bonuses between 0.1 and 2.0. Omit keys that are not provided.\n"
-        "Do not add prose; reply with json only."
+        '      \"requester\": {\"name_or_email_pattern\": bonus_float},\n'
+        '      \"keyword\": {\"keyword\": bonus_float},\n'
+        '      \"type\": {\"type\": bonus_float}\n'
+        "  }\n"
+        "}\n\n"
+        
+        "PRIORITY WEIGHT GUIDELINES:\n"
+        "- 최우선/긴급/즉시: priority_high = 4.5-5.0\n"
+        "- 중요/우선: priority_high = 3.5-4.0\n"
+        "- 보통: priority_medium = 2.5-3.0\n"
+        "- 낮음: priority_low = 0.5-1.5\n\n"
+        
+        "BONUS GUIDELINES:\n"
+        "- Person bonuses: 1.5-2.5 (higher for 최우선)\n"
+        "- Keyword bonuses: 0.5-1.5\n"
+        "- Type bonuses: 0.5-2.0\n\n"
+        
+        "EXAMPLES:\n"
+        "Input: '임호규 최우선'\n"
+        "Output: {\"priority_weights\": {\"priority_high\": 4.8}, \"entity_rules\": {\"requester\": {\"임호규\": 2.5, \"hongyu\": 2.5, \"imhokyu\": 2.5, \"lim\": 2.5}}}\n\n"
+        
+        "Input: '버그 보고서는 긴급하게'\n"
+        "Output: {\"priority_weights\": {\"priority_high\": 4.5}, \"entity_rules\": {\"type\": {\"버그\": 2.0, \"bug\": 2.0}, \"keyword\": {\"보고서\": 1.0}}}\n"
     )
     try:
         payload: Dict[str, object] = {
@@ -406,15 +475,71 @@ def _heuristic_rules_from_text(text: str) -> Optional[dict]:
         if "긴급" in line or "incident" in lower:
             entity_rules["type"]["incident"] = max(entity_rules["type"].get("incident", 0.0), 1.5)
 
-        if any(word in lower for word in ["high", "최우선", "최고", "가장 먼저"]):
-            priority_weights["priority_high"] = max(priority_weights.get("priority_high", TOP3_RULE_DEFAULT["priority_high"]), TOP3_RULE_DEFAULT["priority_high"] + 1.5)
+        # 최우선 키워드 강화 (더 많은 표현 추가)
+        high_priority_words = [
+            "high", "최우선", "최고", "가장 먼저", "긴급", "urgent", "asap", 
+            "즉시", "바로", "지금", "당장", "최고 우선순위", "1순위", "top priority"
+        ]
+        if any(word in lower for word in high_priority_words):
+            # 더 강한 가중치 적용
+            current_high = priority_weights.get("priority_high", TOP3_RULE_DEFAULT["priority_high"])
+            priority_weights["priority_high"] = max(current_high, TOP3_RULE_DEFAULT["priority_high"] + 2.0)  # 1.5 → 2.0으로 증가
         if any(word in lower for word in ["medium", "중간", "보통"]):
             priority_weights["priority_medium"] = max(priority_weights.get("priority_medium", TOP3_RULE_DEFAULT["priority_medium"]), TOP3_RULE_DEFAULT["priority_medium"] + 0.5)
-        if any(word in lower for word in ["low", "낮", "덜 중요"]):
-            priority_weights["priority_low"] = max(0.2, TOP3_RULE_DEFAULT["priority_low"] - 0.5)
+        if any(word in lower for word in ["low", "낮", "덜 중요", "낮게","최하위"]):
+            priority_weights["priority_low"] = max(0.2, TOP3_RULE_DEFAULT["priority_low"] - 2.0)
 
     note = "휴리스틱으로 규칙을 해석했습니다."
     return {"priority_weights": priority_weights, "entity_rules": entity_rules, "note": note}
+
+
+def _enhance_rules_with_vdos(parsed_rules: Dict[str, Any]) -> Dict[str, Any]:
+    """VDOS 데이터를 활용해서 규칙 개선"""
+    if not VDOS_AVAILABLE or not is_vdos_available():
+        return parsed_rules
+    
+    try:
+        vdos = get_vdos_connector()
+        entity_rules = parsed_rules.setdefault("entity_rules", {})
+        requester_rules = entity_rules.setdefault("requester", {})
+        
+        # 요청자 규칙에서 VDOS 데이터 활용
+        enhanced_requesters = {}
+        
+        for requester_key, bonus in requester_rules.items():
+            # VDOS에서 해당 사람의 모든 변형 찾기
+            variations = vdos.get_person_variations(requester_key)
+            
+            for variation in variations:
+                variation_key = variation.lower()
+                enhanced_requesters[variation_key] = max(
+                    enhanced_requesters.get(variation_key, 0.0), 
+                    bonus
+                )
+            
+            logger.info(f"[VDOS] {requester_key} 변형 추가: {variations}")
+        
+        # 부서장 보너스 추가
+        dept_heads = vdos.get_department_heads()
+        for head in dept_heads:
+            head_variations = vdos.get_person_variations(head['name'])
+            for variation in head_variations:
+                variation_key = variation.lower()
+                # 부서장은 기본 1.5배 보너스
+                current_bonus = enhanced_requesters.get(variation_key, 0.0)
+                enhanced_requesters[variation_key] = max(current_bonus, 1.5)
+            
+            logger.info(f"[VDOS] 부서장 {head['name']} 보너스 추가")
+        
+        # 개선된 요청자 규칙 적용
+        entity_rules["requester"].update(enhanced_requesters)
+        
+        logger.info(f"[VDOS] 규칙 개선 완료: {len(enhanced_requesters)}개 요청자 변형 추가")
+        
+    except Exception as e:
+        logger.error(f"[VDOS] 규칙 개선 실패: {e}")
+    
+    return parsed_rules
 
 
 def apply_natural_language_rules(text: str, reset: bool = False) -> tuple[str, str]:
@@ -438,19 +563,28 @@ def apply_natural_language_rules(text: str, reset: bool = False) -> tuple[str, s
         parsed_note = note
     if heuristics:
         if parsed:
+            # LLM 우선순위 보장: LLM 값이 있으면 유지, 없으면 휴리스틱 값 사용
             parsed.setdefault("priority_weights", {})
-            parsed["priority_weights"].update(heuristics.get("priority_weights") or {})
+            heuristic_weights = heuristics.get("priority_weights") or {}
+            
+            for key, heuristic_value in heuristic_weights.items():
+                if key not in parsed["priority_weights"]:
+                    # LLM에 없는 키만 휴리스틱에서 추가
+                    parsed["priority_weights"][key] = heuristic_value
+                # LLM에 이미 있는 키는 LLM 값 유지 (덮어쓰지 않음)
+            
+            # 엔티티 규칙은 더 높은 값 선택 (기존 로직 유지)
             ent = parsed.setdefault("entity_rules", {})
             for cat, mapping in (heuristics.get("entity_rules") or {}).items():
                 ent.setdefault(cat, {})
                 for k, v in mapping.items():
                     ent[cat][k] = max(ent[cat].get(k, 0.0), v)
-            note = parsed_note + " + 휴리스틱 보완"
+            note = parsed_note + " + 휴리스틱 보완 (LLM 우선)"
         else:
             parsed = heuristics
             note = parsed.get("note", "휴리스틱 규칙을 적용했습니다.")
             if llm_message:
-                note += f" (LLM 실패: {llm_message})"
+                note += f" (LLM 파싱 실패: {llm_message})"
     if not parsed:
         msg = "규칙을 해석하지 못했습니다."
         if llm_message:
@@ -465,6 +599,9 @@ def apply_natural_language_rules(text: str, reset: bool = False) -> tuple[str, s
         _persist_top3_rules()
         logger.info("[Top3Rules] applied reset directive from rules")
     else:
+        # VDOS 데이터로 규칙 개선
+        parsed = _enhance_rules_with_vdos(parsed)
+        
         priority_weights = parsed.get("priority_weights")
         if priority_weights:
             set_top3_rules({**get_top3_rules(), **priority_weights})
@@ -517,13 +654,21 @@ def init_db(conn: sqlite3.Connection) -> None:
         draft_body TEXT,
         evidence TEXT,
         deadline_confidence TEXT,
-        recipient_type TEXT DEFAULT 'to'
+        recipient_type TEXT DEFAULT 'to',
+        source_type TEXT DEFAULT '메시지'
     )
     """)
     
-    # 기존 테이블에 recipient_type 컬럼 추가 (마이그레이션)
+    # 기존 테이블에 컬럼 추가 (마이그레이션)
     try:
         cur.execute("ALTER TABLE todos ADD COLUMN recipient_type TEXT DEFAULT 'to'")
+        conn.commit()
+    except sqlite3.OperationalError:
+        # 컬럼이 이미 존재하면 무시
+        pass
+    
+    try:
+        cur.execute("ALTER TABLE todos ADD COLUMN source_type TEXT DEFAULT '메시지'")
         conn.commit()
     except sqlite3.OperationalError:
         # 컬럼이 이미 존재하면 무시
@@ -623,6 +768,17 @@ def _score_for_top3(todo: dict) -> float:
             if match and match in requester:
                 priority_bonus += bonus
                 rule_multiplier += bonus * 0.25
+        
+        # 임호규 특별 매칭 (이메일 주소 포함)
+        hongyu_patterns = ["임호규", "hongyu", "imhokyu", "lim", "ho", "gyu"]
+        if any(pattern in requester for pattern in hongyu_patterns):
+            # 임호규 관련 엔티티 규칙이 있는지 확인
+            for pattern in hongyu_patterns:
+                if pattern in entity_rules.get("requester", {}):
+                    bonus = entity_rules["requester"][pattern]
+                    priority_bonus += bonus
+                    rule_multiplier += bonus * 0.25
+                    break
 
     text_fields = " ".join([
         todo.get("title", ""),
@@ -976,6 +1132,10 @@ class BasicTodoItem(QWidget):
         status.setStyleSheet("background:#E0E7FF; color:#3730A3; padding:2px 8px; border-radius:999px; font-weight:600;")
         top.addWidget(status, 0)
         
+        # 소스 타입 배지 추가 (메일/메시지)
+        source_badge = _create_source_type_badge(todo.get("source_type"))
+        top.addWidget(source_badge, 0)
+        
         # 수신 타입 배지 추가 (v1.2.1+)
         recipient_badge = _create_recipient_type_badge(todo.get("recipient_type"))
         if recipient_badge:
@@ -1031,6 +1191,10 @@ class BasicTodoItem(QWidget):
         for widget in (req, typ):
             widget.setStyleSheet("color:#374151; background:#F3F4F6; padding:2px 6px; border-radius:8px;")
             meta.addWidget(widget, 0)
+        
+        # 소스 타입 표시 (메일/메시지)
+        source_badge = _create_source_type_badge(todo.get("source_type"))
+        meta.addWidget(source_badge, 0)
         
         # 수신 타입 표시 (참조/직접 수신)
         recipient_badge = _create_recipient_type_badge(todo.get("recipient_type"))

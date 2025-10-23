@@ -656,6 +656,9 @@ class SmartAssistant:
                 source_msg = result.get("message") or {}
                 recipient_type = source_msg.get("recipient_type", "to")
                 
+                # 소스 타입 결정 (메일/메시지)
+                source_type = "메일" if source_msg.get("platform") == "email" else "메시지"
+                
                 todo_item = {
                     "id": action.get("action_id"),
                     "title": action.get("title"),
@@ -666,6 +669,7 @@ class SmartAssistant:
                     "type": action.get("action_type"),
                     "status": "pending",
                     "recipient_type": recipient_type,  # 수신 타입 추가 (to/cc/bcc)
+                    "source_type": source_type,  # 소스 타입 추가 (메일/메시지)
                     "source_message": {
                         "id": source_msg.get("msg_id"),
                         "sender": source_msg.get("sender"),
