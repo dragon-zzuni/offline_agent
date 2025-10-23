@@ -3071,15 +3071,34 @@ class SmartAssistantGUI(QMainWindow):
                     asyncio.set_event_loop(loop)
                     
                     try:
-                        # 새 메시지에 대해서만 분석 실행
+                        # 새 메시지에 대해서만 분석 실행 (메시지 수집 건너뛰기)
                         # 임시로 collected_messages를 새 메시지로 설정
                         original_messages = getattr(self.assistant, 'collected_messages', [])
                         self.assistant.collected_messages = new_messages
                         
-                        # 분석 실행 (파라미터 없이 호출)
-                        result = loop.run_until_complete(
-                            self.assistant.run_full_cycle()
+                        # 메시지가 있는지 확인
+                        if not new_messages:
+                            logger.warning("분석할 메시지가 없습니다.")
+                            return
+                        
+                        # 메시지 수집 없이 분석만 실행
+                        analysis_results = loop.run_until_complete(
+                            self.assistant.analyze_messages()
                         )
+                        
+                        # TODO 생성
+                        todo_result = loop.run_until_complete(
+                            self.assistant.generate_todo_list(analysis_results)
+                        )
+                        
+                        # 결과 구성
+                        result = {
+                            "success": True,
+                            "todo_list": todo_result,
+                            "analysis_results": analysis_results,
+                            "collected_messages": len(new_messages),
+                            "messages": new_messages
+                        }
                         
                         # 원본 메시지 복원
                         self.assistant.collected_messages = original_messages
@@ -3121,6 +3140,9 @@ class SmartAssistantGUI(QMainWindow):
                                 f"✅ 새 메시지 분석 완료: TODO {len(new_items)}개, 분석 {len(analysis_results)}개",
                                 3000
                             )
+                            
+                            # 캐시 업데이트 (TODO와 분석 결과 저장)
+                            self._update_cache_with_analysis_results(new_items, analysis_results)
                         
                     finally:
                         loop.close()
@@ -3157,8 +3179,10 @@ class SmartAssistantGUI(QMainWindow):
                 logger.debug("시뮬레이션 실행 중 - 캐시 사용 안 함")
                 return False
             
-            # 틱이 변경되었으면 캐시 무효화
-            if self._last_simulation_tick is not None and current_tick != self._last_simulation_tick:
+            # 틱이 변경되었으면 캐시 무효화 (유효한 틱 변경만 감지)
+            if (self._last_simulation_tick is not None and 
+                current_tick > 0 and 
+                current_tick != self._last_simulation_tick):
                 logger.debug(f"틱 변경됨 ({self._last_simulation_tick} → {current_tick}) - 캐시 무효화")
                 self._invalidate_all_cache()
                 return False
@@ -3217,7 +3241,15 @@ class SmartAssistantGUI(QMainWindow):
             
             # TODO 데이터 복원
             if 'todos' in cached_data and hasattr(self, 'todo_panel'):
-                self.todo_panel.populate_from_items(cached_data['todos'])
+                todos = cached_data['todos']
+                logger.info(f"📋 캐시에서 TODO 복원: {len(todos)}개")
+                if todos:
+                    self.todo_panel.populate_from_items(todos)
+                    logger.info(f"✅ TODO 패널 업데이트 완료: {len(todos)}개")
+                else:
+                    logger.warning("⚠️ 캐시에 TODO가 없음 - 빈 리스트")
+            else:
+                logger.warning("⚠️ 캐시에 'todos' 키가 없거나 todo_panel이 없음")
             
             # 분석 결과 복원
             if 'analysis_results' in cached_data:
@@ -3229,7 +3261,8 @@ class SmartAssistantGUI(QMainWindow):
                     )
             
             # UI 업데이트
-            self._update_ui_from_cache(cached_data)
+            messages = cached_data.get('messages', [])
+            self._update_ui_from_cache_only(messages)
             
             logger.info(f"✅ 캐시에서 데이터 로드 완료: {len(cached_data.get('messages', []))}개 메시지")
             
@@ -3285,7 +3318,9 @@ class SmartAssistantGUI(QMainWindow):
                 
                 # 시뮬레이션 상태 업데이트
                 current_tick, is_running = self._get_simulation_status()
-                self._last_simulation_tick = current_tick
+                # 유효한 틱 값이 있을 때만 업데이트 (0은 오류 상태이므로 무시)
+                if current_tick > 0 or self._last_simulation_tick is None:
+                    self._last_simulation_tick = current_tick
                 self._simulation_running = is_running
                 
                 logger.info(f"✅ 데이터 캐시 저장 및 UI 업데이트 완료: {len(messages)}개 메시지")
@@ -3295,6 +3330,36 @@ class SmartAssistantGUI(QMainWindow):
                 
         except Exception as e:
             logger.error(f"데이터 수집 및 캐시 저장 오류: {e}")
+    
+    def _update_cache_with_analysis_results(self, todos: List[Dict], analysis_results: List[Dict]) -> None:
+        """백그라운드 분석 결과로 캐시 업데이트
+        
+        Args:
+            todos: 생성된 TODO 리스트
+            analysis_results: 분석 결과 리스트
+        """
+        try:
+            if not self.selected_persona:
+                return
+                
+            persona_key = f"{self.selected_persona.email_address}_{self.selected_persona.chat_handle}"
+            
+            # 현재 캐시 데이터 가져오기
+            if persona_key in self._persona_cache:
+                cache_data = self._persona_cache[persona_key]
+                
+                # TODO와 분석 결과 업데이트
+                cache_data['todos'] = todos
+                cache_data['analysis_results'] = analysis_results
+                cache_data['timestamp'] = time.time()  # 타임스탬프 갱신
+                
+                # 캐시 유효 시간 연장
+                self._cache_valid_until[persona_key] = time.time() + 300  # 5분 후 만료
+                
+                logger.info(f"✅ 캐시 업데이트 완료: TODO {len(todos)}개, 분석 결과 {len(analysis_results)}개")
+            
+        except Exception as e:
+            logger.error(f"캐시 업데이트 오류: {e}")
     
     def _update_polling_worker_persona(self, persona) -> None:
         """PollingWorker의 페르소나만 업데이트 (재시작 없이)
@@ -3373,6 +3438,46 @@ class SmartAssistantGUI(QMainWindow):
         except Exception as e:
             logger.error(f"UI 캐시 업데이트 오류: {e}")
     
+    def _update_ui_from_cache_only(self, messages: List[Dict]) -> None:
+        """캐시에서 로드한 데이터로 UI만 업데이트 (백그라운드 분석 없음)
+        
+        Args:
+            messages: 메시지 리스트
+        """
+        try:
+            logger.info(f"🔄 UI 업데이트 시작: {len(messages)}개 메시지")
+            
+            # 1. 이메일 패널 업데이트
+            if hasattr(self, 'email_panel'):
+                email_messages = [m for m in messages if m.get("type") == "email"]
+                self.email_panel.update_emails(email_messages)
+                logger.debug(f"이메일 패널 업데이트: {len(email_messages)}개")
+            
+            # 2. 메시지 요약 패널 업데이트
+            if hasattr(self, 'message_summary_panel'):
+                self._update_message_summaries("day")
+                logger.debug("메시지 요약 패널 업데이트")
+            
+            # 3. 타임라인 업데이트
+            if hasattr(self, 'timeline_list'):
+                self._update_timeline_with_badges()
+                logger.debug("타임라인 업데이트")
+            
+            # 4. 분석 결과 패널 업데이트 (기존 분석 결과가 있는 경우)
+            if hasattr(self, 'analysis_result_panel') and hasattr(self, 'analysis_results'):
+                self.analysis_result_panel.update_analysis(
+                    self.analysis_results, 
+                    messages
+                )
+                logger.debug("분석 결과 패널 업데이트")
+            
+            # 캐시된 데이터이므로 백그라운드 분석 생략
+            # TODO는 이미 _load_from_cache에서 복원됨
+            logger.info("✅ UI 업데이트 완료")
+            
+        except Exception as e:
+            logger.error(f"UI 업데이트 오류: {e}")
+    
     def _update_ui_with_new_data(self, messages: List[Dict]) -> None:
         """새 데이터로 모든 UI 패널 업데이트
         
@@ -3407,7 +3512,7 @@ class SmartAssistantGUI(QMainWindow):
                 logger.debug("분석 결과 패널 업데이트")
             
             # 5. TODO 패널은 별도 분석 후 업데이트 (백그라운드에서)
-            # 즉시 분석이 필요한 경우 여기서 처리
+            # 새로 수집한 메시지에 대해서만 분석 실행
             if messages:
                 self._trigger_background_analysis(messages)
             
@@ -3779,12 +3884,16 @@ class SmartAssistantGUI(QMainWindow):
                     """)
             
             # 캐시 관리 (틱 변경 시 캐시 무효화)
-            if self._last_simulation_tick is not None and current_tick != self._last_simulation_tick:
+            # 유효한 틱 변경만 감지 (0은 오류 상태이므로 무시)
+            if (self._last_simulation_tick is not None and 
+                current_tick > 0 and 
+                current_tick != self._last_simulation_tick):
                 logger.info(f"🔄 틱 변경 감지 ({self._last_simulation_tick} → {current_tick}) - 캐시 무효화")
                 self._invalidate_all_cache()
             
-            # 시뮬레이션 상태 업데이트
-            self._last_simulation_tick = current_tick
+            # 시뮬레이션 상태 업데이트 (유효한 틱 값이 있을 때만)
+            if current_tick > 0 or self._last_simulation_tick is None:
+                self._last_simulation_tick = current_tick
             self._simulation_running = is_running
             
             # 폴링 간격 조정 (시뮬레이션이 일시정지되면 폴링 간격 증가)
