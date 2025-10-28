@@ -1433,19 +1433,20 @@ class SmartAssistantGUI(QMainWindow):
             # 연결 버튼 비활성화
             self.vo_connect_btn.setEnabled(False)
             self.vo_panel.update_connection_status("🔄 연결 중...", 'waiting')
-            QApplication.processEvents()  # UI 업데이트
+            QApplication.processEvents()
             
-            # VirtualOfficeClient 생성
-            email_url = self.vo_email_url.text().strip()
-            chat_url = self.vo_chat_url.text().strip()
-            sim_url = self.vo_sim_url.text().strip()
-            
-            if not email_url or not chat_url or not sim_url:
+            # 서버 URL 가져오기 및 검증
+            server_urls = self.vo_panel.get_server_urls()
+            if not all(server_urls.values()):
                 raise ValueError("모든 서버 URL을 입력해주세요.")
             
-            self.vo_client = VirtualOfficeClient(email_url, chat_url, sim_url)
+            # VirtualOfficeClient 생성 및 연결 테스트
+            self.vo_client = VirtualOfficeClient(
+                server_urls['email'],
+                server_urls['chat'],
+                server_urls['sim']
+            )
             
-            # 연결 테스트
             logger.info("VirtualOffice 서버 연결 테스트 중...")
             connection_status = self.vo_client.test_connection()
             
@@ -1465,27 +1466,7 @@ class SmartAssistantGUI(QMainWindow):
             logger.info(f"✅ {len(personas)}개 페르소나 조회 완료")
             
             # 페르소나 드롭다운 업데이트
-            self.persona_combo.clear()
-            self.persona_combo.setEnabled(True)
-            
-            for persona in personas:
-                display_name = f"{persona.name} ({persona.role})"
-                self.persona_combo.addItem(display_name, persona)
-            
-            # PM 페르소나 자동 선택
-            pm_index = -1
-            for i in range(self.persona_combo.count()):
-                persona = self.persona_combo.itemData(i)
-                if persona and ("pm" in persona.name.lower() or "pm" in persona.role.lower()):
-                    pm_index = i
-                    break
-            
-            if pm_index >= 0:
-                self.persona_combo.setCurrentIndex(pm_index)
-                logger.info(f"✅ PM 페르소나 자동 선택: {self.persona_combo.currentText()}")
-            else:
-                self.persona_combo.setCurrentIndex(0)
-                logger.info(f"⚠️ PM 페르소나를 찾을 수 없어 첫 번째 페르소나 선택: {self.persona_combo.currentText()}")
+            self._setup_personas(personas)
             
             # 시뮬레이션 상태 조회
             sim_status = self.vo_client.get_simulation_status()
@@ -1558,6 +1539,30 @@ class SmartAssistantGUI(QMainWindow):
         finally:
             # 연결 버튼 다시 활성화
             self.vo_connect_btn.setEnabled(True)
+    
+    def _setup_personas(self, personas: list):
+        """페르소나 드롭다운 설정 및 PM 자동 선택"""
+        self.persona_combo.clear()
+        self.persona_combo.setEnabled(True)
+        
+        for persona in personas:
+            display_name = f"{persona.name} ({persona.role})"
+            self.persona_combo.addItem(display_name, persona)
+        
+        # PM 페르소나 자동 선택
+        pm_index = -1
+        for i in range(self.persona_combo.count()):
+            persona = self.persona_combo.itemData(i)
+            if persona and ("pm" in persona.name.lower() or "pm" in persona.role.lower()):
+                pm_index = i
+                break
+        
+        if pm_index >= 0:
+            self.persona_combo.setCurrentIndex(pm_index)
+            logger.info(f"✅ PM 페르소나 자동 선택: {self.persona_combo.currentText()}")
+        else:
+            self.persona_combo.setCurrentIndex(0)
+            logger.info(f"⚠️ PM 페르소나를 찾을 수 없어 첫 번째 페르소나 선택: {self.persona_combo.currentText()}")
     
     def _update_sim_status_display(self, sim_status):
         """시뮬레이션 상태 표시 업데이트"""
