@@ -1859,6 +1859,9 @@ class SmartAssistantGUI(QMainWindow):
                         )
                     logger.info(f"✅ 분석 결과 업데이트 완료: {len(analysis_results)}개")
                 
+                # 캐시 업데이트 (중요!)
+                self._update_cache_with_analysis_results(items, analysis_results)
+                
                 # 메시지 요약 업데이트
                 if hasattr(self, 'message_summary_panel'):
                     self._update_message_summaries("day")
