@@ -18,12 +18,14 @@ from config.settings import LLM_CONFIG, CONFIG_STORE_PATH
 
 # 분리된 헬퍼 및 위젯 import
 from .todo_helpers import (
+    TOP3_RULE_DEFAULT,
     _parse_iso_dt, _created_ts, _normalize_korean_name,
     _create_recipient_type_badge, _create_source_type_badge,
     _deadline_badge, _evidence_count, _source_message_dict,
     _is_unread, _priority_sort_key
 )
 from .widgets import End2EndCard
+from .dialogs import Top3RuleDialog, Top3NaturalRuleDialog
 
 # VDOS 연동 import (선택적)
 try:
@@ -37,16 +39,6 @@ logger = logging.getLogger(__name__)
 
 TODO_DB_PATH = os.path.join("data", "multi_project_8week_ko", "todos_cache.db")
 
-TOP3_RULE_DEFAULT = {
-    "priority_high": 3.0,
-    "priority_medium": 2.0,
-    "priority_low": 1.0,
-    "deadline_emphasis": 24.0,
-    "deadline_base": 1.0,
-    "evidence_per_item": 0.1,
-    "evidence_max_bonus": 0.5,
-    "recipient_type_cc_penalty": 0.7,  # 참조(CC)로 받은 경우 가중치 (0.7 = 30% 감소)
-}
 _TOP3_RULES = deepcopy(TOP3_RULE_DEFAULT)
 _TOP3_LAST_INSTRUCTION = ""
 _KOREAN_NAME_SUFFIXES = ("선생님", "팀장", "부장", "님", "씨")
@@ -84,7 +76,6 @@ def _create_recipient_type_badge(recipient_type: str) -> Optional[QLabel]:
     
     return None  # 직접 수신(TO)인 경우 배지 없음
 
-
 def _create_source_type_badge(source_type: str) -> QLabel:
     """소스 타입 배지 생성 헬퍼 함수
     
@@ -110,7 +101,6 @@ def _create_source_type_badge(source_type: str) -> QLabel:
         )
     
     return badge
-
 
 def _normalize_korean_name(token: str) -> str:
     base = token.strip()
@@ -172,7 +162,6 @@ def _persist_top3_rules() -> None:
     except Exception as exc:
         print(f"[TodoPanel] 규칙 저장 실패: {exc}")
 
-
 def _load_persisted_top3_rules() -> None:
     global _TOP3_LAST_INSTRUCTION
     try:
@@ -199,7 +188,6 @@ def _load_persisted_top3_rules() -> None:
     if isinstance(instruction, str):
         _TOP3_LAST_INSTRUCTION = instruction
 
-
 ENTITY_RULES_DEFAULT = {
     "requester": {},
     "keyword": {},
@@ -207,10 +195,8 @@ ENTITY_RULES_DEFAULT = {
 }
 _TOP3_ENTITY_RULES = deepcopy(ENTITY_RULES_DEFAULT)
 
-
 def get_entity_rules() -> Dict[str, Dict[str, float]]:
     return {k: dict(v) for k, v in _TOP3_ENTITY_RULES.items()}
-
 
 def update_entity_rules(new_rules: Dict[str, Dict[str, float]] | None, reset: bool = False) -> None:
     if reset:
@@ -281,7 +267,6 @@ def update_entity_rules(new_rules: Dict[str, Dict[str, float]] | None, reset: bo
                     for variation in hongyu_variations:
                         dest[variation] = max(dest.get(variation, 0.0), bonus_value)
 
-
 def describe_top3_rules() -> str:
     rules = get_top3_rules()
     parts = [
@@ -301,7 +286,6 @@ def describe_top3_rules() -> str:
         parts.append(f"유형 가중치: {etype}")
     return "\n".join(parts)
 
-
 def _extract_json_from_text(content: str) -> Optional[dict]:
     try:
         return json.loads(content)
@@ -315,7 +299,6 @@ def _extract_json_from_text(content: str) -> Optional[dict]:
         return json.loads(snippet)
     except Exception:
         return None
-
 
 def _try_llm_parse_rules(text: str) -> tuple[Optional[dict], str]:
     provider = (LLM_CONFIG.get("provider") or "azure").lower()
@@ -447,7 +430,6 @@ def _try_llm_parse_rules(text: str) -> tuple[Optional[dict], str]:
         logger.warning("[Top3Rules][LLM] processing error: %s", exc)
         return None, f"LLM 처리 오류: {exc}"
 
-
 def _heuristic_rules_from_text(text: str) -> Optional[dict]:
     if not text:
         return None
@@ -501,7 +483,6 @@ def _heuristic_rules_from_text(text: str) -> Optional[dict]:
     note = "휴리스틱으로 규칙을 해석했습니다."
     return {"priority_weights": priority_weights, "entity_rules": entity_rules, "note": note}
 
-
 def _enhance_rules_with_vdos(parsed_rules: Dict[str, Any]) -> Dict[str, Any]:
     """VDOS 데이터를 활용해서 규칙 개선"""
     if not VDOS_AVAILABLE or not is_vdos_available():
@@ -549,7 +530,6 @@ def _enhance_rules_with_vdos(parsed_rules: Dict[str, Any]) -> Dict[str, Any]:
         logger.error(f"[VDOS] 규칙 개선 실패: {e}")
     
     return parsed_rules
-
 
 def apply_natural_language_rules(text: str, reset: bool = False) -> tuple[str, str]:
     global _TOP3_LAST_INSTRUCTION
@@ -628,9 +608,7 @@ def apply_natural_language_rules(text: str, reset: bool = False) -> tuple[str, s
     summary = describe_top3_rules()
     return note, summary
 
-
 _load_persisted_top3_rules()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 0) DB 헬퍼들과 공용 유틸
@@ -912,7 +890,6 @@ def _is_unread(todo: dict) -> bool:
     # 소스 메시지의 is_read 상태 확인 (기본값: True = 읽음)
     return not src.get("is_read", True)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 1) End2EndCard: Top-3 전용 카드
 # ─────────────────────────────────────────────────────────────────────────────
@@ -993,136 +970,10 @@ class End2EndCard(QWidget):
         payload["draft_body"] = self.body.toPlainText().strip()
         return payload
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 2) Top3RuleDialog: 가중치 조정
 # ─────────────────────────────────────────────────────────────────────────────
-class Top3RuleDialog(QDialog):
-    def __init__(self, current_rules: Dict[str, float], parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Top-3 기준 설정")
-        self.setMinimumWidth(360)
 
-        layout = QVBoxLayout(self)
-        desc = QLabel("각 가중치를 조정하면 Top-3 선정 점수에 바로 반영됩니다.")
-        desc.setWordWrap(True)
-        desc.setStyleSheet("color:#374151;")
-        layout.addWidget(desc)
-
-        form = QFormLayout()
-
-        self.priority_high = QDoubleSpinBox()
-        self.priority_high.setRange(0.1, 10.0)
-        self.priority_high.setSingleStep(0.1)
-        self.priority_high.setDecimals(1)
-
-        self.priority_medium = QDoubleSpinBox()
-        self.priority_medium.setRange(0.1, 10.0)
-        self.priority_medium.setSingleStep(0.1)
-        self.priority_medium.setDecimals(1)
-
-        self.priority_low = QDoubleSpinBox()
-        self.priority_low.setRange(0.1, 10.0)
-        self.priority_low.setSingleStep(0.1)
-        self.priority_low.setDecimals(1)
-
-        self.deadline_emphasis = QDoubleSpinBox()
-        self.deadline_emphasis.setRange(0.0, 168.0)
-        self.deadline_emphasis.setSingleStep(1.0)
-        self.deadline_emphasis.setDecimals(1)
-
-        self.evidence_per_item = QDoubleSpinBox()
-        self.evidence_per_item.setRange(0.0, 1.0)
-        self.evidence_per_item.setSingleStep(0.05)
-        self.evidence_per_item.setDecimals(2)
-
-        self.evidence_max_bonus = QDoubleSpinBox()
-        self.evidence_max_bonus.setRange(0.0, 5.0)
-        self.evidence_max_bonus.setSingleStep(0.1)
-        self.evidence_max_bonus.setDecimals(2)
-
-        form.addRow("High 우선순위 가중치", self.priority_high)
-        form.addRow("Medium 우선순위 가중치", self.priority_medium)
-        form.addRow("Low 우선순위 가중치", self.priority_low)
-        form.addRow("마감 임박 보너스 (기본 24)", self.deadline_emphasis)
-        form.addRow("근거 1개당 보너스", self.evidence_per_item)
-        form.addRow("근거 보너스 최대치", self.evidence_max_bonus)
-
-        layout.addLayout(form)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-        self._apply_initial(current_rules)
-
-    def _apply_initial(self, rules: Dict[str, float]) -> None:
-        self.priority_high.setValue(rules.get("priority_high", TOP3_RULE_DEFAULT["priority_high"]))
-        self.priority_medium.setValue(rules.get("priority_medium", TOP3_RULE_DEFAULT["priority_medium"]))
-        self.priority_low.setValue(rules.get("priority_low", TOP3_RULE_DEFAULT["priority_low"]))
-        self.deadline_emphasis.setValue(rules.get("deadline_emphasis", TOP3_RULE_DEFAULT["deadline_emphasis"]))
-        self.evidence_per_item.setValue(rules.get("evidence_per_item", TOP3_RULE_DEFAULT["evidence_per_item"]))
-        self.evidence_max_bonus.setValue(rules.get("evidence_max_bonus", TOP3_RULE_DEFAULT["evidence_max_bonus"]))
-
-    def rules(self) -> Dict[str, float]:
-        return {
-            "priority_high": self.priority_high.value(),
-            "priority_medium": self.priority_medium.value(),
-            "priority_low": self.priority_low.value(),
-            "deadline_emphasis": self.deadline_emphasis.value(),
-            "deadline_base": TOP3_RULE_DEFAULT["deadline_base"],
-            "evidence_per_item": self.evidence_per_item.value(),
-            "evidence_max_bonus": self.evidence_max_bonus.value(),
-        }
-
-
-class Top3NaturalRuleDialog(QDialog):
-    def __init__(self, parent=None, seed_text: Optional[str] = None, summary_text: Optional[str] = None):
-        super().__init__(parent)
-        self.setWindowTitle("자연어 규칙 입력")
-        self.setMinimumSize(420, 320)
-
-        layout = QVBoxLayout(self)
-        info = QLabel(
-            "자연어로 Top-3 우선순위 규칙을 입력하세요.\n"
-            "예) \"박부장님 메일은 최우선\" 또는 \"버그 보고서는 우선순위 높게\""
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
-
-        if summary_text:
-            summary_box = QTextEdit()
-            summary_box.setReadOnly(True)
-            summary_box.setPlainText(summary_text)
-            summary_box.setStyleSheet("background:#F3F4F6; color:#1F2937;")
-            summary_box.setFixedHeight(90)
-            layout.addWidget(summary_box)
-
-        self.editor = QTextEdit()
-        self.editor.setPlaceholderText("규칙을 입력하세요...")
-        if seed_text:
-            self.editor.setPlainText(seed_text)
-        layout.addWidget(self.editor, 1)
-
-        self.reset_box = QCheckBox("기존 규칙 초기화")
-        layout.addWidget(self.reset_box)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def rule_text(self) -> str:
-        return self.editor.toPlainText().strip()
-
-    def reset_requested(self) -> bool:
-        return self.reset_box.isChecked()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3) BasicTodoItem: 일반 TODO 카드
-# ─────────────────────────────────────────────────────────────────────────────
 class BasicTodoItem(QWidget):
     mark_done_clicked = pyqtSignal(dict)
 
@@ -1881,7 +1732,6 @@ class TodoPanel(QWidget):
         if db_updated:
             self.refresh_todo_list()
 
-
 class TodoDetailDialog(QDialog):
     """TODO 상세 다이얼로그 - 상하 분할 레이아웃"""
     
@@ -2279,13 +2129,4 @@ class TodoDetailDialog(QDialog):
         
         logger.info(f"[TodoDetail][LLM] 생성 완료 (길이: {len(content)}자)")
         return content.strip()
-
-
-
-
-
-
-
-
-
 

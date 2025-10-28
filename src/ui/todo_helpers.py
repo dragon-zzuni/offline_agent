@@ -8,6 +8,18 @@ from typing import Optional, List, Dict
 from PyQt6.QtWidgets import QLabel
 
 
+# Top-3 규칙 기본값
+TOP3_RULE_DEFAULT = {
+    "priority_high": 3.0,
+    "priority_medium": 2.0,
+    "priority_low": 1.0,
+    "deadline_emphasis": 24.0,
+    "deadline_base": 1.0,
+    "evidence_per_item": 0.1,
+    "evidence_max_bonus": 0.5,
+    "recipient_type_cc_penalty": 0.7,
+}
+
 # 한국어 이름 처리 상수
 _KOREAN_NAME_SUFFIXES = ("선생님", "팀장", "부장", "님", "씨")
 _KOREAN_PARTICLES = (
