@@ -22,7 +22,9 @@ from utils.datetime_utils import parse_iso_datetime, is_in_time_range, ensure_ut
 from data_sources.manager import DataSourceManager
 from data_sources.json_source import JSONDataSource
 from data_sources.virtualoffice_source import VirtualOfficeDataSource
-DEFAULT_DATASET_ROOT = project_root / "data" / "multi_project_8week_ko"
+# 로컬 JSON 파일은 더 이상 사용하지 않음 (VDOS DB 사용)
+# DEFAULT_DATASET_ROOT = project_root / "data" / "multi_project_8week_ko"
+DEFAULT_DATASET_ROOT = None  # VirtualOffice 전용
 
 # # Windows 한글 출력 설정
 # import sys
@@ -210,7 +212,8 @@ class SmartAssistant:
     """스마트 어시스턴트 메인 클래스"""
     
     def __init__(self, dataset_root: Optional[Path | str] = None):
-        self.dataset_root = Path(dataset_root) if dataset_root else DEFAULT_DATASET_ROOT
+        # 로컬 JSON 파일은 더 이상 사용하지 않음 (VDOS 전용)
+        self.dataset_root = None  # VirtualOffice 전용
 
         self.summarizer = MessageSummarizer()
         self.priority_ranker = PriorityRanker()
@@ -234,18 +237,15 @@ class SmartAssistant:
         self._dataset_loaded = False
         self._dataset_last_loaded: Optional[datetime] = None
         
-        # DataSourceManager 추가
+        # DataSourceManager 추가 (VirtualOffice 전용)
         self.data_source_manager = DataSourceManager()
-        self._setup_default_json_source()
+        # JSON 소스는 설정하지 않음 (VirtualOffice만 사용)
 
     def _setup_default_json_source(self) -> None:
-        """기본 JSON 데이터 소스 설정"""
-        json_source = JSONDataSource(dataset_root=self.dataset_root)
-        self.data_source_manager.set_source(json_source, "json")
-        
-        # JSON 소스에서 로드한 페르소나 정보를 SmartAssistant에 동기화
-        self.personas = json_source.personas
-        self.persona_by_email = json_source.persona_by_email
+        """기본 JSON 데이터 소스 설정 (더 이상 사용하지 않음)"""
+        # 로컬 JSON 파일은 더 이상 사용하지 않음
+        # VirtualOffice 연동 시 set_virtualoffice_source()를 호출하여 설정
+        pass
         self.persona_by_handle = json_source.persona_by_handle
         self.user_profile = json_source.user_profile
         
@@ -297,6 +297,10 @@ class SmartAssistant:
         logger.info(f"✅ VirtualOffice 데이터 소스로 전환 완료 (페르소나: {persona_dict.get('name', 'Unknown')})")
 
     def _load_json(self, filename: str) -> Any:
+        # dataset_root가 None이면 FileNotFoundError 발생
+        if self.dataset_root is None:
+            raise FileNotFoundError(f"데이터 파일을 찾을 수 없습니다: {filename} (dataset_root가 설정되지 않음)")
+        
         path = self.dataset_root / filename
         if not path.exists():
             raise FileNotFoundError(f"데이터 파일을 찾을 수 없습니다: {path}")
@@ -304,6 +308,11 @@ class SmartAssistant:
             return json.load(fp)
 
     def _ensure_dataset(self, force_reload: bool = False) -> None:
+        # VirtualOffice 모드일 때는 데이터셋 로드 건너뛰기
+        if self.dataset_root is None:
+            logger.debug("VirtualOffice 모드: 데이터셋 로드 건너뛰기")
+            return
+        
         if self._dataset_loaded and not force_reload:
             return
         self._load_dataset()

@@ -30,16 +30,30 @@ class WorkerThread(QThread):
             self.status_updated.emit("시스템 초기화 중...")
             loop.run_until_complete(self.assistant.initialize(self.dataset_config))
             
-            self.status_updated.emit("메시지 수집 중...")
-            self.progress_updated.emit(20)
+            # skip_collection 옵션 확인
+            skip_collection = self.collect_options.get("skip_collection", False)
             
-            messages = loop.run_until_complete(
-                self.assistant.collect_messages(**self.collect_options)
-            )
-            
-            if not messages:
-                self.error_occurred.emit("수집된 메시지가 없습니다.")
-                return
+            if skip_collection:
+                # 기존 메시지 사용 (수집 건너뛰기)
+                self.status_updated.emit("기존 메시지 사용 중...")
+                self.progress_updated.emit(20)
+                messages = getattr(self.assistant, 'collected_messages', [])
+                
+                if not messages:
+                    self.error_occurred.emit("분석할 메시지가 없습니다.")
+                    return
+            else:
+                # 새로 메시지 수집
+                self.status_updated.emit("메시지 수집 중...")
+                self.progress_updated.emit(20)
+                
+                messages = loop.run_until_complete(
+                    self.assistant.collect_messages(**self.collect_options)
+                )
+                
+                if not messages:
+                    self.error_occurred.emit("수집된 메시지가 없습니다.")
+                    return
             
             self.status_updated.emit("AI 분석 중...")
             self.progress_updated.emit(50)

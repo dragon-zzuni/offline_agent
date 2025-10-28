@@ -6,6 +6,7 @@ import asyncio
 import logging
 import json
 import re
+import uuid
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -200,7 +201,7 @@ class ActionExtractor:
         deadline = self._extract_deadline(text)
         
         return ActionItem(
-            action_id=f"{action_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            action_id=f"{action_type}_{uuid.uuid4().hex[:12]}",
             action_type=action_type,
             title=title,
             description=context,
@@ -231,7 +232,7 @@ class ActionExtractor:
         deadline = self._extract_deadline_from_match(match, action_type)
         
         return ActionItem(
-            action_id=f"{action_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            action_id=f"{action_type}_{uuid.uuid4().hex[:12]}",
             action_type=action_type,
             title=title,
             description=context,

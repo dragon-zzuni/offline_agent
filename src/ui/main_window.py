@@ -24,62 +24,12 @@ logger = logging.getLogger(__name__)
 from PyQt6.QtGui import QFont, QFontDatabase
 from PyQt6.QtWidgets import QApplication, QStyleFactory
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
-def _make_http_session():
-    """HTTP 세션 생성 (재시도 로직 포함)
-    
-    네트워크 오류 시 자동으로 재시도하는 HTTP 세션을 생성합니다.
-    
-    재시도 설정:
-    - 최대 3회 재시도
-    - 백오프 팩터: 0.6초
-    - 재시도 대상 상태 코드: 502, 503, 504
-    - 허용 메서드: GET, POST
-    
-    Returns:
-        requests.Session: 재시도 로직이 적용된 HTTP 세션
-    """
-    retry = Retry(
-        total=3, connect=3, read=3,
-        backoff_factor=0.6,
-        status_forcelist=(502, 503, 504),
-        allowed_methods=("GET", "POST"),
-        raise_on_status=False,
-    )
-    s = requests.Session()
-    adapter = HTTPAdapter(max_retries=retry)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
-    return s
 
-TODO_DB_PATH = os.path.join("data", "multi_project_8week_ko", "todos_cache.db")  # v1.2.0: 데이터셋 변경
 
-KMA_CITY_GRID = {
-    "서울": (60, 127),
-    "Seoul": (60, 127),
-    "부산": (98, 76),
-    "Busan": (98, 76),
-    "대구": (89, 90),
-    "Daegu": (89, 90),
-    "인천": (55, 124),
-    "Incheon": (55, 124),
-    "광주": (58, 74),
-    "Gwangju": (58, 74),
-    "대전": (67, 100),
-    "Daejeon": (67, 100),
-}
 
-KMA_CITY_ALIAS = {
-    "서울": "Seoul",
-    "부산": "Busan",
-    "대구": "Daegu",
-    "인천": "Incheon",
-    "광주": "Gwangju",
-    "대전": "Daejeon",
-}
+# TODO DB는 VDOS DB와 같은 위치에 저장 (동적으로 설정됨)
+TODO_DB_PATH = None  # 초기화 시 설정됨
 
 # Windows 한글 출력 설정
 if sys.platform == "win32":
@@ -124,6 +74,9 @@ from utils.datetime_utils import parse_iso_datetime  # ✅ 날짜 파싱 유틸�
 from .widgets import WorkerThread, StatusIndicator, EmojiLabel, Chip
 from .helpers import WrapHelper
 
+# 서비스 import
+from src.services import WeatherService
+
 # VirtualOffice 연동 관련 import
 from src.integrations.virtualoffice_client import VirtualOfficeClient
 from src.integrations.models import PersonaInfo, VirtualOfficeConfig
@@ -135,38 +88,7 @@ from src.ui.visual_notification import NotificationManager, VisualNotification
 from src.ui.new_badge_widget import NewBadgeWidget, MessageItemWidget
 from src.ui.tick_history_dialog import TickHistoryDialog
 
-# 한 번만 실행(어디든 붙여서 호출)
-def recompute_top3_in_db(db_path="data/mobile_4week_ko/todos_cache.db"):
-    import sqlite3, json
-    from datetime import datetime, timezone
-    def score(r):
-        p=(r.get("priority") or "low").lower()
-        wp={"high":3,"medium":2,"low":1}.get(p,1)
-        now=datetime.now(timezone.utc)
-        dl=r.get("deadline_ts") or r.get("deadline")
-        try:
-            dl=dl and (datetime.fromisoformat(dl.replace("Z","+00:00")) if "Z" in dl else datetime.fromisoformat(dl))
-        except: dl=None
-        wd=1.0
-        if dl:
-            if dl.tzinfo is None: dl=dl.replace(tzinfo=timezone.utc)
-            h=max(0,(dl-now).total_seconds()/3600)
-            wd=1+24/(24+h)
-        ev=r.get("evidence") or "[]"
-        try: n=len(ev if isinstance(ev,list) else json.loads(ev))
-        except: n=0
-        we=1+min(0.5,0.1*n)
-        return wp*wd*we
-    conn=sqlite3.connect(db_path); conn.row_factory=sqlite3.Row
-    cur=conn.cursor(); cur.execute("SELECT * FROM todos WHERE status!='done'")
-    rows=[dict(x) for x in cur.fetchall()]
-    if not rows: conn.close(); return
-    for r in rows: r["_s"]=score(r)
-    rows.sort(key=lambda x:(x["_s"], x.get("created_at","")), reverse=True)
-    top=[r["id"] for r in rows[:3] if r.get("id")]
-    cur.execute("UPDATE todos SET is_top3=0")
-    if top: cur.execute(f"UPDATE todos SET is_top3=1 WHERE id IN ({','.join('?'*len(top))})", top)
-    conn.commit(); conn.close()
+
 
 def _init_todo_schema(conn: sqlite3.Connection):
     cur = conn.cursor()
@@ -206,51 +128,7 @@ def _init_todo_schema(conn: sqlite3.Connection):
 #         except Exception:
 #             return None
 
-def _score_for_top3(t: dict) -> float:
-    # 우선순위 가중치
-    p = (t.get("priority") or "low").lower()
-    w_priority = {"high": 3.0, "medium": 2.0, "low": 1.0}.get(p, 1.0)
 
-    # 데드라인 임박 가중치(없으면 약하게)
-    now = datetime.now(timezone.utc)
-    deadline = t.get("deadline_ts") or t.get("deadline")
-    if deadline:
-        try:
-            dl = datetime.fromisoformat(deadline.replace("Z","+00:00"))
-        except Exception:
-            try:
-                dl = datetime.fromisoformat(deadline)
-            except Exception:
-                dl = None
-    else:
-        dl = None
-    if dl:
-        hours_left = max(0.0, (dl - now).total_seconds() / 3600.0)
-        w_deadline = 1.0 + (24.0 / (24.0 + hours_left))  # 0~24h 임박할수록 ~2.0
-    else:
-        w_deadline = 1.0
-
-    # 액션/근거가 많은 것도 약간 가산
-    reasons = t.get("evidence")
-    if not isinstance(reasons, list):
-        try: reasons = json.loads(reasons or "[]")
-        except: reasons = []
-    w_evidence = 1.0 + min(0.5, 0.1 * len(reasons))     # 최대 +0.5
-
-    return w_priority * w_deadline * w_evidence
-
-def _pick_top3(items: list[dict]) -> set[str]:
-    # status가 done/snoozed가 아닌 것만 후보
-    cand = [x for x in items if (x.get("status") or "pending") not in ("done",)]
-    # 점수 계산
-    for x in cand:
-        x["_top3_score"] = _score_for_top3(x)
-    # 점수 > created_at 최신 순으로 정렬
-    def _created_iso(x):
-        return x.get("created_at") or datetime.now().isoformat()
-    cand.sort(key=lambda x: (x["_top3_score"], _created_iso(x)), reverse=True)
-    top = cand[:3]
-    return {x.get("id") or "" for x in top if x.get("id")}
 
 def _save_todos_to_db(items: list[dict], db_path=TODO_DB_PATH):
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -299,7 +177,29 @@ def _save_todos_to_db(items: list[dict], db_path=TODO_DB_PATH):
         prepared.append(t)
 
     # 1) 이번 배치에서 Top-3 자동 선정 (이미 is_top3가 True면 존중)
-    auto_top_ids = _pick_top3([x for x in prepared if not x.get("is_top3")])
+    # 주의: MainWindow의 top3_service를 사용 (이미 VDOS 연동됨)
+    # 전역 변수로 접근 (MainWindow 인스턴스가 있을 때만)
+    auto_top_ids = set()
+    try:
+        # MainWindow의 top3_service 사용 시도
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            for widget in app.topLevelWidgets():
+                if hasattr(widget, 'top3_service'):
+                    auto_top_ids = widget.top3_service.pick_top3([x for x in prepared if not x.get("is_top3")])
+                    break
+        
+        # MainWindow를 찾지 못한 경우 폴백
+        if not auto_top_ids:
+            from src.services import Top3Service
+            from src.utils.vdos_connector import VDOSConnector
+            vdos_conn = VDOSConnector()
+            top3_service = Top3Service(vdos_connector=vdos_conn)
+            auto_top_ids = top3_service.pick_top3([x for x in prepared if not x.get("is_top3")])
+    except Exception as e:
+        logger.warning(f"Top3 자동 선정 실패: {e}")
+        auto_top_ids = set()
 
     # 2) INSERT/REPLACE
     for t in prepared:
@@ -352,8 +252,9 @@ class SmartAssistantGUI(QMainWindow):
         self.assistant = SmartAssistant()
         self.worker_thread = None
         self.current_status = "offline"
+        # 로컬 JSON 파일은 더 이상 사용하지 않음 (VDOS 전용)
         self.dataset_config = {
-            "dataset_root": str(DEFAULT_DATASET_ROOT),
+            "dataset_root": None,  # VirtualOffice 전용
             "force_reload": False,
         }
         self.collect_options = {
@@ -364,12 +265,34 @@ class SmartAssistantGUI(QMainWindow):
         }
         self.analysis_results: List[Dict] = []
         self.collected_messages: List[Dict] = []
-        self.kma_api_key = os.environ.get("KMA_API_KEY")
+        
+        # 날씨 서비스 초기화
+        kma_api_key = os.environ.get("KMA_API_KEY")
+        self.weather_service = WeatherService(kma_api_key=kma_api_key)
+        
+        # VDOS 연동 초기화 (people 데이터용)
+        from src.utils.vdos_connector import VDOSConnector
+        self.vdos_connector = VDOSConnector()
+        
+        # TODO DB 경로 설정 (VDOS DB와 같은 위치)
+        global TODO_DB_PATH
+        if self.vdos_connector.is_available:
+            vdos_dir = os.path.dirname(self.vdos_connector.vdos_db_path)
+            TODO_DB_PATH = os.path.join(vdos_dir, "todos_cache.db")
+            logger.info(f"[MainWindow] TODO DB 경로: {TODO_DB_PATH}")
+        else:
+            # 폴백: 기본 경로
+            TODO_DB_PATH = os.path.join("data", "todos_cache.db")
+            logger.warning(f"[MainWindow] VDOS 연결 실패, 폴백 경로 사용: {TODO_DB_PATH}")
+        
+        # Top3 서비스 초기화 (VDOS 연동)
+        from src.services import Top3Service
+        self.top3_service = Top3Service(vdos_connector=self.vdos_connector)
         
         # VirtualOffice 연동 관련 속성
         self.vo_client: Optional[VirtualOfficeClient] = None
         self.selected_persona: Optional[PersonaInfo] = None
-        self.data_source_type: str = "json"  # "json" or "virtualoffice"
+        self.data_source_type: str = "virtualoffice"  # VirtualOffice 전용
         self.polling_worker: Optional[PollingWorker] = None
         
         # 캐시 시스템 (성능 개선)
@@ -379,7 +302,12 @@ class SmartAssistantGUI(QMainWindow):
         self._cache_valid_until: Dict[str, float] = {}  # 캐시 유효 시간 (페르소나별)
         self.sim_monitor: Optional[SimulationMonitor] = None
         self.vo_config: Optional[VirtualOfficeConfig] = None
-        self.vo_config_path = Path("data/multi_project_8week_ko/virtualoffice_config.json")
+        # VirtualOffice 설정 파일 경로 (VDOS DB와 같은 위치)
+        if self.vdos_connector and self.vdos_connector.is_available:
+            vdos_dir = os.path.dirname(self.vdos_connector.vdos_db_path)
+            self.vo_config_path = Path(vdos_dir) / "virtualoffice_config.json"
+        else:
+            self.vo_config_path = Path("data/virtualoffice_config.json")
         
         # 시각적 알림 관리자
         self.notification_manager = NotificationManager()
@@ -394,11 +322,12 @@ class SmartAssistantGUI(QMainWindow):
         self.init_ui()
         self.setup_timers()
         self.initialize_online_state()
-        # SmartAssistantGUI.__init__() 안
-        self.http = _make_http_session()
         
         # VirtualOffice 설정 로드
         self._load_vo_config()
+        
+        # 연결 상태 레이블 강제 업데이트 (자동 연결 후)
+        QTimer.singleShot(1000, self._update_connection_status)
 
     
     def init_ui(self):
@@ -481,37 +410,47 @@ class SmartAssistantGUI(QMainWindow):
         
         layout.addWidget(status_group)
         
-        # 데이터셋 정보
+        # 데이터 소스 정보 (VirtualOffice 전용)
         dataset_group = QGroupBox("데이터 소스")
         dataset_layout = QVBoxLayout(dataset_group)
-        dataset_layout.addWidget(QLabel("사용 중인 데이터 폴더:"))
-        self.dataset_path_label = QLabel(str(Path(self.dataset_config["dataset_root"]).resolve()))
-        self.dataset_path_label.setWordWrap(True)
-        self.dataset_path_label.setStyleSheet("color: #1f2937; font-weight: 600;")
-        dataset_layout.addWidget(self.dataset_path_label)
-
-        self.reload_dataset_button = QPushButton("데이터 다시 읽기")
-        self.reload_dataset_button.setStyleSheet("""
-            QPushButton {
-                background-color: #6366f1;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #4f46e5;
-            }
-        """)
-        self.reload_dataset_button.clicked.connect(self.mark_dataset_reload_needed)
-        dataset_layout.addWidget(self.reload_dataset_button)
+        
+        info_label = QLabel("VirtualOffice 실시간 연동 전용")
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #059669; font-weight: 600; background: #D1FAE5; padding: 8px; border-radius: 4px;")
+        dataset_layout.addWidget(info_label)
+        
+        help_label = QLabel("로컬 JSON 파일은 더 이상 지원하지 않습니다.\n아래 'VirtualOffice 연동' 섹션에서 실시간 연결을 설정하세요.")
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet("color: #6B7280; font-size: 10px; padding: 4px;")
+        dataset_layout.addWidget(help_label)
 
         layout.addWidget(dataset_group)
         
         # 제어 버튼
         control_group = QGroupBox("제어")
         control_layout = QVBoxLayout(control_group)
+        
+        # VirtualOffice 연결 테스트 버튼 (상단 배치)
+        self.vo_connect_btn = QPushButton("🔌 실시간 연결 테스트")
+        self.vo_connect_btn.clicked.connect(self.connect_virtualoffice)
+        self.vo_connect_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3B82F6;
+                color: white;
+                border: none;
+                padding: 8px;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #2563EB;
+            }
+            QPushButton:disabled {
+                background-color: #9CA3AF;
+            }
+        """)
+        control_layout.addWidget(self.vo_connect_btn)
         
         # 시작 버튼
         self.start_button = QPushButton("🔄 메시지 수집")
@@ -656,14 +595,7 @@ class SmartAssistantGUI(QMainWindow):
         
         return scroll_area
     
-    def mark_dataset_reload_needed(self):
-        """데이터셋을 다시 읽도록 표시"""
-        self.dataset_config["force_reload"] = True
-        self.collect_options["force_reload"] = True
-        if hasattr(self, "dataset_path_label"):
-            self.dataset_path_label.setText(str(Path(self.dataset_config["dataset_root"]).resolve()))
-        if hasattr(self, "status_message"):
-            self.status_message.setText("데이터를 다시 읽도록 준비되었습니다. '메시지 수집 시작'을 눌러주세요.")
+    # mark_dataset_reload_needed 메서드 제거 (더 이상 사용하지 않음)
 
     def create_virtualoffice_panel(self):
         """VirtualOffice 연동 패널 생성"""
@@ -673,33 +605,74 @@ class SmartAssistantGUI(QMainWindow):
         layout = QVBoxLayout(group)
         layout.setSpacing(8)
         
-        # 데이터 소스 전환 (라디오 버튼)
-        source_label = QLabel("데이터 소스:")
-        source_label.setStyleSheet("font-weight: 600; color: #374151;")
-        layout.addWidget(source_label)
+        # VirtualOffice 전용 (데이터 소스 전환 제거)
+        info_label = QLabel("✅ VirtualOffice 실시간 연동 전용")
+        info_label.setStyleSheet("color: #059669; font-weight: 600; background: #D1FAE5; padding: 6px; border-radius: 4px;")
+        layout.addWidget(info_label)
         
-        self.source_button_group = QButtonGroup(self)
-        self.json_source_radio = QRadioButton("로컬 JSON 파일")
-        self.vo_source_radio = QRadioButton("VirtualOffice 실시간")
-        self.json_source_radio.setChecked(True)  # 기본값
+        # 페르소나 선택 (최상단으로 이동)
+        persona_label = QLabel("👤 사용자 페르소나:")
+        persona_label.setStyleSheet("font-weight: 700; color: #1F2937; margin-top: 8px; font-size: 13px;")
+        layout.addWidget(persona_label)
         
-        self.source_button_group.addButton(self.json_source_radio, 0)
-        self.source_button_group.addButton(self.vo_source_radio, 1)
-        self.source_button_group.buttonClicked.connect(self.on_data_source_changed)
+        self.persona_combo = QComboBox()
+        self.persona_combo.setEnabled(False)  # 연결 전에는 비활성화
+        self.persona_combo.currentIndexChanged.connect(self.on_persona_changed)
+        self.persona_combo.setStyleSheet("""
+            QComboBox {
+                padding: 8px;
+                border: 2px solid #3B82F6;
+                border-radius: 6px;
+                background: white;
+                font-weight: 600;
+                font-size: 12px;
+            }
+            QComboBox:disabled {
+                background-color: #F3F4F6;
+                color: #9CA3AF;
+                border-color: #D1D5DB;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 7px solid #3B82F6;
+                margin-right: 10px;
+            }
+            QComboBox:disabled::down-arrow {
+                border-top-color: #9CA3AF;
+            }
+        """)
+        layout.addWidget(self.persona_combo)
         
-        layout.addWidget(self.json_source_radio)
-        layout.addWidget(self.vo_source_radio)
+        # 연결 상태 표시 (페르소나 선택 아래)
+        self.vo_connection_status_label = QLabel("❌ 연결되지 않음")
+        self.vo_connection_status_label.setStyleSheet("""
+            QLabel {
+                color: #DC2626;
+                background-color: #FEE2E2;
+                padding: 6px;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+        """)
+        self.vo_connection_status_label.setWordWrap(True)
+        layout.addWidget(self.vo_connection_status_label)
         
         # 구분선
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setFrameShadow(QFrame.Shadow.Sunken)
-        separator.setStyleSheet("background-color: #E5E7EB;")
+        separator.setStyleSheet("background-color: #E5E7EB; margin: 8px 0;")
         layout.addWidget(separator)
         
-        # VirtualOffice 연결 설정
-        vo_settings_label = QLabel("VirtualOffice 서버 설정:")
-        vo_settings_label.setStyleSheet("font-weight: 600; color: #374151; margin-top: 4px;")
+        # VirtualOffice 연결 설정 (접을 수 있도록)
+        vo_settings_label = QLabel("⚙️ 서버 설정 (고급):")
+        vo_settings_label.setStyleSheet("font-weight: 600; color: #6B7280; margin-top: 4px; font-size: 11px;")
         layout.addWidget(vo_settings_label)
         
         # Email Server URL
@@ -753,27 +726,6 @@ class SmartAssistantGUI(QMainWindow):
         """)
         layout.addWidget(self.vo_sim_url)
         
-        # 연결 버튼
-        self.vo_connect_btn = QPushButton("🔌 연결 테스트")
-        self.vo_connect_btn.clicked.connect(self.connect_virtualoffice)
-        self.vo_connect_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3B82F6;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2563EB;
-            }
-            QPushButton:disabled {
-                background-color: #9CA3AF;
-            }
-        """)
-        layout.addWidget(self.vo_connect_btn)
-        
         # 연결 상태 표시
         self.vo_status_label = QLabel("연결되지 않음")
         self.vo_status_label.setStyleSheet("""
@@ -785,41 +737,6 @@ class SmartAssistantGUI(QMainWindow):
                 font-size: 11px;
             }
         """)
-        self.vo_status_label.setWordWrap(True)
-        layout.addWidget(self.vo_status_label)
-        
-        # 페르소나 선택
-        persona_label = QLabel("사용자 페르소나:")
-        persona_label.setStyleSheet("font-weight: 600; color: #374151; margin-top: 8px;")
-        layout.addWidget(persona_label)
-        
-        self.persona_combo = QComboBox()
-        self.persona_combo.setEnabled(False)  # 연결 전에는 비활성화
-        self.persona_combo.currentIndexChanged.connect(self.on_persona_changed)
-        self.persona_combo.setStyleSheet("""
-            QComboBox {
-                padding: 6px;
-                border: 1px solid #D1D5DB;
-                border-radius: 4px;
-                background: white;
-            }
-            QComboBox:disabled {
-                background-color: #F3F4F6;
-                color: #9CA3AF;
-            }
-            QComboBox::drop-down {
-                border: none;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 6px solid #6B7280;
-                margin-right: 8px;
-            }
-        """)
-        layout.addWidget(self.persona_combo)
-        
         # 시뮬레이션 상태 표시
         sim_status_label = QLabel("시뮬레이션 상태:")
         sim_status_label.setStyleSheet("font-weight: 600; color: #374151; margin-top: 8px;")
@@ -911,8 +828,8 @@ class SmartAssistantGUI(QMainWindow):
         """)
         layout.addWidget(self.tick_history_btn)
         
-        # 초기 상태: VirtualOffice 설정 비활성화
-        self._set_vo_controls_enabled(False)
+        # 초기 상태: 모든 컨트롤 활성화 (사용자가 언제든 연결 가능)
+        # self._set_vo_controls_enabled(False)  # 제거: 버튼을 항상 활성화
         
         return group
     
@@ -921,7 +838,8 @@ class SmartAssistantGUI(QMainWindow):
         self.vo_email_url.setEnabled(enabled)
         self.vo_chat_url.setEnabled(enabled)
         self.vo_sim_url.setEnabled(enabled)
-        self.vo_connect_btn.setEnabled(enabled)
+        # 연결 테스트 버튼은 항상 활성화 (사용자가 언제든 연결 시도 가능)
+        # self.vo_connect_btn.setEnabled(enabled)
 
     # ✅ utils/datetime_utils.py의 parse_iso_datetime 사용으로 대체됨
     # def _parse_iso_datetime(self, value: Optional[str]) -> Optional[datetime]:
@@ -1290,6 +1208,8 @@ class SmartAssistantGUI(QMainWindow):
         self.todo_tab = QWidget()
         todo_layout = QVBoxLayout(self.todo_tab)
         self.todo_panel = TodoPanel(db_path=TODO_DB_PATH, parent=self)
+        # Top3 서비스 전달 (VDOS 연동됨)
+        self.todo_panel.top3_service = self.top3_service
         self.todo_panel.set_top3_callback(self._on_top3_updated)
         todo_layout.addWidget(self.todo_panel)
         self.tab_widget.addTab(self.todo_tab, "📋 TODO 리스트")
@@ -1476,301 +1396,27 @@ class SmartAssistantGUI(QMainWindow):
             f"TODO {total}건 · High {high} · Medium {medium} · Low {low} · 추출된 액션 {actions}건"
         )
 
-    def _fetch_weather_from_kma(self, location: str) -> bool:
-        grid = None
-        resolved_name = location
-        for name, coords in KMA_CITY_GRID.items():
-            if name.lower() == location.lower():
-                grid = coords
-                resolved_name = name
-                break
-        if not grid:
-            return False
-
-        nx, ny = grid
-        kst = datetime.now(timezone.utc) + timedelta(hours=9)
-        base_date = kst.date()
-        base_times = ["2300", "2000", "1700", "1400", "1100", "0800", "0500", "0200"]
-        current_hm = kst.strftime("%H%M")
-        base_time = None
-        for bt in base_times:
-            if current_hm >= bt:
-                base_time = bt
-                break
-        if base_time is None:
-            base_time = "2300"
-            base_date = (kst - timedelta(days=1)).date()
-
-        base_date_str = base_date.strftime("%Y%m%d")
-        service_url = os.environ.get(
-            "KMA_API_URL",
-            "https://apihub.kma.go.kr/api/typ02/openapi/VilageFcstInfoService_2.0/getVilageFcst",
-        )
-        params = {
-            "serviceKey": self.kma_api_key,
-            "pageNo": 1,
-            "numOfRows": 500,
-            "dataType": "JSON",
-            "base_date": base_date_str,
-            "base_time": base_time,
-            "nx": nx,
-            "ny": ny,
-        }
-                # KMA
-        resp = self.http.get(service_url, params=params, timeout=(3.05, 20))
-
-        # geocoding
-        geo_resp = self.http.get("https://geocoding-api.open-meteo.com/v1/search",
-                                params={...}, timeout=(3.05, 20))
-
-        # forecast
-        forecast_resp = self.http.get("https://api.open-meteo.com/v1/forecast",
-                                    params={...}, timeout=(3.05, 20))
-
-        resp = requests.get(service_url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        items = (
-            (((data.get("response") or {}).get("body") or {}).get("items") or {}).get("item")
-            or []
-        )
-        if not items:
-            return False
-
-        def find_value(category: str, target_date: str, preferred_times: list[str]):
-            for t in preferred_times:
-                for item in items:
-                    if item.get("category") == category and item.get("fcstDate") == target_date and item.get("fcstTime") == t:
-                        return item.get("fcstValue")
-            return None
-
-        current_hour = int(kst.strftime("%H"))
-        preferred_today = [f"{current_hour:02d}00"]
-        for offset in range(1, 4):
-            preferred_today.append(f"{(current_hour + offset) % 24:02d}00")
-        today_date_str = kst.strftime("%Y%m%d")
-
-        temp_today = find_value("TMP", today_date_str, preferred_today)
-        sky_today = find_value("SKY", today_date_str, preferred_today)
-        pty_today = find_value("PTY", today_date_str, preferred_today)
-
-        tomorrow_date_str = (kst + timedelta(days=1)).strftime("%Y%m%d")
-        preferred_morning = ["0600", "0900", "1200"]
-        temp_tomorrow = find_value("TMP", tomorrow_date_str, preferred_morning)
-        sky_tomorrow = find_value("SKY", tomorrow_date_str, preferred_morning)
-        pty_tomorrow = find_value("PTY", tomorrow_date_str, preferred_morning)
-
-        if temp_today is None and temp_tomorrow is None:
-            return False
-
-        def fmt_temp(value):
-            if value is None:
-                return "--°C"
-            try:
-                return f"{float(value):.1f}°C"
-            except Exception:
-                return f"{value}°C"
-
-        today_desc = self._describe_kma_weather(sky_today, pty_today)
-        tomorrow_desc = self._describe_kma_weather(sky_tomorrow, pty_tomorrow)
-
-        self.weather_status_label.setText(
-            f"{resolved_name}\n현재 {fmt_temp(temp_today)} · {today_desc}\n"
-            f"내일 오전 {fmt_temp(temp_tomorrow)} · {tomorrow_desc}"
-        )
-        self.weather_tip_label.setText(self._weather_tip(temp_tomorrow, pty_code=pty_tomorrow))
-        return True
-
     def fetch_weather(self, preset_location: Optional[str] = None):
+        """날씨 정보 조회"""
         if not hasattr(self, "weather_input"):
             return
+        
         location = (preset_location or self.weather_input.text()).strip()
         if preset_location:
             self.weather_input.setText(location)
+        
         if not location:
             QMessageBox.warning(self, "입력 오류", "지역을 입력해주세요.")
             return
+        
         self.weather_status_label.setText("날씨 정보를 불러오는 중입니다...")
-        if self.kma_api_key:
-            try:
-                if self._fetch_weather_from_kma(location):
-                    return
-            except Exception as exc:
-                print(f"[weather] KMA fetch error: {exc}")
-        try:
-            results = []
-            candidates = [location]
-            alias = KMA_CITY_ALIAS.get(location)
-            if alias and alias not in candidates:
-                candidates.append(alias)
-            for candidate in candidates:
-                for lang in ("ko", "en"):
-                    geo_resp = requests.get(
-                        "https://geocoding-api.open-meteo.com/v1/search",
-                        params={"name": candidate, "count": 1, "language": lang, "format": "json"},
-                        timeout=10,
-                    )
-                    geo_resp.raise_for_status()
-                    geo_json = geo_resp.json()
-                    results = geo_json.get("results") or []
-                    if results:
-                        break
-                if results:
-                    break
-            if not results:
-                self.weather_status_label.setText("해당 위치를 찾을 수 없습니다. 영어/한국어 표기로 다시 시도해 주세요.")
-                self.weather_tip_label.setText("날씨 팁을 불러오지 못했습니다. 기본적으로 우산과 마스크를 준비해 주세요.")
-                return
-            top = results[0]
-            lat = top.get("latitude")
-            lon = top.get("longitude")
-            resolved_name = ", ".join(filter(None, [top.get("name"), top.get("country")]))
-
-            forecast_resp = requests.get(
-                "https://api.open-meteo.com/v1/forecast",
-                params={
-                    "latitude": lat,
-                    "longitude": lon,
-                    "hourly": "temperature_2m,weathercode",
-                    "current_weather": True,
-                    "forecast_days": 2,
-                    "timezone": "auto",
-                },
-                timeout=10,
-            )
-            forecast_resp.raise_for_status()
-            forecast_json = forecast_resp.json()
-            current = forecast_json.get("current_weather") or {}
-            hourly = forecast_json.get("hourly") or {}
-
-            current_temp = current.get("temperature")
-            current_temp_text = f"{current_temp}°C" if current_temp is not None else "--°C"
-            current_desc = self._weather_description(current.get("weathercode"))
-
-            tomorrow_temp, tomorrow_code = self._extract_tomorrow_morning(hourly)
-            tomorrow_temp_text = f"{tomorrow_temp}°C" if tomorrow_temp is not None else "--°C"
-            tomorrow_desc = self._weather_description(tomorrow_code)
-
-            self.weather_status_label.setText(
-                f"{resolved_name}\n현재 {current_temp_text} · {current_desc}\n"
-                f"내일 오전 {tomorrow_temp_text} · {tomorrow_desc}"
-            )
-            self.weather_tip_label.setText(self._weather_tip(tomorrow_temp, weather_code=tomorrow_code))
-        except requests.RequestException as exc:
-            self.weather_status_label.setText("날씨 정보를 가져오지 못했습니다.")
-            self.weather_tip_label.setText("날씨 팁을 불러오지 못했습니다. 기본적으로 우산과 마스크를 준비해 주세요.")
-            logger.warning(f"날씨 API 요청 오류: {exc}")
-        except Exception as exc:
-            self.weather_status_label.setText("날씨 정보를 처리하는 중 오류가 발생했습니다.")
-            self.weather_tip_label.setText("날씨 팁을 불러오지 못했습니다. 기본적으로 우산과 마스크를 준비해 주세요.")
-            logger.error(f"날씨 정보 처리 오류: {exc}")
-
-    def _describe_kma_weather(self, sky: Optional[str], pty: Optional[str]) -> str:
-        try:
-            pty_val = int(pty) if pty is not None else 0
-        except Exception:
-            pty_val = 0
-        if pty_val == 1:
-            return "비"
-        if pty_val == 2:
-            return "비/눈"
-        if pty_val == 3:
-            return "눈"
-        if pty_val == 5:
-            return "빗방울"
-        if pty_val == 6:
-            return "빗방울/눈날림"
-        if pty_val == 7:
-            return "눈날림"
-        try:
-            sky_val = int(sky) if sky is not None else 0
-        except Exception:
-            sky_val = 0
-        sky_map = {
-            1: "맑음",
-            3: "구름 많음",
-            4: "흐림",
-        }
-        return sky_map.get(sky_val, "상세 정보 없음")
-
-    def _weather_tip(self, morning_temp: Optional[float], pty_code: Optional[str] = None, weather_code: Optional[int] = None) -> str:
-        tips: List[str] = []
-        rain_expected = False
-        if pty_code is not None:
-            try:
-                p_val = int(pty_code)
-                if p_val in {1, 2, 3, 5, 6, 7}:
-                    rain_expected = True
-            except Exception:
-                pass
-        elif weather_code is not None:
-            rain_expected = weather_code in {51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82}
-        if rain_expected:
-            tips.append("비 예보가 있으니 우산을 챙기세요.")
-        temp_tip_added = False
-        if morning_temp is not None:
-            try:
-                temp = float(morning_temp)
-                if temp <= 0:
-                    tips.append("아침 기온이 영하권이라 두꺼운 외투와 장갑을 준비하세요.")
-                    temp_tip_added = True
-                elif temp <= 5:
-                    tips.append("쌀쌀하니 코트나 패딩을 추천합니다.")
-                    temp_tip_added = True
-                elif temp >= 25:
-                    tips.append("무더울 수 있으니 가볍고 통풍이 잘 되는 복장을 입으세요.")
-                    temp_tip_added = True
-            except Exception:
-                pass
-        if not temp_tip_added:
-            tips.append("기온 변화에 대비해 겉옷을 하나 챙기면 좋습니다.")
-        tips.append("미세먼지 정보가 없으나 기본적으로 마스크 착용을 권장합니다.")
-        return " ".join(tips)
-
-    def _extract_tomorrow_morning(self, hourly: dict) -> tuple[Optional[float], Optional[int]]:
-        try:
-            times = hourly.get("time", [])
-            temps = hourly.get("temperature_2m", [])
-            codes = hourly.get("weathercode", [])
-            target_date = (datetime.now() + timedelta(days=1)).date()
-            candidate = None
-            for t_str, temp, code in zip(times, temps, codes):
-                dt = datetime.fromisoformat(t_str.replace("Z", "+00:00"))
-                if dt.date() == target_date and 6 <= dt.hour <= 10:
-                    candidate = (temp, code)
-                    break
-            if not candidate and temps:
-                candidate = (temps[0], codes[0] if codes else None)
-            return candidate or (None, None)
-        except Exception:
-            return (None, None)
-
-    def _weather_description(self, code: Optional[int]) -> str:
-        mapping = {
-            0: "맑음",
-            1: "대체로 맑음",
-            2: "부분적으로 흐림",
-            3: "흐림",
-            45: "안개",
-            48: "서리 안개",
-            51: "실비",
-            53: "약한 이슬비",
-            55: "강한 이슬비",
-            61: "약한 비",
-            63: "보통 비",
-            65: "강한 비",
-            71: "가벼운 눈",
-            73: "보통 눈",
-            75: "강한 눈",
-            80: "약한 소나기",
-            81: "보통 소나기",
-            82: "강한 소나기",
-            95: "천둥번개",
-            96: "우박 가능",
-            99: "강한 폭우/우박",
-        }
-        return mapping.get(code, "상세 정보 없음")
-
+        
+        # WeatherService를 사용하여 날씨 정보 조회
+        result = self.weather_service.fetch_weather(location)
+        
+        # 결과 표시
+        self.weather_status_label.setText(result.get("status", "날씨 정보를 가져오지 못했습니다."))
+        self.weather_tip_label.setText(result.get("tip", "날씨 팁을 불러오지 못했습니다."))
     
     def create_message_tab(self):
         """메시지 탭 생성 - MessageSummaryPanel 사용"""
@@ -1856,9 +1502,9 @@ class SmartAssistantGUI(QMainWindow):
         if hasattr(self, "refresh_timer"):
             self.refresh_timer.start()
         if hasattr(self, "status_message"):
-            self.status_message.setText("온라인 모드입니다. '메시지 수집 시작'을 눌러 모바일 데이터셋을 분석하세요.")
+            self.status_message.setText("VirtualOffice 연결 대기 중 - '실시간 연결 테스트' 버튼을 눌러주세요")
         if hasattr(self, "status_bar"):
-            self.status_bar.showMessage("온라인 모드 - 오프라인 데이터셋 기반 분석 준비 완료")
+            self.status_bar.showMessage("VirtualOffice 연결 대기 중")
 
     def create_menu_bar(self):
         """메뉴바 생성"""
@@ -1919,123 +1565,19 @@ class SmartAssistantGUI(QMainWindow):
             self.status_message.setText("오프라인 모드입니다. 필요 시 다시 온라인으로 전환하세요.")
     
     def _initialize_data_time_range(self):
-        """데이터셋의 시간 범위를 자동으로 설정
+        """데이터 시간 범위 초기화 (VirtualOffice 전용)
         
-        데이터셋 파일을 읽어서 가장 오래된 메시지와 가장 최근 메시지의 시간을 찾아
-        TimeRangeSelector에 설정합니다.
+        VirtualOffice를 사용하는 경우 시간 범위는 실시간으로 결정되므로
+        기본 범위만 설정합니다.
         """
         try:
-            import json
-            from pathlib import Path
+            # 기본 시간 범위: 최근 7일
+            now = datetime.now(timezone.utc)
+            data_start = now - timedelta(days=7)
+            data_end = now
             
-            # 데이터셋 경로
-            dataset_path = Path("data/multi_project_8week_ko")
-            logger.info(f"📂 데이터셋 경로: {dataset_path.absolute()}")
-            
-            dates = []
-            
-            # 채팅 메시지 파일 읽기
-            chat_file = dataset_path / "chat_communications.json"
-            logger.info(f"채팅 파일 확인: {chat_file.absolute()} (존재: {chat_file.exists()})")
-            
-            if chat_file.exists():
-                with open(chat_file, 'r', encoding='utf-8') as f:
-                    chat_data = json.load(f)
-                    rooms = chat_data.get("rooms", [])
-                    logger.info(f"채팅 방 수: {len(rooms)} (type: {type(rooms).__name__})")
-                    
-                    if isinstance(rooms, dict):
-                        room_iter = rooms.values()
-                    elif isinstance(rooms, list):
-                        room_iter = rooms
-                    else:
-                        logger.warning(f"지원되지 않는 rooms 타입: {type(rooms)}")
-                        room_iter = []
-                    
-                    for room in room_iter:
-                        if isinstance(room, dict) and "entries" in room:
-                            entries = room.get("entries", [])
-                        elif isinstance(room, list):
-                            entries = room
-                        else:
-                            logger.debug(f"알 수 없는 채팅 룸 구조: {room}")
-                            continue
-                        
-                        for entry in entries:
-                            if not isinstance(entry, dict):
-                                logger.debug(f"채팅 엔트리 구조 오류: {entry}")
-                                continue
-                            
-                            sent_at = entry.get("sent_at")
-                            if sent_at:
-                                try:
-                                    dt = datetime.fromisoformat(sent_at.replace("Z", "+00:00"))
-                                    if dt.tzinfo is None:
-                                        dt = dt.replace(tzinfo=timezone.utc)
-                                    else:
-                                        dt = dt.astimezone(timezone.utc)
-                                    dates.append(dt)
-                                except Exception as e:
-                                    logger.debug(f"채팅 날짜 파싱 오류: {sent_at} - {e}")
-                    
-                    logger.info(f"채팅에서 수집된 날짜 수: {len(dates)}")
-            
-            # 이메일 파일 읽기
-            email_file = dataset_path / "email_communications.json"
-            logger.info(f"이메일 파일 확인: {email_file.absolute()} (존재: {email_file.exists()})")
-            
-            if email_file.exists():
-                email_dates_before = len(dates)
-                with open(email_file, 'r', encoding='utf-8') as f:
-                    email_data = json.load(f)
-                    mailboxes = email_data.get("mailboxes", [])
-                    logger.info(f"메일박스 수: {len(mailboxes)} (type: {type(mailboxes).__name__})")
-                    
-                    if isinstance(mailboxes, dict):
-                        mailbox_iter = mailboxes.values()
-                    elif isinstance(mailboxes, list):
-                        mailbox_iter = mailboxes
-                    else:
-                        logger.warning(f"지원되지 않는 mailboxes 타입: {type(mailboxes)}")
-                        mailbox_iter = []
-                    
-                    for mailbox in mailbox_iter:
-                        if isinstance(mailbox, dict) and "entries" in mailbox:
-                            entries = mailbox.get("entries", [])
-                        elif isinstance(mailbox, list):
-                            entries = mailbox
-                        else:
-                            logger.debug(f"알 수 없는 메일박스 구조: {mailbox}")
-                            continue
-                        
-                        for entry in entries:
-                            if not isinstance(entry, dict):
-                                logger.debug(f"이메일 엔트리 구조 오류: {entry}")
-                                continue
-                            
-                            sent_at = entry.get("sent_at")
-                            if sent_at:
-                                try:
-                                    dt = datetime.fromisoformat(sent_at.replace("Z", "+00:00"))
-                                    if dt.tzinfo is None:
-                                        dt = dt.replace(tzinfo=timezone.utc)
-                                    else:
-                                        dt = dt.astimezone(timezone.utc)
-                                    dates.append(dt)
-                                except Exception as e:
-                                    logger.debug(f"이메일 날짜 파싱 오류: {sent_at} - {e}")
-                    
-                    logger.info(f"이메일에서 수집된 날짜 수: {len(dates) - email_dates_before}")
-            
-            logger.info(f"총 수집된 날짜 수: {len(dates)}")
-            
-            if dates:
-                data_start = min(dates)
-                data_end = max(dates)
-                self.time_range_selector.set_data_range(data_start, data_end)
-                logger.info(f"📅 데이터 시간 범위 자동 설정: {data_start.strftime('%Y-%m-%d %H:%M')} ~ {data_end.strftime('%Y-%m-%d %H:%M')}")
-            else:
-                logger.warning("⚠️ 데이터셋에서 시간 정보를 찾을 수 없습니다")
+            self.time_range_selector.set_data_range(data_start, data_end)
+            logger.info(f"📅 기본 시간 범위 설정: 최근 7일")
                 
         except Exception as e:
             logger.error(f"❌ 데이터 시간 범위 초기화 오류: {e}", exc_info=True)
@@ -2528,6 +2070,7 @@ class SmartAssistantGUI(QMainWindow):
                          "TODO 리스트를 자동 생성합니다.\n\n"
                          "개발: Smart Assistant Team")
     
+
     def connect_virtualoffice(self):
         """VirtualOffice 연결 테스트 및 페르소나 조회"""
         try:
@@ -2620,17 +2163,30 @@ class SmartAssistantGUI(QMainWindow):
                     self.polling_worker.start()
                     logger.info("✅ PollingWorker 시작됨 (폴링 간격: 30초)")
             
-            # 연결 성공 표시
-            self.vo_status_label.setText(f"✅ 연결 성공 ({len(personas)}개 페르소나)")
-            self.vo_status_label.setStyleSheet("""
+            # 연결 성공 표시 (두 레이블 모두 업데이트)
+            success_text = f"✅ 연결 성공 ({len(personas)}개 페르소나)"
+            success_style = """
                 QLabel {
                     color: #059669;
                     background-color: #D1FAE5;
                     padding: 6px;
                     border-radius: 4px;
                     font-size: 11px;
+                    font-weight: 600;
                 }
-            """)
+            """
+            
+            # 페르소나 선택 아래 레이블 업데이트
+            if hasattr(self, 'vo_connection_status_label'):
+                self.vo_connection_status_label.setText(success_text)
+                self.vo_connection_status_label.setStyleSheet(success_style)
+            
+            # 서버 설정 섹션 레이블 업데이트
+            if hasattr(self, 'vo_status_label'):
+                self.vo_status_label.setText(success_text)
+                self.vo_status_label.setStyleSheet(success_style)
+            
+            logger.info(f"✅ 연결 상태 레이블 업데이트: {len(personas)}개 페르소나")
             
             # 틱 히스토리 버튼 활성화
             if hasattr(self, 'tick_history_btn'):
@@ -2647,6 +2203,10 @@ class SmartAssistantGUI(QMainWindow):
                 f"현재 틱: {sim_status.current_tick}\n"
                 f"시뮬레이션 시간: {sim_status.sim_time}"
             )
+            
+            # 연결 성공 후 1초 뒤 자동으로 분석 시작
+            logger.info("🚀 연결 성공 - 1초 후 자동 분석 시작")
+            QTimer.singleShot(1000, self._auto_start_analysis)
             
         except Exception as e:
             logger.error(f"❌ VirtualOffice 연결 실패: {e}", exc_info=True)
@@ -2746,51 +2306,7 @@ class SmartAssistantGUI(QMainWindow):
             logger.error(f"❌ 페르소나 변경 오류: {e}", exc_info=True)
             QMessageBox.warning(self, "오류", f"페르소나 변경 중 오류가 발생했습니다.\n\n{str(e)}")
     
-    def on_data_source_changed(self, button):
-        """데이터 소스 전환 이벤트 핸들러"""
-        if button == self.json_source_radio:
-            # JSON 파일 모드로 전환
-            self.data_source_type = "json"
-            self._set_vo_controls_enabled(False)
-            
-            # PollingWorker 중지
-            if self.polling_worker and self.polling_worker.isRunning():
-                logger.info("PollingWorker 중지 중...")
-                self.polling_worker.stop()
-                self.polling_worker.wait(2000)
-                self.polling_worker = None
-                logger.info("✅ PollingWorker 중지됨")
-            
-            # JSON 데이터 소스로 전환
-            self.assistant.set_json_source()
-            
-            self.status_message.setText("데이터 소스: 로컬 JSON 파일")
-            logger.info("✅ 데이터 소스를 로컬 JSON 파일로 전환했습니다.")
-            
-        elif button == self.vo_source_radio:
-            # VirtualOffice 모드로 전환
-            self.data_source_type = "virtualoffice"
-            self._set_vo_controls_enabled(True)
-            
-            # VirtualOffice가 연결되어 있고 페르소나가 선택된 경우 데이터 소스 전환
-            if self.vo_client and self.selected_persona:
-                self.assistant.set_virtualoffice_source(self.vo_client, self.selected_persona)
-                self.status_message.setText(f"데이터 소스: VirtualOffice ({self.selected_persona.name})")
-                logger.info(f"✅ 데이터 소스를 VirtualOffice ({self.selected_persona.name})로 전환했습니다.")
-                
-                # PollingWorker 시작
-                if not self.polling_worker or not self.polling_worker.isRunning():
-                    logger.info("PollingWorker 시작 중...")
-                    data_source = self.assistant.data_source_manager.current_source
-                    if data_source:
-                        self.polling_worker = PollingWorker(data_source, polling_interval=30)  # 30초
-                        self.polling_worker.new_data_received.connect(self.on_new_data_received)
-                        self.polling_worker.error_occurred.connect(self.on_polling_error)
-                        self.polling_worker.start()
-                        logger.info("✅ PollingWorker 시작됨 (폴링 간격: 30초)")
-            else:
-                self.status_message.setText("VirtualOffice 서버에 연결하고 페르소나를 선택해주세요.")
-                logger.warning("⚠️ VirtualOffice 연결 또는 페르소나 선택이 필요합니다.")
+    # on_data_source_changed 메서드 제거 (VirtualOffice 전용으로 변경)
     
     def on_new_data_received(self, data: dict):
         """새 데이터 수신 핸들러 (점진적 UI 업데이트)
@@ -2890,8 +2406,9 @@ class SmartAssistantGUI(QMainWindow):
                 self._update_progress_bar(100)
                 self._hide_progress_bar()
             
-            # TODO: 새 메시지에 대한 분석 및 TODO 생성 (백그라운드에서 처리)
+            # 새 메시지에 대한 자동 재분석 트리거 (2초 후)
             if total_new > 0:
+                logger.info(f"🔄 새 메시지 {total_new}개 수신 - 2초 후 자동 재분석 시작")
                 self._process_new_messages_async(all_messages)
             
             # 상태바에 알림 표시
@@ -2907,6 +2424,23 @@ class SmartAssistantGUI(QMainWindow):
             if hasattr(self, '_progress_bar') and self._progress_bar:
                 self._hide_progress_bar()
     
+    def _auto_start_analysis(self):
+        """연결 성공 후 자동으로 분석 시작"""
+        try:
+            logger.info("🚀 자동 분석 시작")
+            self.status_message.setText("자동 분석 시작 중...")
+            
+            # VirtualOffice 모드인 경우에만 자동 분석
+            if self.data_source_type == "virtualoffice" and self.selected_persona:
+                # 메시지 수집 시작 (자동)
+                self.start_collection()
+            else:
+                logger.warning("⚠️ VirtualOffice 모드가 아니거나 페르소나가 선택되지 않음")
+                self.status_message.setText("VirtualOffice 모드로 전환하고 페르소나를 선택하세요")
+        except Exception as e:
+            logger.error(f"❌ 자동 분석 시작 오류: {e}", exc_info=True)
+            self.status_message.setText(f"자동 분석 오류: {e}")
+    
     def _process_new_messages_async(self, new_messages: list):
         """새 메시지에 대한 분석 및 TODO 생성 (백그라운드 처리)
         
@@ -2919,104 +2453,89 @@ class SmartAssistantGUI(QMainWindow):
             
             logger.info(f"🔄 새 메시지 분석 시작: {len(new_messages)}개")
             
-            # 백그라운드에서 분석 실행
-            from PyQt6.QtCore import QTimer
-            
-            def run_analysis():
-                try:
-                    # SmartAssistant의 분석 파이프라인 실행
-                    import asyncio
-                    
-                    # 새 이벤트 루프 생성
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    
-                    try:
-                        # 새 메시지에 대해서만 분석 실행 (메시지 수집 건너뛰기)
-                        # 임시로 collected_messages를 새 메시지로 설정
-                        original_messages = getattr(self.assistant, 'collected_messages', [])
-                        self.assistant.collected_messages = new_messages
-                        
-                        # 메시지가 있는지 확인
-                        if not new_messages:
-                            logger.warning("분석할 메시지가 없습니다.")
-                            return
-                        
-                        # 메시지 수집 없이 분석만 실행
-                        analysis_results = loop.run_until_complete(
-                            self.assistant.analyze_messages()
-                        )
-                        
-                        # TODO 생성
-                        todo_result = loop.run_until_complete(
-                            self.assistant.generate_todo_list(analysis_results)
-                        )
-                        
-                        # 결과 구성
-                        result = {
-                            "success": True,
-                            "todo_list": todo_result,
-                            "analysis_results": analysis_results,
-                            "collected_messages": len(new_messages),
-                            "messages": new_messages
-                        }
-                        
-                        # 원본 메시지 복원
-                        self.assistant.collected_messages = original_messages
-                        
-                        if result.get("success"):
-                            # TODO 업데이트
-                            todo_list = result.get("todo_list") or {}
-                            new_items = todo_list.get("items", [])
-                            
-                            if new_items and hasattr(self, "todo_panel"):
-                                # 기존 TODO에 새 항목 추가
-                                self.todo_panel.populate_from_items(new_items)
-                                logger.info(f"✅ 새 TODO {len(new_items)}개 추가됨")
-                            
-                            # 분석 결과 업데이트
-                            analysis_results = result.get("analysis_results") or []
-                            if analysis_results:
-                                # 기존 분석 결과에 추가
-                                if hasattr(self, 'analysis_results'):
-                                    self.analysis_results.extend(analysis_results)
-                                else:
-                                    self.analysis_results = analysis_results
-                                
-                                # AnalysisResultPanel 업데이트
-                                if hasattr(self, "analysis_result_panel"):
-                                    self.analysis_result_panel.update_analysis(
-                                        self.analysis_results, 
-                                        self.collected_messages
-                                    )
-                                
-                                logger.info(f"✅ 새 분석 결과 {len(analysis_results)}개 추가됨")
-                            
-                            # 메시지 요약 업데이트
-                            if hasattr(self, 'message_summary_panel'):
-                                self._update_message_summaries("day")
-                            
-                            # 상태바 업데이트
-                            self.statusBar().showMessage(
-                                f"✅ 새 메시지 분석 완료: TODO {len(new_items)}개, 분석 {len(analysis_results)}개",
-                                3000
-                            )
-                            
-                            # 캐시 업데이트 (TODO와 분석 결과 저장)
-                            self._update_cache_with_analysis_results(new_items, analysis_results)
-                        
-                    finally:
-                        loop.close()
-                        
-                except Exception as e:
-                    logger.error(f"❌ 새 메시지 분석 오류: {e}", exc_info=True)
-                    self.statusBar().showMessage(f"⚠️ 새 메시지 분석 오류: {e}", 3000)
-            
-            # 1초 후 분석 시작 (UI 업데이트 완료 후)
-            QTimer.singleShot(1000, run_analysis)
+            # 2초 후 자동 재분석 (UI 업데이트 완료 후)
+            QTimer.singleShot(2000, self._trigger_reanalysis)
             
         except Exception as e:
             logger.error(f"❌ 새 메시지 분석 준비 오류: {e}", exc_info=True)
+    
+    def _trigger_reanalysis(self):
+        """전체 메시지 재분석 트리거"""
+        try:
+            logger.info("🔄 전체 메시지 재분석 시작")
+            self.status_message.setText("새 메시지 분석 중...")
+            
+            # 메시지 수집 없이 분석만 다시 실행
+            if hasattr(self, 'collected_messages') and self.collected_messages:
+                # 워커 스레드로 분석 실행
+                self.start_button.setEnabled(False)
+                self.progress_bar.setVisible(True)
+                self.progress_bar.setValue(0)
+                
+                # 기존 데이터로 분석만 실행
+                dataset_config = dict(self.dataset_config)
+                collect_options = {
+                    "email_limit": None,
+                    "messenger_limit": None,
+                    "overall_limit": None,
+                    "force_reload": False,  # 기존 데이터 사용
+                    "skip_collection": True,  # 수집 건너뛰기
+                }
+                
+                self.worker_thread = WorkerThread(self.assistant, dataset_config, collect_options)
+                self.worker_thread.progress_updated.connect(self.progress_bar.setValue)
+                self.worker_thread.status_updated.connect(self.status_message.setText)
+                self.worker_thread.result_ready.connect(self._handle_reanalysis_result)
+                self.worker_thread.error_occurred.connect(self.handle_error)
+                self.worker_thread.start()
+            else:
+                logger.warning("⚠️ 분석할 메시지가 없음")
+                self.status_message.setText("분석할 메시지가 없습니다")
+        except Exception as e:
+            logger.error(f"❌ 재분석 트리거 오류: {e}", exc_info=True)
+            self.status_message.setText(f"재분석 오류: {e}")
+    
+    def _handle_reanalysis_result(self, result):
+        """재분석 결과 처리"""
+        try:
+            self.start_button.setEnabled(True)
+            self.progress_bar.setVisible(False)
+            
+            if result.get("success"):
+                # TODO 업데이트
+                todo_list = result.get("todo_list") or {}
+                items = todo_list.get("items", [])
+                
+                if items and hasattr(self, "todo_panel"):
+                    self.todo_panel.populate_from_items(items)
+                    logger.info(f"✅ TODO 업데이트 완료: {len(items)}개")
+                
+                # 분석 결과 업데이트
+                analysis_results = result.get("analysis_results") or []
+                if analysis_results:
+                    self.analysis_results = analysis_results
+                    if hasattr(self, "analysis_result_panel"):
+                        self.analysis_result_panel.update_analysis(
+                            self.analysis_results, 
+                            self.collected_messages
+                        )
+                    logger.info(f"✅ 분석 결과 업데이트 완료: {len(analysis_results)}개")
+                
+                # 메시지 요약 업데이트
+                if hasattr(self, 'message_summary_panel'):
+                    self._update_message_summaries("day")
+                
+                self.status_message.setText(f"✅ 재분석 완료: TODO {len(items)}개")
+                self.statusBar().showMessage(
+                    f"✅ 재분석 완료: TODO {len(items)}개, 분석 {len(analysis_results)}개",
+                    3000
+                )
+            else:
+                logger.error("❌ 재분석 실패")
+                self.status_message.setText("재분석 실패")
+        except Exception as e:
+            logger.error(f"❌ 재분석 결과 처리 오류: {e}", exc_info=True)
+            self.status_message.setText(f"재분석 결과 처리 오류: {e}")
     
     def _should_use_cache(self, persona_key: str) -> bool:
         """캐시 사용 여부 결정
@@ -3869,6 +3388,71 @@ class SmartAssistantGUI(QMainWindow):
         
         event.accept()
     
+    def _update_connection_status(self):
+        """연결 상태 레이블 업데이트 (두 레이블 모두)"""
+        try:
+            if hasattr(self, 'vo_client') and self.vo_client:
+                # 연결되어 있으면 상태 업데이트
+                persona_count = self.persona_combo.count() if hasattr(self, 'persona_combo') else 0
+                if persona_count > 0:
+                    text = f"✅ 연결 성공 ({persona_count}개 페르소나)"
+                    style = """
+                        QLabel {
+                            color: #059669;
+                            background-color: #D1FAE5;
+                            padding: 6px;
+                            border-radius: 4px;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                    """
+                    logger.info(f"✅ 연결 상태 레이블 업데이트: {persona_count}개 페르소나")
+                else:
+                    # 연결은 되었지만 페르소나가 없는 경우
+                    text = "⚠️ 연결됨 (페르소나 없음)"
+                    style = """
+                        QLabel {
+                            color: #D97706;
+                            background-color: #FEF3C7;
+                            padding: 6px;
+                            border-radius: 4px;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                    """
+                    logger.warning("⚠️ 연결 상태 레이블 업데이트: 페르소나 없음")
+                
+                # 두 레이블 모두 업데이트
+                if hasattr(self, 'vo_connection_status_label'):
+                    self.vo_connection_status_label.setText(text)
+                    self.vo_connection_status_label.setStyleSheet(style)
+                if hasattr(self, 'vo_status_label'):
+                    self.vo_status_label.setText(text)
+                    self.vo_status_label.setStyleSheet(style)
+            else:
+                # 연결되지 않은 경우
+                text = "❌ 연결되지 않음"
+                style = """
+                    QLabel {
+                        color: #DC2626;
+                        background-color: #FEE2E2;
+                        padding: 6px;
+                        border-radius: 4px;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+                """
+                
+                # 두 레이블 모두 업데이트
+                if hasattr(self, 'vo_connection_status_label'):
+                    self.vo_connection_status_label.setText(text)
+                    self.vo_connection_status_label.setStyleSheet(style)
+                if hasattr(self, 'vo_status_label'):
+                    self.vo_status_label.setText(text)
+                    self.vo_status_label.setStyleSheet(style)
+        except Exception as e:
+            logger.error(f"연결 상태 업데이트 오류: {e}")
+    
     def _load_vo_config(self):
         """VirtualOffice 설정 파일 로드
         
@@ -3907,6 +3491,29 @@ class SmartAssistantGUI(QMainWindow):
                     self.vo_sim_url.setText(self.vo_config.sim_url)
                 
                 logger.info(f"설정 적용: email={self.vo_config.email_url}, chat={self.vo_config.chat_url}, sim={self.vo_config.sim_url}")
+                
+                # 설정이 로드되면 상태 레이블 업데이트 (아직 연결되지 않음)
+                config_loaded_text = "⚙️ 설정 로드됨 (연결 대기 중)"
+                config_loaded_style = """
+                    QLabel {
+                        color: #2563EB;
+                        background-color: #DBEAFE;
+                        padding: 6px;
+                        border-radius: 4px;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+                """
+                
+                # 페르소나 선택 아래 레이블 업데이트
+                if hasattr(self, 'vo_connection_status_label'):
+                    self.vo_connection_status_label.setText(config_loaded_text)
+                    self.vo_connection_status_label.setStyleSheet(config_loaded_style)
+                
+                # 서버 설정 섹션 레이블 업데이트
+                if hasattr(self, 'vo_status_label'):
+                    self.vo_status_label.setText(config_loaded_text)
+                    self.vo_status_label.setStyleSheet(config_loaded_style)
             else:
                 logger.info("VirtualOffice 설정 파일이 없습니다. 기본값 사용")
                 # 환경 변수만 적용

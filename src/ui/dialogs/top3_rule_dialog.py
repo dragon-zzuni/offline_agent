@@ -8,8 +8,8 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QTextEdit, QCheckBox
 )
 
-# TOP3_RULE_DEFAULT는 todo_helpers에서 import
-from ..todo_helpers import TOP3_RULE_DEFAULT
+# TOP3_RULE_DEFAULT는 services에서 import
+from src.services import TOP3_RULE_DEFAULT
 
 
 class Top3RuleDialog(QDialog):

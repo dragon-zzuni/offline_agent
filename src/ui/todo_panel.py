@@ -18,7 +18,6 @@ from config.settings import LLM_CONFIG, CONFIG_STORE_PATH
 
 # 분리된 헬퍼 및 위젯 import
 from .todo_helpers import (
-    TOP3_RULE_DEFAULT,
     _parse_iso_dt, _created_ts, _normalize_korean_name,
     _create_recipient_type_badge, _create_source_type_badge,
     _deadline_badge, _evidence_count, _source_message_dict,
@@ -26,6 +25,9 @@ from .todo_helpers import (
 )
 from .widgets import End2EndCard
 from .dialogs import Top3RuleDialog, Top3NaturalRuleDialog
+
+# Top3 서비스 import
+from src.services import Top3Service, TOP3_RULE_DEFAULT
 
 # VDOS 연동 import (선택적)
 try:
@@ -37,16 +39,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-TODO_DB_PATH = os.path.join("data", "multi_project_8week_ko", "todos_cache.db")
-
-_TOP3_RULES = deepcopy(TOP3_RULE_DEFAULT)
-_TOP3_LAST_INSTRUCTION = ""
-_KOREAN_NAME_SUFFIXES = ("선생님", "팀장", "부장", "님", "씨")
-_KOREAN_PARTICLES = (
-    "께서", "에서", "에게", "으로", "로", "와", "과", "은", "는", "이", "가",
-    "을", "를", "도", "만", "부터", "까지", "에게서", "밖에", "로서", "로써",
-    "이라서", "라서", "이라도", "라도", "이며", "이며도"
-)
+# TODO_DB_PATH는 MainWindow에서 동적으로 설정됨 (VDOS DB와 같은 위치)
+# 폴백 경로만 정의
+TODO_DB_PATH_FALLBACK = os.path.join("data", "multi_project_8week_ko", "todos_cache.db")
 
 def _create_recipient_type_badge(recipient_type: str) -> Optional[QLabel]:
     """수신 타입 배지 생성 헬퍼 함수
@@ -118,501 +113,14 @@ def _normalize_korean_name(token: str) -> str:
                 break
     return base.strip()
 
-def get_top3_rules() -> Dict[str, float]:
-    return dict(_TOP3_RULES)
-
-def set_top3_rules(new_rules: Dict[str, float]) -> None:
-    for key, default in TOP3_RULE_DEFAULT.items():
-        value = new_rules.get(key)
-        if value is None:
-            continue
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            continue
-        if key.startswith("priority_") and value <= 0:
-            continue
-        if key == "deadline_emphasis" and value < 0:
-            value = 0.0
-        if key == "deadline_base" and value < 0.1:
-            value = 0.1
-        if key == "evidence_per_item" and value < 0:
-            value = 0.0
-        if key == "evidence_max_bonus" and value < 0:
-            value = 0.0
-        _TOP3_RULES[key] = value
-
-def _persist_top3_rules() -> None:
-    global _TOP3_LAST_INSTRUCTION
-    try:
-        os.makedirs(os.path.dirname(CONFIG_STORE_PATH), exist_ok=True)
-        try:
-            with open(CONFIG_STORE_PATH, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except FileNotFoundError:
-            data = {}
-        except json.JSONDecodeError:
-            data = {}
-        data.setdefault("top3_rules", {})
-        data["top3_rules"]["weights"] = get_top3_rules()
-        data["top3_rules"]["entities"] = get_entity_rules()
-        data["top3_rules"]["instruction"] = _TOP3_LAST_INSTRUCTION
-        with open(CONFIG_STORE_PATH, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        print(f"[TodoPanel] 규칙 저장 실패: {exc}")
-
-def _load_persisted_top3_rules() -> None:
-    global _TOP3_LAST_INSTRUCTION
-    try:
-        with open(CONFIG_STORE_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except FileNotFoundError:
-        return
-    except json.JSONDecodeError:
-        print("[TodoPanel] 규칙 로드 실패: JSON 파싱 오류")
-        return
-    except Exception as exc:
-        print(f"[TodoPanel] 규칙 로드 실패: {exc}")
-        return
-
-    rules = (data.get("top3_rules") or {}) if isinstance(data, dict) else {}
-    weights = rules.get("weights")
-    entities = rules.get("entities")
-    instruction = rules.get("instruction")
-
-    if isinstance(weights, dict) and weights:
-        set_top3_rules(weights)
-    if isinstance(entities, dict):
-        update_entity_rules(entities, reset=True)
-    if isinstance(instruction, str):
-        _TOP3_LAST_INSTRUCTION = instruction
-
-ENTITY_RULES_DEFAULT = {
-    "requester": {},
-    "keyword": {},
-    "type": {},
-}
-_TOP3_ENTITY_RULES = deepcopy(ENTITY_RULES_DEFAULT)
-
-def get_entity_rules() -> Dict[str, Dict[str, float]]:
-    return {k: dict(v) for k, v in _TOP3_ENTITY_RULES.items()}
-
-def update_entity_rules(new_rules: Dict[str, Dict[str, float]] | None, reset: bool = False) -> None:
-    if reset:
-        for cat in ENTITY_RULES_DEFAULT:
-            _TOP3_ENTITY_RULES[cat].clear()
-    if not new_rules:
-        return
-    for category, mapping in new_rules.items():
-        if category not in _TOP3_ENTITY_RULES:
-            continue
-        dest = _TOP3_ENTITY_RULES[category]
-        for key, value in (mapping or {}).items():
-            if value is None:
-                continue
-
-            name_candidates: List[str] = []
-            bonus_value: Optional[float] = None
-
-            key_lower = key.lower() if isinstance(key, str) else ""
-            if isinstance(value, dict):
-                for k in ("match", "matches", "name", "names", "target", "value"):
-                    v = value.get(k)
-                    if isinstance(v, str) and v.strip():
-                        name_candidates.append(v.strip())
-                for k in ("bonus", "weight", "score", "value"):
-                    v = value.get(k)
-                    if isinstance(v, (int, float)):
-                        bonus_value = float(v)
-                        break
-            elif isinstance(value, (list, tuple)):
-                for item in value:
-                    if isinstance(item, str):
-                        name_candidates.append(item.strip())
-                    elif isinstance(item, (int, float)):
-                        bonus_value = float(item)
-            elif isinstance(value, str):
-                name_candidates.append(value.strip())
-            elif isinstance(value, (int, float)):
-                bonus_value = float(value)
-                if key_lower not in {"match", "matches", "name", "names", "target", "value"}:
-                    name_candidates.append(key)
-
-            if not name_candidates:
-                if not key_lower or key_lower in {"match", "matches", "name", "names", "target", "value"}:
-                    continue
-                name_candidates.append(key)
-
-            if bonus_value is None or bonus_value <= 0:
-                bonus_value = 1.0
-
-            bonus_value = min(bonus_value, 3.0)
-            for candidate in name_candidates:
-                candidate = candidate.strip()
-                if not candidate:
-                    continue
-                clean_candidate = _normalize_korean_name(candidate)
-                if clean_candidate and re.fullmatch(r"[가-힣]{2,6}", clean_candidate):
-                    candidate_key = clean_candidate.lower()
-                else:
-                    candidate_key = candidate.lower()
-                if not candidate_key:
-                    continue
-                dest[candidate_key] = max(dest.get(candidate_key, 0.0), bonus_value)
-                
-                # 임호규 특별 처리: 다양한 이름 변형 추가
-                if candidate_key in ["임호규", "hongyu", "imhokyu"]:
-                    hongyu_variations = ["임호규", "hongyu", "imhokyu", "lim", "ho", "gyu"]
-                    for variation in hongyu_variations:
-                        dest[variation] = max(dest.get(variation, 0.0), bonus_value)
-
-def describe_top3_rules() -> str:
-    rules = get_top3_rules()
-    parts = [
-        f"우선순위 가중치 H/M/L: {rules.get('priority_high',0):.2f}/{rules.get('priority_medium',0):.2f}/{rules.get('priority_low',0):.2f}",
-        f"마감 보너스 기준: base {rules.get('deadline_base',0):.2f}, emphasis {rules.get('deadline_emphasis',0):.1f}",
-        f"근거 보너스: +{rules.get('evidence_per_item',0):.2f}/item (최대 {rules.get('evidence_max_bonus',0):.2f})",
-    ]
-    entity = get_entity_rules()
-    requester = ", ".join(f"{k}:{v:.2f}" for k, v in entity.get("requester", {}).items())
-    keyword = ", ".join(f"{k}:{v:.2f}" for k, v in entity.get("keyword", {}).items())
-    etype = ", ".join(f"{k}:{v:.2f}" for k, v in entity.get("type", {}).items())
-    if requester:
-        parts.append(f"요청자 가중치: {requester}")
-    if keyword:
-        parts.append(f"키워드 가중치: {keyword}")
-    if etype:
-        parts.append(f"유형 가중치: {etype}")
-    return "\n".join(parts)
-
-def _extract_json_from_text(content: str) -> Optional[dict]:
-    try:
-        return json.loads(content)
-    except Exception:
-        pass
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if not match:
-        return None
-    snippet = match.group(0)
-    try:
-        return json.loads(snippet)
-    except Exception:
-        return None
-
-def _try_llm_parse_rules(text: str) -> tuple[Optional[dict], str]:
-    provider = (LLM_CONFIG.get("provider") or "azure").lower()
-    model = LLM_CONFIG.get("model") or "openrouter/auto"
-    headers: Dict[str, str] = {}
-    url: Optional[str] = None
-    payload_model: Optional[str] = model
-
-    if provider == "azure":
-        api_key = LLM_CONFIG.get("azure_api_key") or os.getenv("AZURE_OPENAI_KEY")
-        endpoint = (LLM_CONFIG.get("azure_endpoint") or os.getenv("AZURE_OPENAI_ENDPOINT") or "").rstrip("/")
-        deployment = LLM_CONFIG.get("azure_deployment") or os.getenv("AZURE_OPENAI_DEPLOYMENT")
-        api_version = LLM_CONFIG.get("azure_api_version") or os.getenv("AZURE_OPENAI_API_VERSION") or "2024-02-15"
-        if not api_key or not endpoint or not deployment:
-            return None, "AZURE_OPENAI_KEY/ENDPOINT/DEPLOYMENT가 설정되어 있지 않습니다."
-        url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
-        headers = {"api-key": api_key, "Content-Type": "application/json"}
-        payload_model = None  # Azure는 deployment 경로로 모델을 지정
-    elif provider == "openai":
-        api_key = LLM_CONFIG.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            return None, "OPENAI_API_KEY가 설정되어 있지 않습니다."
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    elif provider == "openrouter":
-        api_key = LLM_CONFIG.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            return None, "OPENROUTER_API_KEY가 설정되어 있지 않습니다."
-        base_url = LLM_CONFIG.get("openrouter_base_url") or "https://openrouter.ai/api/v1"
-        url = f"{base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://localhost"),
-            "X-Title": os.getenv("OPENROUTER_APP_NAME", "SmartAssistant"),
-            "Content-Type": "application/json",
-        }
-    else:
-        return None, f"지원되지 않는 LLM 공급자입니다: {provider}"
-
-    system_prompt = (
-        "You are an intelligent priority rule parser for a Korean workplace TODO management system.\n"
-        "Your task is to understand natural language instructions and convert them into structured priority rules.\n\n"
-        
-        "CONTEXT UNDERSTANDING:\n"
-        "- Korean names (임호규, 김철수, etc.) should be recognized along with their English variations\n"
-        "- Priority keywords: 최우선/긴급/즉시 = highest, 중요/우선 = high, 보통 = medium, 낮음 = low\n"
-        "- Work types: 버그/bug = critical, 회의/meeting = important, 문서/docs = medium\n\n"
-        
-        "INTELLIGENT PARSING:\n"
-        "- If someone mentions a person's name with priority words, create rules for that person\n"
-        "- Recognize name variations (임호규 = hongyu = imhokyu = lim)\n"
-        "- Understand context: '임호규 최우선' means 임호규's requests should have highest priority\n"
-        "- Set appropriate priority weights based on urgency level\n\n"
-        
-        "OUTPUT FORMAT (JSON only, no prose):\n"
-        "{\n"
-        '  \"priority_weights\": {\"priority_high\": float, \"priority_medium\": float, \"priority_low\": float},\n'
-        '  \"entity_rules\": {\n'
-        '      \"requester\": {\"name_or_email_pattern\": bonus_float},\n'
-        '      \"keyword\": {\"keyword\": bonus_float},\n'
-        '      \"type\": {\"type\": bonus_float}\n'
-        "  }\n"
-        "}\n\n"
-        
-        "PRIORITY WEIGHT GUIDELINES:\n"
-        "- 최우선/긴급/즉시: priority_high = 4.5-5.0\n"
-        "- 중요/우선: priority_high = 3.5-4.0\n"
-        "- 보통: priority_medium = 2.5-3.0\n"
-        "- 낮음: priority_low = 0.5-1.5\n\n"
-        
-        "BONUS GUIDELINES:\n"
-        "- Person bonuses: 1.5-2.5 (higher for 최우선)\n"
-        "- Keyword bonuses: 0.5-1.5\n"
-        "- Type bonuses: 0.5-2.0\n\n"
-        
-        "EXAMPLES:\n"
-        "Input: '임호규 최우선'\n"
-        "Output: {\"priority_weights\": {\"priority_high\": 4.8}, \"entity_rules\": {\"requester\": {\"임호규\": 2.5, \"hongyu\": 2.5, \"imhokyu\": 2.5, \"lim\": 2.5}}}\n\n"
-        
-        "Input: '버그 보고서는 긴급하게'\n"
-        "Output: {\"priority_weights\": {\"priority_high\": 4.5}, \"entity_rules\": {\"type\": {\"버그\": 2.0, \"bug\": 2.0}, \"keyword\": {\"보고서\": 1.0}}}\n"
-    )
-    try:
-        payload: Dict[str, object] = {
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text},
-            ],
-        }
-        if payload_model:
-            payload["model"] = payload_model
-
-        token_limit_raw = LLM_CONFIG.get("max_tokens")
-        try:
-            token_limit = int(float(token_limit_raw)) if token_limit_raw is not None else None
-        except (TypeError, ValueError):
-            token_limit = None
-
-        if provider == "azure":
-            if token_limit:
-                payload["max_completion_tokens"] = token_limit
-            payload["response_format"] = {"type": "json_object"}
-        else:
-            payload["temperature"] = 0.0
-            if token_limit:
-                payload["max_tokens"] = token_limit
-            if provider == "openai":
-                payload["response_format"] = {"type": "json_object"}
-
-        logger.info("[Top3Rules][LLM] provider=%s text=%s", provider, text[:200])
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        resp_json = response.json()
-        logger.debug("[Top3Rules][LLM] response=%s", json.dumps(resp_json, ensure_ascii=False)[:500])
-
-        choices = resp_json.get("choices") or []
-        content = ""
-        if choices:
-            message = choices[0].get("message") or {}
-            content = message.get("content") or ""
-        parsed = _extract_json_from_text(content or "")
-        if not parsed:
-            return None, "LLM 응답에서 JSON을 찾지 못했습니다."
-        return parsed, ""
-    except requests.RequestException as exc:
-        logger.warning("[Top3Rules][LLM] request error: %s", exc)
-        return None, f"LLM 요청 실패: {exc}"
-    except Exception as exc:
-        logger.warning("[Top3Rules][LLM] processing error: %s", exc)
-        return None, f"LLM 처리 오류: {exc}"
-
-def _heuristic_rules_from_text(text: str) -> Optional[dict]:
-    if not text:
-        return None
-    if "reset" in text.lower() or "초기화" in text:
-        return {"reset": True}
-
-    lines = [line.strip() for line in re.split(r"[.;\n]", text) if line.strip()]
-    entity_rules = {"requester": {}, "keyword": {}, "type": {}}
-    priority_weights: Dict[str, float] = {}
-
-    for line in lines:
-        lower = line.lower()
-        name_bonus = 2.0 if any(word in lower for word in ["최우선", "항상", "무조건", "must", "high", "urgent", "가장 먼저"]) else 1.2
-        keyword_bonus = 1.0
-
-        for name in re.findall(r"[가-힣]{2,6}(?:선생님|부장|팀장|님|씨)?", line):
-            cleaned = _normalize_korean_name(name)
-            if len(cleaned) >= 2:
-                key = cleaned.lower()
-                entity_rules["requester"][key] = max(entity_rules["requester"].get(key, 0.0), name_bonus)
-
-        for eng in re.findall(r"[A-Z][a-z]+(?: [A-Z][a-z]+)+", line):
-            key = eng.strip().lower()
-            entity_rules["requester"][key] = max(entity_rules["requester"].get(key, 0.0), name_bonus)
-
-        for word in re.findall(r"[A-Za-z]{3,}", line):
-            w = word.lower()
-            if w in {"priority", "high", "medium", "low", "urgent", "always"}:
-                continue
-            entity_rules["keyword"][w] = max(entity_rules["keyword"].get(w, 0.0), keyword_bonus)
-
-        if "버그" in line or "bug" in lower:
-            entity_rules["type"]["bug"] = max(entity_rules["type"].get("bug", 0.0), 1.2)
-        if "긴급" in line or "incident" in lower:
-            entity_rules["type"]["incident"] = max(entity_rules["type"].get("incident", 0.0), 1.5)
-
-        # 최우선 키워드 강화 (더 많은 표현 추가)
-        high_priority_words = [
-            "high", "최우선", "최고", "가장 먼저", "긴급", "urgent", "asap", 
-            "즉시", "바로", "지금", "당장", "최고 우선순위", "1순위", "top priority"
-        ]
-        if any(word in lower for word in high_priority_words):
-            # 더 강한 가중치 적용
-            current_high = priority_weights.get("priority_high", TOP3_RULE_DEFAULT["priority_high"])
-            priority_weights["priority_high"] = max(current_high, TOP3_RULE_DEFAULT["priority_high"] + 2.0)  # 1.5 → 2.0으로 증가
-        if any(word in lower for word in ["medium", "중간", "보통"]):
-            priority_weights["priority_medium"] = max(priority_weights.get("priority_medium", TOP3_RULE_DEFAULT["priority_medium"]), TOP3_RULE_DEFAULT["priority_medium"] + 0.5)
-        if any(word in lower for word in ["low", "낮", "덜 중요", "낮게","최하위"]):
-            priority_weights["priority_low"] = max(0.2, TOP3_RULE_DEFAULT["priority_low"] - 2.0)
-
-    note = "휴리스틱으로 규칙을 해석했습니다."
-    return {"priority_weights": priority_weights, "entity_rules": entity_rules, "note": note}
-
-def _enhance_rules_with_vdos(parsed_rules: Dict[str, Any]) -> Dict[str, Any]:
-    """VDOS 데이터를 활용해서 규칙 개선"""
-    if not VDOS_AVAILABLE or not is_vdos_available():
-        return parsed_rules
-    
-    try:
-        vdos = get_vdos_connector()
-        entity_rules = parsed_rules.setdefault("entity_rules", {})
-        requester_rules = entity_rules.setdefault("requester", {})
-        
-        # 요청자 규칙에서 VDOS 데이터 활용
-        enhanced_requesters = {}
-        
-        for requester_key, bonus in requester_rules.items():
-            # VDOS에서 해당 사람의 모든 변형 찾기
-            variations = vdos.get_person_variations(requester_key)
-            
-            for variation in variations:
-                variation_key = variation.lower()
-                enhanced_requesters[variation_key] = max(
-                    enhanced_requesters.get(variation_key, 0.0), 
-                    bonus
-                )
-            
-            logger.info(f"[VDOS] {requester_key} 변형 추가: {variations}")
-        
-        # 부서장 보너스 추가
-        dept_heads = vdos.get_department_heads()
-        for head in dept_heads:
-            head_variations = vdos.get_person_variations(head['name'])
-            for variation in head_variations:
-                variation_key = variation.lower()
-                # 부서장은 기본 1.5배 보너스
-                current_bonus = enhanced_requesters.get(variation_key, 0.0)
-                enhanced_requesters[variation_key] = max(current_bonus, 1.5)
-            
-            logger.info(f"[VDOS] 부서장 {head['name']} 보너스 추가")
-        
-        # 개선된 요청자 규칙 적용
-        entity_rules["requester"].update(enhanced_requesters)
-        
-        logger.info(f"[VDOS] 규칙 개선 완료: {len(enhanced_requesters)}개 요청자 변형 추가")
-        
-    except Exception as e:
-        logger.error(f"[VDOS] 규칙 개선 실패: {e}")
-    
-    return parsed_rules
-
-def apply_natural_language_rules(text: str, reset: bool = False) -> tuple[str, str]:
-    global _TOP3_LAST_INSTRUCTION
-    cleaned_text = text.strip()
-
-    if reset or not cleaned_text:
-        _TOP3_LAST_INSTRUCTION = "" if reset else cleaned_text
-        set_top3_rules(TOP3_RULE_DEFAULT)
-        update_entity_rules({}, reset=True)
-        _persist_top3_rules()
-        logger.info("[Top3Rules] rules reset by user input")
-        return "규칙을 기본값으로 초기화했습니다.", describe_top3_rules()
-
-    parsed, llm_message = _try_llm_parse_rules(cleaned_text)
-    heuristics = _heuristic_rules_from_text(cleaned_text)
-    parsed_note = ""
-    note = ""
-    if parsed:
-        note = "LLM 결과를 적용했습니다."
-        parsed_note = note
-    if heuristics:
-        if parsed:
-            # LLM 우선순위 보장: LLM 값이 있으면 유지, 없으면 휴리스틱 값 사용
-            parsed.setdefault("priority_weights", {})
-            heuristic_weights = heuristics.get("priority_weights") or {}
-            
-            for key, heuristic_value in heuristic_weights.items():
-                if key not in parsed["priority_weights"]:
-                    # LLM에 없는 키만 휴리스틱에서 추가
-                    parsed["priority_weights"][key] = heuristic_value
-                # LLM에 이미 있는 키는 LLM 값 유지 (덮어쓰지 않음)
-            
-            # 엔티티 규칙은 더 높은 값 선택 (기존 로직 유지)
-            ent = parsed.setdefault("entity_rules", {})
-            for cat, mapping in (heuristics.get("entity_rules") or {}).items():
-                ent.setdefault(cat, {})
-                for k, v in mapping.items():
-                    ent[cat][k] = max(ent[cat].get(k, 0.0), v)
-            note = parsed_note + " + 휴리스틱 보완 (LLM 우선)"
-        else:
-            parsed = heuristics
-            note = parsed.get("note", "휴리스틱 규칙을 적용했습니다.")
-            if llm_message:
-                note += f" (LLM 파싱 실패: {llm_message})"
-    if not parsed:
-        msg = "규칙을 해석하지 못했습니다."
-        if llm_message:
-            msg += f" (LLM 실패: {llm_message})"
-        logger.warning("[Top3Rules] failed to parse rules: %s", msg)
-        return msg, describe_top3_rules()
-
-    if parsed.get("reset"):
-        _TOP3_LAST_INSTRUCTION = ""
-        set_top3_rules(TOP3_RULE_DEFAULT)
-        update_entity_rules({}, reset=True)
-        _persist_top3_rules()
-        logger.info("[Top3Rules] applied reset directive from rules")
-    else:
-        # VDOS 데이터로 규칙 개선
-        parsed = _enhance_rules_with_vdos(parsed)
-        
-        priority_weights = parsed.get("priority_weights")
-        if priority_weights:
-            set_top3_rules({**get_top3_rules(), **priority_weights})
-        entity_rules = parsed.get("entity_rules")
-        if entity_rules:
-            update_entity_rules(entity_rules, reset=True)
-        _TOP3_LAST_INSTRUCTION = cleaned_text
-        _persist_top3_rules()
-        logger.info(
-            "[Top3Rules] applied rules. weights=%s entities=%s",
-            get_top3_rules(),
-            get_entity_rules(),
-        )
-
-    summary = describe_top3_rules()
-    return note, summary
-
-_load_persisted_top3_rules()
+# ─────────────────────────────────────────────────────────────────────────────
+# Top3 관련 전역 함수들은 Top3Service로 이동되었습니다
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 0) DB 헬퍼들과 공용 유틸
 # ─────────────────────────────────────────────────────────────────────────────
+
 def get_conn(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -713,108 +221,7 @@ def _created_ts(todo: dict) -> float:
 def _is_truthy(v) -> bool:
     return v in (1, "1", True, "true", "TRUE", "True")
 
-def _score_for_top3(todo: dict) -> float:
-    rules = _TOP3_RULES
-    priority = (todo.get("priority") or "low").lower()
-    priority_weights = {
-        "high": rules.get("priority_high", 3.0),
-        "medium": rules.get("priority_medium", 2.0),
-        "low": rules.get("priority_low", 1.0),
-    }
-    w_priority = priority_weights.get(priority, rules.get("priority_low", 1.0))
-
-    deadline_raw = todo.get("deadline_ts") or todo.get("deadline")
-    w_deadline = rules.get("deadline_base", 1.0)
-    if deadline_raw:
-        dl = _parse_iso_dt(deadline_raw)
-        if dl:
-            if dl.tzinfo is None:
-                dl = dl.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
-            hours_left = max(0.0, (dl - now).total_seconds() / 3600.0)
-            emphasis = max(0.0, rules.get("deadline_emphasis", 24.0))
-            if emphasis > 0:
-                w_deadline = rules.get("deadline_base", 1.0) + (emphasis / (emphasis + hours_left))
-
-    evidence = todo.get("evidence")
-    if not isinstance(evidence, list):
-        try:
-            evidence = json.loads(evidence or "[]")
-        except Exception:
-            evidence = []
-    per_item = max(0.0, rules.get("evidence_per_item", 0.1))
-    max_bonus = max(0.0, rules.get("evidence_max_bonus", 0.5))
-    w_evidence = 1.0 + min(max_bonus, per_item * len(evidence))
-
-    rule_multiplier = 1.0
-    priority_bonus = 0.0
-    entity_rules = _TOP3_ENTITY_RULES
-    requester = (todo.get("requester") or "").lower()
-    if requester:
-        for match, bonus in entity_rules.get("requester", {}).items():
-            if match and match in requester:
-                priority_bonus += bonus
-                rule_multiplier += bonus * 0.25
-        
-        # 임호규 특별 매칭 (이메일 주소 포함)
-        hongyu_patterns = ["임호규", "hongyu", "imhokyu", "lim", "ho", "gyu"]
-        if any(pattern in requester for pattern in hongyu_patterns):
-            # 임호규 관련 엔티티 규칙이 있는지 확인
-            for pattern in hongyu_patterns:
-                if pattern in entity_rules.get("requester", {}):
-                    bonus = entity_rules["requester"][pattern]
-                    priority_bonus += bonus
-                    rule_multiplier += bonus * 0.25
-                    break
-
-    text_fields = " ".join([
-        todo.get("title", ""),
-        todo.get("description", ""),
-        todo.get("type", ""),
-    ]).lower()
-    for match, bonus in entity_rules.get("keyword", {}).items():
-        if match and match in text_fields:
-            priority_bonus += bonus * 0.5
-            rule_multiplier += bonus * 0.25
-    todo_type = (todo.get("type") or "").lower()
-    for match, bonus in entity_rules.get("type", {}).items():
-        if match and match in todo_type:
-            priority_bonus += bonus * 0.5
-            rule_multiplier += bonus * 0.25
-
-    rule_multiplier = max(0.5, min(rule_multiplier, 6.0))
-    if priority_bonus > 0:
-        priority_floor = max(rules.get("priority_high", 3.0) + priority_bonus, 3.5)
-    else:
-        priority_floor = 0.0
-    priority_term = max(0.1, w_priority + priority_bonus, priority_floor)
-
-    # 참조(CC) 패널티 적용
-    recipient_type = (todo.get("recipient_type") or "to").lower()
-    cc_penalty = 1.0
-    if recipient_type == "cc":
-        cc_penalty = rules.get("recipient_type_cc_penalty", 0.7)
-    elif recipient_type == "bcc":
-        cc_penalty = rules.get("recipient_type_cc_penalty", 0.7) * 0.9  # BCC는 더 낮게
-
-    return (priority_term * rule_multiplier) * w_deadline * w_evidence * cc_penalty
-
-def _pick_top3(items: List[dict]) -> List[str]:
-    cand = [
-        t for t in items
-        if (t.get("status") or "pending").lower() not in ("done",)
-    ]
-    cand.sort(key=lambda t: (_score_for_top3(t), _created_ts(t)), reverse=True)
-    top_ids: List[str] = []
-    for t in cand:
-        tid = t.get("id")
-        if not tid:
-            continue
-        if tid not in top_ids:
-            top_ids.append(tid)
-        if len(top_ids) == 3:
-            break
-    return top_ids
+# _score_for_top3와 _pick_top3 함수는 Top3Service로 이동되었습니다
 
 def _priority_sort_key(todo: dict):
     order = {"high": 0, "medium": 1, "low": 2}
@@ -1175,12 +582,21 @@ class BasicTodoItem(QWidget):
 # 4) TodoPanel 본체
 # ─────────────────────────────────────────────────────────────────────────────
 class TodoPanel(QWidget):
-    def __init__(self, db_path=TODO_DB_PATH, parent=None, top3_callback: Optional[Callable[[List[dict]], None]] = None):
+    def __init__(self, db_path=None, parent=None, top3_callback: Optional[Callable[[List[dict]], None]] = None):
         super().__init__(parent)
 
+        # db_path가 None이면 폴백 경로 사용
+        if db_path is None:
+            db_path = TODO_DB_PATH_FALLBACK
+            logger.warning(f"[TodoPanel] db_path가 None, 폴백 경로 사용: {db_path}")
+        
+        logger.info(f"[TodoPanel] DB 경로: {db_path}")
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.conn = get_conn(db_path)
         init_db(self.conn)
+
+        # Top3 서비스는 MainWindow에서 전달받음 (나중에 설정됨)
+        self.top3_service = None
 
         # 애플리케이션 시작 시 오래된 TODO만 정리 (14일 이상)
         logger.info("애플리케이션 시작: 오래된 TODO 데이터 정리")
@@ -1283,27 +699,42 @@ class TodoPanel(QWidget):
         self.priority_filter.currentIndexChanged.connect(self._re_render)
 
     def open_top3_rule_dialog(self) -> None:
-        dialog = Top3RuleDialog(get_top3_rules(), self)
+        if not self.top3_service:
+            QMessageBox.warning(self, "오류", "Top3 서비스가 초기화되지 않았습니다.")
+            return
+        dialog = Top3RuleDialog(self.top3_service.get_rules(), self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            set_top3_rules(dialog.rules())
-            _persist_top3_rules()
-            self._rebuild_from_rows(self._all_rows or [])
+            self.top3_service.set_rules(dialog.rules())
+            self.top3_service._save_rules()
+            # DB에서 다시 로드하여 Top3 재계산
+            self.refresh_todo_list()
             self._refresh_rule_tooltip()
-            QMessageBox.information(self, "Top-3 기준", describe_top3_rules())
+            QMessageBox.information(self, "Top-3 기준", self.top3_service.describe_rules())
 
     def open_top3_nl_dialog(self) -> None:
-        dialog = Top3NaturalRuleDialog(self, seed_text=_TOP3_LAST_INSTRUCTION, summary_text=describe_top3_rules())
+        if not self.top3_service:
+            QMessageBox.warning(self, "오류", "Top3 서비스가 초기화되지 않았습니다.")
+            return
+        dialog = Top3NaturalRuleDialog(
+            self, 
+            seed_text=self.top3_service.get_last_instruction(), 
+            summary_text=self.top3_service.describe_rules()
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             text = dialog.rule_text()
-            message, summary = apply_natural_language_rules(text, reset=dialog.reset_requested())
-            self._rebuild_from_rows(self._all_rows or [])
+            message, summary = self.top3_service.apply_natural_language_rules(text, reset=dialog.should_reset())
+            # DB에서 다시 로드하여 Top3 재계산
+            self.refresh_todo_list()
             self._refresh_rule_tooltip()
             QMessageBox.information(self, "Top-3 자연어 규칙", f"{message}\n\n{summary}")
 
     def _refresh_rule_tooltip(self) -> None:
-        summary = describe_top3_rules()
-        if _TOP3_LAST_INSTRUCTION:
-            summary += f"\n\n최근 자연어 규칙: {_TOP3_LAST_INSTRUCTION}"
+        if not self.top3_service:
+            return
+        summary = self.top3_service.describe_rules()
+        last_instruction = self.top3_service.get_last_instruction()
+        if last_instruction:
+            summary += f"\n\n최근 자연어 규칙: {last_instruction}"
         if hasattr(self, "top3_label") and self.top3_label:
             self.top3_label.setToolTip(summary)
         if hasattr(self, "top3_rule_btn") and self.top3_rule_btn:
@@ -1365,22 +796,119 @@ class TodoPanel(QWidget):
             todo["status"] = (todo.get("status") or "pending").lower()
             new_rows.append(todo)
 
+        # DB에 저장 (중요!)
+        logger.info(f"[TodoPanel] {len(new_rows)}개 TODO를 DB에 저장")
+        self._save_to_db(new_rows)
+        
         self._rebuild_from_rows(new_rows)
+    
+    def _save_to_db(self, rows: List[dict]) -> None:
+        """TODO를 DB에 저장"""
+        try:
+            logger.info(f"[TodoPanel] {len(rows)}개 TODO를 DB에 저장 (중복 ID 확인 중...)")
+            
+            # ID 중복 확인 (디버깅용)
+            id_counts = {}
+            for row in rows:
+                todo_id = row.get("id")
+                if todo_id:
+                    id_counts[todo_id] = id_counts.get(todo_id, 0) + 1
+            
+            duplicates = {k: v for k, v in id_counts.items() if v > 1}
+            if duplicates:
+                logger.warning(f"[TodoPanel] ⚠️ 중복 ID 발견: {len(duplicates)}개 ID가 중복됨")
+                logger.warning(f"[TodoPanel] 중복 ID 샘플: {list(duplicates.items())[:5]}")
+            
+            # 트랜잭션 시작
+            cur = self.conn.cursor()
+            cur.execute("BEGIN TRANSACTION")
+            
+            try:
+                # 기존 TODO 삭제
+                cur.execute("DELETE FROM todos")
+                
+                # 새 TODO 삽입 (INSERT OR REPLACE 사용)
+                inserted_count = 0
+                for row in rows:
+                    # source_message를 JSON 문자열로 변환
+                    source_msg = row.get("source_message", {})
+                    if isinstance(source_msg, dict):
+                        source_msg_str = json.dumps(source_msg, ensure_ascii=False)
+                    else:
+                        source_msg_str = source_msg or "{}"
+                    
+                    cur.execute("""
+                        INSERT OR REPLACE INTO todos (
+                            id, title, description, priority, deadline, deadline_ts,
+                            requester, type, status, source_message, created_at, updated_at,
+                            snooze_until, is_top3, draft_subject, draft_body, evidence,
+                            deadline_confidence, recipient_type, source_type
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        row.get("id"),
+                        row.get("title", ""),
+                        row.get("description", ""),
+                        row.get("priority", "low"),
+                        row.get("deadline"),
+                        row.get("deadline_ts"),
+                        row.get("requester", ""),
+                        row.get("type", ""),
+                        row.get("status", "pending"),
+                        source_msg_str,
+                        row.get("created_at"),
+                        row.get("updated_at"),
+                        row.get("snooze_until"),
+                        row.get("is_top3", 0),
+                        row.get("draft_subject", ""),
+                        row.get("draft_body", ""),
+                        row.get("evidence", "[]"),
+                        row.get("deadline_confidence", "mid"),
+                        row.get("recipient_type", "to"),
+                        row.get("source_type", "메시지")
+                    ))
+                    inserted_count += 1
+                
+                # 커밋
+                self.conn.commit()
+                
+                # 실제 저장된 개수 확인
+                cur.execute("SELECT COUNT(*) FROM todos")
+                actual_count = cur.fetchone()[0]
+                logger.info(f"[TodoPanel] ✅ TODO DB 저장 완료: {inserted_count}개 삽입 → {actual_count}개 저장됨")
+                
+            except Exception as e:
+                # 롤백
+                self.conn.rollback()
+                logger.error(f"[TodoPanel] ❌ TODO DB 저장 실패 (롤백됨): {e}", exc_info=True)
+                raise
+                
+        except Exception as e:
+            logger.error(f"[TodoPanel] ❌ TODO DB 저장 실패: {e}", exc_info=True)
 
     def refresh_todo_list(self) -> None:
+        logger.info(f"[TodoPanel] refresh_todo_list 시작")
         cur = self.conn.cursor()
         cur.execute("SELECT * FROM todos WHERE status!='done' ORDER BY created_at DESC")
         rows = [dict(r) for r in cur.fetchall()]
+        logger.info(f"[TodoPanel] DB에서 {len(rows)}개 TODO 로드")
 
         if not rows:
+            logger.warning("[TodoPanel] TODO가 없음")
             if self._all_rows:
                 # DB가 비어도 기존 메모리 상태를 유지
                 self._set_render_lists(self._all_rows, self._top3_all or [], self._rest_all or [])
                 return
             self._rebuild_from_rows([])
             return
+        
+        if not self.top3_service:
+            logger.warning("[TodoPanel] Top3Service가 없음")
+            self._rebuild_from_rows(rows)
+            return
 
-        top_ids = _pick_top3(rows)
+        logger.info(f"[TodoPanel] Top3 재계산 시작")
+        top_ids = self.top3_service.pick_top3(rows)
+        logger.info(f"[TodoPanel] Top3 선정: {len(top_ids)}개")
         updates = []
         for row in rows:
             mark = 1 if row.get("id") in top_ids else 0
@@ -1434,14 +962,25 @@ class TodoPanel(QWidget):
             cloned["status"] = (cloned.get("status") or "pending").lower()
             cloned_rows.append(cloned)
 
-        top_ids = _pick_top3(cloned_rows)
+        if self.top3_service:
+            top_ids = self.top3_service.pick_top3(cloned_rows)
+        else:
+            top_ids = set()
+            
         for row in cloned_rows:
             row_id = row.get("id")
             row["is_top3"] = 1 if row_id and row_id in top_ids else 0
 
+        # Top3 점수로 정렬
+        for row in cloned_rows:
+            if self.top3_service:
+                row["_top3_score"] = self.top3_service.calculate_score(row)
+            else:
+                row["_top3_score"] = 0.0
+        
         top3_items = sorted(
             [row for row in cloned_rows if row.get("id") in top_ids],
-            key=lambda t: (_score_for_top3(t), _created_ts(t)),
+            key=lambda t: (t.get("_top3_score", 0), _created_ts(t)),
             reverse=True,
         )
         rest_items = sorted(
