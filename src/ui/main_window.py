@@ -10,7 +10,6 @@ import logging
 import sqlite3
 import time
 
-
 from typing import Dict, List, Optional
 from pathlib import Path
 
@@ -24,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 from PyQt6.QtGui import QFont, QFontDatabase
 from PyQt6.QtWidgets import QApplication, QStyleFactory
-
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -56,7 +54,6 @@ def _make_http_session():
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
-
 
 TODO_DB_PATH = os.path.join("data", "multi_project_8week_ko", "todos_cache.db")  # v1.2.0: 데이터셋 변경
 
@@ -110,7 +107,6 @@ from PyQt6.QtGui import QFont, QPalette, QColor
 from pathlib import Path
 import asyncio, json, os, sys
 
-
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -138,7 +134,6 @@ from src.integrations.simulation_monitor import SimulationMonitor
 from src.ui.visual_notification import NotificationManager, VisualNotification
 from src.ui.new_badge_widget import NewBadgeWidget, MessageItemWidget
 from src.ui.tick_history_dialog import TickHistoryDialog
-
 
 # 한 번만 실행(어디든 붙여서 호출)
 def recompute_top3_in_db(db_path="data/mobile_4week_ko/todos_cache.db"):
@@ -172,8 +167,6 @@ def recompute_top3_in_db(db_path="data/mobile_4week_ko/todos_cache.db"):
     cur.execute("UPDATE todos SET is_top3=0")
     if top: cur.execute(f"UPDATE todos SET is_top3=1 WHERE id IN ({','.join('?'*len(top))})", top)
     conn.commit(); conn.close()
-
-
 
 def _init_todo_schema(conn: sqlite3.Connection):
     cur = conn.cursor()
@@ -212,7 +205,6 @@ def _init_todo_schema(conn: sqlite3.Connection):
 #             return datetime.fromisoformat(s)
 #         except Exception:
 #             return None
-
 
 def _score_for_top3(t: dict) -> float:
     # 우선순위 가중치
@@ -351,125 +343,6 @@ def _save_todos_to_db(items: list[dict], db_path=TODO_DB_PATH):
 
     conn.commit()
     conn.close()
-
-class WorkerThread(QThread):
-    """백그라운드 작업 스레드"""
-    progress_updated = pyqtSignal(int)
-    status_updated = pyqtSignal(str)
-    result_ready = pyqtSignal(dict)
-    error_occurred = pyqtSignal(str)
-    
-    def __init__(self, assistant, dataset_config, collect_options):
-        super().__init__()
-        self.assistant = assistant
-        self.dataset_config = dataset_config or {}
-        self.collect_options = collect_options or {}
-        self.collect_options.setdefault("force_reload", True)
-        self._should_stop = False
-    
-    def run(self):
-        try:
-            # 비동기 작업을 동기적으로 실행
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            self.status_updated.emit("시스템 초기화 중...")
-            loop.run_until_complete(self.assistant.initialize(self.dataset_config))
-            
-            self.status_updated.emit("메시지 수집 중...")
-            self.progress_updated.emit(20)
-            
-            messages = loop.run_until_complete(
-                self.assistant.collect_messages(**self.collect_options)
-            )
-            
-            if not messages:
-                self.error_occurred.emit("수집된 메시지가 없습니다.")
-                return
-            
-            self.status_updated.emit("AI 분석 중...")
-            self.progress_updated.emit(50)
-            
-            analysis_results = loop.run_until_complete(self.assistant.analyze_messages())
-            
-            self.status_updated.emit("TODO 리스트 생성 중...")
-            self.progress_updated.emit(80)
-            todo_list = loop.run_until_complete(self.assistant.generate_todo_list(analysis_results))
-
-            self.progress_updated.emit(100)
-            self.status_updated.emit("완료")
-            
-            result = {
-                "success": True,
-                "todo_list": todo_list,
-                "analysis_results": analysis_results,
-                "messages": messages,
-                "analysis_report_text": getattr(self.assistant, "analysis_report_text", "")  # ✅ 추가
-            }
-            
-            self.result_ready.emit(result)
-
-
-            
-        except Exception as e:
-            self.error_occurred.emit(f"오류 발생: {str(e)}")
-        finally:
-            loop.close()
-    
-    def stop(self):
-        self._should_stop = True
-
-
-class StatusIndicator(QLabel):
-    """상태 표시기"""
-    def __init__(self, text="오프라인"):
-        super().__init__(text)
-        self.setFixedSize(100, 30)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet("""
-            QLabel {
-                border: 2px solid #ccc;
-                border-radius: 15px;
-                background-color: #f0f0f0;
-                color: #666;
-                font-weight: bold;
-            }
-        """)
-        self.current_status = "offline"
-    
-    def set_status(self, status):
-        self.current_status = status
-        if status == "online":
-            self.setText("온라인")
-            self.setStyleSheet("""
-                QLabel {
-                    border: 2px solid #4CAF50;
-                    border-radius: 15px;
-                    background-color: #E8F5E8;
-                    color: #2E7D32;
-                    font-weight: bold;
-                }
-            """)
-        else:
-            self.setText("오프라인")
-            self.setStyleSheet("""
-                QLabel {
-                    border: 2px solid #ccc;
-                    border-radius: 15px;
-                    background-color: #f0f0f0;
-                    color: #666;
-                    font-weight: bold;
-                }
-            """)
-
-
-class EmojiLabel(QLabel):
-    def __init__(self, text="", parent=None):
-        super().__init__(text, parent)
-        f = self.font()
-        f.setFamily("Segoe UI Emoji")  # 이모지 전용 폰트
-        self.setFont(f)
-
 
 class SmartAssistantGUI(QMainWindow):
     """Smart Assistant 메인 GUI"""
@@ -1190,23 +1063,7 @@ class SmartAssistantGUI(QMainWindow):
         scroll.setWidget(content_widget)
         layout.addWidget(scroll)
         
-        class _WrapHelper(QObject):
-            def __init__(self, labels, padding, dialog_obj):
-                super().__init__()
-                self.labels = labels
-                self.padding = padding
-                self.dialog = dialog_obj
-            
-            def eventFilter(self, obj, event):
-                if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
-                    # 다이얼로그 너비 기준으로 계산 (스크롤바 너비 고려)
-                    dialog_width = self.dialog.width()
-                    available = max(dialog_width - self.padding * 4 - 40, 200)  # 여백 + 스크롤바
-                    for lbl in self.labels:
-                        lbl.setMaximumWidth(available)
-                return False
-        
-        wrap_helper = _WrapHelper(content_labels, Spacing.MD, dialog)
+        wrap_helper = WrapHelper(content_labels, Spacing.MD, dialog)
         scroll.viewport().installEventFilter(wrap_helper)
         dialog.installEventFilter(wrap_helper)  # 다이얼로그 리사이즈도 감지
         dialog._wrap_helper = wrap_helper  # keep reference
@@ -4107,31 +3964,6 @@ class SmartAssistantGUI(QMainWindow):
         except Exception as e:
             logger.error(f"VirtualOffice 설정 저장 실패: {e}")
 
-class Chip(QLabel):
-    def __init__(self, text, bg="#E5E7EB", fg="#111827"):
-        super().__init__(text)
-        self.setProperty("chip", True)
-        self.setStyleSheet(f"""
-            QLabel[chip="true"] {{
-                background: {bg};
-                color: {fg};
-                padding: 2px 8px;
-                border-radius: 999px;
-                font-weight: 600;
-            }}
-        """)
-
-# def main():
-#     """메인 함수"""
-#     app = QApplication(sys.argv)
-#     app.setApplicationName("Smart Assistant")
-#     app.setApplicationVersion("1.0")
-    
-#     window = SmartAssistantGUI()
-#     window.show()
-    
-#     sys.exit(app.exec())
-
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("OFFLINE Agent")
@@ -4186,16 +4018,6 @@ def main():
     window.show()
     sys.exit(app.exec())
 
-
-
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
 
