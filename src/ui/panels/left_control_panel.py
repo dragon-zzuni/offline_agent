@@ -338,6 +338,52 @@ class LeftControlPanel(QWidget):
     
     def get_time_range(self):
         """현재 선택된 시간 범위 반환"""
+        return self.time_range_selector.get_selected_range()
+    
+    def set_status(self, status: str):
+        """상태 설정 및 스타일 적용
+        
+        Args:
+            status: 'online' 또는 'offline'
+        """
+        if status == "online":
+            self.status_indicator.set_status("online")
+            self.status_button.setText("온라인 → 오프라인")
+            self.status_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #e74c3c;
+                    color: white;
+                    border: none;
+                    padding: 8px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #c0392b;
+                }
+                QPushButton:disabled {
+                    background-color: #bdc3c7;
+                }
+            """)
+        else:  # offline
+            self.status_indicator.set_status("offline")
+            self.status_button.setText("오프라인 → 온라인")
+            self.status_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #3498db;
+                    color: white;
+                    border: none;
+                    padding: 8px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #2980b9;
+                }
+                QPushButton:disabled {
+                    background-color: #bdc3c7;
+                }
+            """)
         return self.time_range_selector.get_time_range()
     
     def set_time_range(self, start_dt, end_dt):

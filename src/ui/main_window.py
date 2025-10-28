@@ -869,46 +869,9 @@ class SmartAssistantGUI(QMainWindow):
         return tab
 
     def _apply_status_style(self):
-        if not hasattr(self, "status_indicator"):
-            return
-        if self.current_status == "online":
-            self.status_indicator.set_status("online")
-            self.status_button.setText("온라인 → 오프라인")
-            self.status_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #e74c3c;
-                    color: white;
-                    border: none;
-                    padding: 8px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #c0392b;
-                }
-                QPushButton:disabled {
-                    background-color: #bdc3c7;
-                }
-            """)
-        else:
-            self.status_indicator.set_status("offline")
-            self.status_button.setText("오프라인 → 온라인")
-            self.status_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #3498db;
-                    color: white;
-                    border: none;
-                    padding: 8px;
-                    border-radius: 4px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #2980b9;
-                }
-                QPushButton:disabled {
-                    background-color: #bdc3c7;
-                }
-            """)
+        """상태 스타일 적용 (LeftControlPanel에 위임)"""
+        if hasattr(self, "left_control_panel"):
+            self.left_control_panel.set_status(self.current_status)
 
     def initialize_online_state(self):
         self.current_status = "online"
