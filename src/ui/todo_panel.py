@@ -16,6 +16,15 @@ from PyQt6.QtCore import QTimer, pyqtSignal, Qt
 
 from config.settings import LLM_CONFIG, CONFIG_STORE_PATH
 
+# 분리된 헬퍼 및 위젯 import
+from .todo_helpers import (
+    _parse_iso_dt, _created_ts, _normalize_korean_name,
+    _create_recipient_type_badge, _create_source_type_badge,
+    _deadline_badge, _evidence_count, _source_message_dict,
+    _is_unread, _priority_sort_key
+)
+from .widgets import End2EndCard
+
 # VDOS 연동 import (선택적)
 try:
     from utils.vdos_connector import get_vdos_connector, is_vdos_available
