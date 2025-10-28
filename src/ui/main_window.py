@@ -21,9 +21,6 @@ import requests
 # 로거 초기화
 logger = logging.getLogger(__name__)
 
-from PyQt6.QtGui import QFont, QFontDatabase
-from PyQt6.QtWidgets import QApplication, QStyleFactory
-
 
 
 
@@ -47,15 +44,15 @@ if sys.platform == "win32":
 # Qt CSS 경고 억제 (box-shadow 등 지원하지 않는 속성)
 os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.qpa.*=false'
 
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QGroupBox, QLineEdit, QProgressBar, QStatusBar,
     QFrame, QMessageBox, QStyleFactory, QListWidget, QListWidgetItem,
-    QDialog, QDialogButtonBox, QScrollArea, QSizePolicy)
+    QDialog, QDialogButtonBox, QScrollArea, QSizePolicy
+)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QEvent
-from PyQt6.QtGui import QFont, QPalette, QColor
-from pathlib import Path
-import asyncio, json, os, sys
+from PyQt6.QtGui import QFont, QPalette, QColor, QFontDatabase
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -69,6 +66,9 @@ from .email_panel import EmailPanel  # ✅ EmailPanel 추가
 from .analysis_result_panel import AnalysisResultPanel  # ✅ AnalysisResultPanel 추가
 from .styles import Colors, Fonts, FontSizes, FontWeights, Spacing, BorderRadius
 from utils.datetime_utils import parse_iso_datetime  # ✅ 날짜 파싱 유틸리티
+
+# 분리된 패널 import
+from .panels import LeftControlPanel, VirtualOfficePanel
 
 # 분리된 위젯 및 헬퍼 import
 from .widgets import WorkerThread, StatusIndicator, EmojiLabel, Chip
@@ -357,489 +357,97 @@ class SmartAssistantGUI(QMainWindow):
         self.create_status_bar()
     
     def create_left_panel(self):
-        """좌측 패널 생성 (스크롤 가능)"""
-        from PyQt6.QtWidgets import QScrollArea
-        from PyQt6.QtCore import Qt
-        
+        """좌측 패널 생성 (리팩토링: 컴포넌트 분리)"""
         # 스크롤 영역 생성
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        # 폭 계산은 패널 구성 후 sizeHint 기준으로 설정하여 잘림 방지
-        scroll_area.setFrameStyle(QFrame.Shape.NoFrame)
-        # 수평 스크롤은 필요 시 표시(안전망)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
-        # 실제 컨텐츠 패널
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(13, 13, 13, 13)  # 마진 축소 (기본 11 → 8)
-        layout.setSpacing(10)  # 간격 축소
+        # 메인 컨테이너
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
         
-        # 제목
-        title = QLabel("OFFLINE-AGENT")
-        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))  # 16 → 14로 축소
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("color: #2c3e50; margin: 8px;")  # margin도 축소
-        layout.addWidget(title)
+        # 제어 패널 생성 및 시그널 연결
+        self.left_control_panel = LeftControlPanel()
+        self._connect_control_panel_signals()
+        layout.addWidget(self.left_control_panel)
         
-        # 상태 표시기
-        status_group = QGroupBox("연결 상태")
-        status_layout = QVBoxLayout(status_group)
+        # VirtualOffice 패널 생성 및 시그널 연결
+        self.vo_panel = VirtualOfficePanel()
+        self._connect_vo_panel_signals()
+        layout.addWidget(self.vo_panel)
         
-        self.status_indicator = StatusIndicator()
-        status_layout.addWidget(self.status_indicator)
-        
-        # 상태 토글 버튼
-        self.status_button = QPushButton("오프라인 → 온라인")
-        self.status_button.clicked.connect(self.toggle_status)
-        self.status_button.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-        """)
-        status_layout.addWidget(self.status_button)
-        
-        layout.addWidget(status_group)
-        
-        # 데이터 소스 정보 (VirtualOffice 전용)
-        dataset_group = QGroupBox("데이터 소스")
-        dataset_layout = QVBoxLayout(dataset_group)
-        
-        info_label = QLabel("VirtualOffice 실시간 연동 전용")
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #059669; font-weight: 600; background: #D1FAE5; padding: 8px; border-radius: 4px;")
-        dataset_layout.addWidget(info_label)
-        
-        help_label = QLabel("로컬 JSON 파일은 더 이상 지원하지 않습니다.\n아래 'VirtualOffice 연동' 섹션에서 실시간 연결을 설정하세요.")
-        help_label.setWordWrap(True)
-        help_label.setStyleSheet("color: #6B7280; font-size: 10px; padding: 4px;")
-        dataset_layout.addWidget(help_label)
-
-        layout.addWidget(dataset_group)
-        
-        # 제어 버튼
-        control_group = QGroupBox("제어")
-        control_layout = QVBoxLayout(control_group)
-        
-        # VirtualOffice 연결 테스트 버튼 (상단 배치)
-        self.vo_connect_btn = QPushButton("🔌 실시간 연결 테스트")
-        self.vo_connect_btn.clicked.connect(self.connect_virtualoffice)
-        self.vo_connect_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3B82F6;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #2563EB;
-            }
-            QPushButton:disabled {
-                background-color: #9CA3AF;
-            }
-        """)
-        control_layout.addWidget(self.vo_connect_btn)
-        
-        # 시작 버튼
-        self.start_button = QPushButton("🔄 메시지 수집")
-        self.start_button.clicked.connect(self.start_collection)
-        self.start_button.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #229954;
-            }
-            QPushButton:disabled {
-                background-color: #bdc3c7;
-            }
-        """)
-        control_layout.addWidget(self.start_button)
-        
-        # 중지 버튼
-        self.stop_button = QPushButton("⏹️ 중지")
-        self.stop_button.clicked.connect(self.stop_collection)
-        self.stop_button.setEnabled(False)
-        self.stop_button.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #c0392b;
-            }
-            QPushButton:disabled {
-                background-color: #bdc3c7;
-            }
-        """)
-        control_layout.addWidget(self.stop_button)
-        
-        # 오프라인 정리 버튼
-        self.cleanup_button = QPushButton("🧹 정리")
-        self.cleanup_button.clicked.connect(self.offline_cleanup)
-        self.cleanup_button.setStyleSheet("""
-            QPushButton {
-                background-color: #f39c12;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #e67e22;
-            }
-        """)
-        control_layout.addWidget(self.cleanup_button)
-        
-        layout.addWidget(control_group)
-        
-        # 진행률 표시
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-        
-        # 상태 메시지
-        self.status_message = QLabel("준비됨")
-        self.status_message.setStyleSheet("color: #666; font-size: 10px; padding: 4px;")
-        self.status_message.setWordWrap(True)  # 텍스트 줄바꿈 활성화
-        layout.addWidget(self.status_message)
-
-        # ✅ 시간 범위 선택기 추가
-        time_range_group = QGroupBox("⏰ 시간 범위 선택")
-        time_range_layout = QVBoxLayout(time_range_group)
-        self.time_range_selector = TimeRangeSelector()
-        self.time_range_selector.time_range_changed.connect(self._on_time_range_changed)
-        time_range_layout.addWidget(self.time_range_selector)
-        layout.addWidget(time_range_group)
-        
-        # 데이터셋의 시간 범위를 자동으로 설정
-        self._initialize_data_time_range()
-        
-        # 날씨 위젯
-        weather_group = QGroupBox("오늘/내일 날씨")
-        weather_layout = QVBoxLayout(weather_group)
-        self.weather_input = QLineEdit()
-        self.weather_input.setPlaceholderText("도시 또는 지역 (예: 서울, Seoul)")
-        self.weather_input.setText("서울")
-        self.weather_button = QPushButton("날씨 업데이트")
-        self.weather_button.clicked.connect(lambda: self.fetch_weather())
-        self.weather_button.setStyleSheet("padding:6px 10px; font-weight:600;")
-        self.daily_summary_button = QPushButton("일일 요약")
-        self.daily_summary_button.setStyleSheet("padding:6px 10px; font-weight:600;")
-        self.daily_summary_button.clicked.connect(self.show_daily_summary)
-        self.weekly_summary_button = QPushButton("주간 요약")
-        self.weekly_summary_button.setStyleSheet("padding:6px 10px; font-weight:600;")
-        self.weekly_summary_button.clicked.connect(self.show_weekly_summary)
-        self.weather_status_label = QLabel("위치를 입력하고 업데이트를 눌러주세요.")
-        self.weather_status_label.setWordWrap(True)
-        self.weather_status_label.setStyleSheet("color:#1F2937; background:#F5F3FF; padding:6px; border-radius:6px;")
-        self.weather_tip_label = QLabel("날씨 팁을 준비 중입니다.")
-        self.weather_tip_label.setWordWrap(True)
-        self.weather_tip_label.setStyleSheet("color:#4C1D95; background:#F5F3FF; padding:6px; border-radius:6px; font-size:12px;")
-        weather_layout.addWidget(self.weather_input)
-        weather_layout.addWidget(self.weather_button)
-        weather_layout.addWidget(self.weather_status_label)
-        weather_layout.addWidget(self.weather_tip_label)
-        layout.addWidget(weather_group)
-
-        summary_group = QGroupBox("요약 빠른 보기")
-        summary_layout = QHBoxLayout(summary_group)
-        summary_layout.addWidget(self.daily_summary_button)
-        summary_layout.addWidget(self.weekly_summary_button)
-        layout.addWidget(summary_group)
-        # 날씨 API 자동 호출 비활성화 - 네트워크 오류 시 앱 종료 방지
-        # 사용자가 수동으로 "날씨 업데이트" 버튼을 클릭하여 날씨 정보를 가져올 수 있습니다
-        # QTimer.singleShot(100, lambda: self.fetch_weather("서울"))
-        
-        # VirtualOffice 연동 패널 추가
-        vo_panel = self.create_virtualoffice_panel()
-        layout.addWidget(vo_panel)
-        
+        # 하단 여백
         layout.addStretch()
         
-        # 스크롤 영역에 패널 설정 및 추천 폭 산출
-        scroll_area.setWidget(panel)
+        # 스크롤 영역에 컨테이너 설정
+        scroll_area.setWidget(container)
+        
+        # 고정 폭 설정
         try:
-            panel.adjustSize()
-            width_hint = panel.sizeHint().width()
+            container.adjustSize()
+            width_hint = container.sizeHint().width()
             cushion = 48  # 여백 및 스크롤바 폭 대비
             fixed_w = max(320, width_hint + cushion)
             scroll_area.setFixedWidth(fixed_w)
         except Exception:
-            scroll_area.setFixedWidth(340)
+            scroll_area.setFixedWidth(380)
         
         return scroll_area
     
+    def _connect_control_panel_signals(self):
+        """제어 패널 시그널 연결"""
+        self.left_control_panel.status_toggled.connect(self.toggle_status)
+        self.left_control_panel.collection_started.connect(self.start_collection)
+        self.left_control_panel.collection_stopped.connect(self.stop_collection)
+        self.left_control_panel.cleanup_requested.connect(self.offline_cleanup)
+        self.left_control_panel.time_range_changed.connect(self._on_time_range_changed)
+        self.left_control_panel.weather_update_requested.connect(self.fetch_weather)
+        self.left_control_panel.daily_summary_requested.connect(self.show_daily_summary)
+        self.left_control_panel.weekly_summary_requested.connect(self.show_weekly_summary)
+        self.left_control_panel.connect_vo_requested.connect(self.connect_virtualoffice)
+        
+        # 기존 위젯 참조 유지 (하위 호환성)
+        self.status_indicator = self.left_control_panel.status_indicator
+        self.status_button = self.left_control_panel.status_button
+        self.vo_connect_btn = self.left_control_panel.vo_connect_btn
+        self.start_button = self.left_control_panel.start_button
+        self.stop_button = self.left_control_panel.stop_button
+        self.cleanup_button = self.left_control_panel.cleanup_button
+        self.progress_bar = self.left_control_panel.progress_bar
+        self.status_message = self.left_control_panel.status_message
+        self.time_range_selector = self.left_control_panel.time_range_selector
+        self.weather_input = self.left_control_panel.weather_input
+        self.weather_button = self.left_control_panel.weather_button
+        self.weather_status_label = self.left_control_panel.weather_status_label
+        self.weather_tip_label = self.left_control_panel.weather_tip_label
+        self.daily_summary_button = self.left_control_panel.daily_summary_button
+        self.weekly_summary_button = self.left_control_panel.weekly_summary_button
+    
+    def _connect_vo_panel_signals(self):
+        """VirtualOffice 패널 시그널 연결"""
+        self.vo_panel.connect_requested.connect(self.connect_virtualoffice)
+        self.vo_panel.persona_changed.connect(self.on_persona_changed)
+        self.vo_panel.tick_history_requested.connect(self.show_tick_history)
+        
+        # 기존 위젯 참조 유지 (하위 호환성)
+        self.persona_combo = self.vo_panel.persona_combo
+        self.vo_connection_status_label = self.vo_panel.connection_status_label
+        self.vo_email_url = self.vo_panel.email_url_input
+        self.vo_chat_url = self.vo_panel.chat_url_input
+        self.vo_sim_url = self.vo_panel.sim_url_input
+        self.sim_running_status = self.vo_panel.sim_running_status
+        self.sim_progress_bar = self.vo_panel.sim_progress_bar
+        self.sim_status_display = self.vo_panel.sim_status_display
+        self.tick_history_btn = self.vo_panel.tick_history_btn
+    
     # mark_dataset_reload_needed 메서드 제거 (더 이상 사용하지 않음)
 
-    def create_virtualoffice_panel(self):
-        """VirtualOffice 연동 패널 생성"""
-        from PyQt6.QtWidgets import QComboBox, QRadioButton, QButtonGroup
-        
-        group = QGroupBox("🌐 VirtualOffice 연동")
-        layout = QVBoxLayout(group)
-        layout.setSpacing(8)
-        
-        # VirtualOffice 전용 (데이터 소스 전환 제거)
-        info_label = QLabel("✅ VirtualOffice 실시간 연동 전용")
-        info_label.setStyleSheet("color: #059669; font-weight: 600; background: #D1FAE5; padding: 6px; border-radius: 4px;")
-        layout.addWidget(info_label)
-        
-        # 페르소나 선택 (최상단으로 이동)
-        persona_label = QLabel("👤 사용자 페르소나:")
-        persona_label.setStyleSheet("font-weight: 700; color: #1F2937; margin-top: 8px; font-size: 13px;")
-        layout.addWidget(persona_label)
-        
-        self.persona_combo = QComboBox()
-        self.persona_combo.setEnabled(False)  # 연결 전에는 비활성화
-        self.persona_combo.currentIndexChanged.connect(self.on_persona_changed)
-        self.persona_combo.setStyleSheet("""
-            QComboBox {
-                padding: 8px;
-                border: 2px solid #3B82F6;
-                border-radius: 6px;
-                background: white;
-                font-weight: 600;
-                font-size: 12px;
-            }
-            QComboBox:disabled {
-                background-color: #F3F4F6;
-                color: #9CA3AF;
-                border-color: #D1D5DB;
-            }
-            QComboBox::drop-down {
-                border: none;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 5px solid transparent;
-                border-right: 5px solid transparent;
-                border-top: 7px solid #3B82F6;
-                margin-right: 10px;
-            }
-            QComboBox:disabled::down-arrow {
-                border-top-color: #9CA3AF;
-            }
-        """)
-        layout.addWidget(self.persona_combo)
-        
-        # 연결 상태 표시 (페르소나 선택 아래)
-        self.vo_connection_status_label = QLabel("❌ 연결되지 않음")
-        self.vo_connection_status_label.setStyleSheet("""
-            QLabel {
-                color: #DC2626;
-                background-color: #FEE2E2;
-                padding: 6px;
-                border-radius: 4px;
-                font-size: 11px;
-                font-weight: 600;
-            }
-        """)
-        self.vo_connection_status_label.setWordWrap(True)
-        layout.addWidget(self.vo_connection_status_label)
-        
-        # 구분선
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
-        separator.setStyleSheet("background-color: #E5E7EB; margin: 8px 0;")
-        layout.addWidget(separator)
-        
-        # VirtualOffice 연결 설정 (접을 수 있도록)
-        vo_settings_label = QLabel("⚙️ 서버 설정 (고급):")
-        vo_settings_label.setStyleSheet("font-weight: 600; color: #6B7280; margin-top: 4px; font-size: 11px;")
-        layout.addWidget(vo_settings_label)
-        
-        # Email Server URL
-        layout.addWidget(QLabel("Email Server:"))
-        self.vo_email_url = QLineEdit("http://127.0.0.1:8000")
-        self.vo_email_url.setPlaceholderText("예: http://127.0.0.1:8000")
-        self.vo_email_url.setStyleSheet("""
-            QLineEdit {
-                padding: 6px;
-                border: 1px solid #D1D5DB;
-                border-radius: 4px;
-                background: white;
-            }
-            QLineEdit:focus {
-                border-color: #3B82F6;
-            }
-        """)
-        layout.addWidget(self.vo_email_url)
-        
-        # Chat Server URL
-        layout.addWidget(QLabel("Chat Server:"))
-        self.vo_chat_url = QLineEdit("http://127.0.0.1:8001")
-        self.vo_chat_url.setPlaceholderText("예: http://127.0.0.1:8001")
-        self.vo_chat_url.setStyleSheet("""
-            QLineEdit {
-                padding: 6px;
-                border: 1px solid #D1D5DB;
-                border-radius: 4px;
-                background: white;
-            }
-            QLineEdit:focus {
-                border-color: #3B82F6;
-            }
-        """)
-        layout.addWidget(self.vo_chat_url)
-        
-        # Simulation Manager URL
-        layout.addWidget(QLabel("Sim Manager:"))
-        self.vo_sim_url = QLineEdit("http://127.0.0.1:8015")
-        self.vo_sim_url.setPlaceholderText("예: http://127.0.0.1:8015")
-        self.vo_sim_url.setStyleSheet("""
-            QLineEdit {
-                padding: 6px;
-                border: 1px solid #D1D5DB;
-                border-radius: 4px;
-                background: white;
-            }
-            QLineEdit:focus {
-                border-color: #3B82F6;
-            }
-        """)
-        layout.addWidget(self.vo_sim_url)
-        
-        # 연결 상태 표시
-        self.vo_status_label = QLabel("연결되지 않음")
-        self.vo_status_label.setStyleSheet("""
-            QLabel {
-                color: #6B7280;
-                background-color: #F3F4F6;
-                padding: 6px;
-                border-radius: 4px;
-                font-size: 11px;
-            }
-        """)
-        # 시뮬레이션 상태 표시
-        sim_status_label = QLabel("시뮬레이션 상태:")
-        sim_status_label.setStyleSheet("font-weight: 600; color: #374151; margin-top: 8px;")
-        layout.addWidget(sim_status_label)
-        
-        # 상태 표시 컨테이너
-        status_container = QWidget()
-        status_layout = QVBoxLayout(status_container)
-        status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(4)
-        
-        # 실행 상태 표시 (아이콘 + 텍스트)
-        self.sim_running_status = QLabel("⚪ 연결 대기 중")
-        self.sim_running_status.setStyleSheet("""
-            QLabel {
-                color: #6B7280;
-                background-color: #F3F4F6;
-                padding: 6px 10px;
-                border-radius: 4px;
-                font-weight: 600;
-                font-size: 12px;
-            }
-        """)
-        status_layout.addWidget(self.sim_running_status)
-        
-        # 틱 진행률 바
-        from PyQt6.QtWidgets import QProgressBar
-        self.sim_progress_bar = QProgressBar()
-        self.sim_progress_bar.setTextVisible(True)
-        self.sim_progress_bar.setFormat("Tick: %v")
-        self.sim_progress_bar.setMinimum(0)
-        self.sim_progress_bar.setMaximum(10000)  # 기본 최대값 (동적으로 조정 가능)
-        self.sim_progress_bar.setValue(0)
-        self.sim_progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #D1D5DB;
-                border-radius: 4px;
-                background-color: #F3F4F6;
-                text-align: center;
-                height: 20px;
-                font-size: 11px;
-                font-weight: 600;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #3B82F6, stop:1 #2563EB);
-                border-radius: 3px;
-            }
-        """)
-        status_layout.addWidget(self.sim_progress_bar)
-        
-        # 상세 정보 표시
-        self.sim_status_display = QLabel("연결 후 표시됩니다")
-        self.sim_status_display.setStyleSheet("""
-            QLabel {
-                color: #374151;
-                background-color: #F9FAFB;
-                padding: 8px;
-                border-radius: 4px;
-                border: 1px solid #E5E7EB;
-                font-size: 11px;
-                font-family: 'Consolas', 'Monaco', monospace;
-            }
-        """)
-        self.sim_status_display.setWordWrap(True)
-        status_layout.addWidget(self.sim_status_display)
-        
-        layout.addWidget(status_container)
-        
-        # 틱 히스토리 버튼
-        self.tick_history_btn = QPushButton("📊 틱 히스토리 보기")
-        self.tick_history_btn.clicked.connect(self.show_tick_history)
-        self.tick_history_btn.setEnabled(False)  # 연결 전에는 비활성화
-        self.tick_history_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #10B981;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #059669;
-            }
-            QPushButton:disabled {
-                background-color: #9CA3AF;
-            }
-        """)
-        layout.addWidget(self.tick_history_btn)
-        
-        # 초기 상태: 모든 컨트롤 활성화 (사용자가 언제든 연결 가능)
-        # self._set_vo_controls_enabled(False)  # 제거: 버튼을 항상 활성화
-        
-        return group
-    
-    def _set_vo_controls_enabled(self, enabled: bool):
-        """VirtualOffice 컨트롤 활성화/비활성화"""
-        self.vo_email_url.setEnabled(enabled)
-        self.vo_chat_url.setEnabled(enabled)
-        self.vo_sim_url.setEnabled(enabled)
-        # 연결 테스트 버튼은 항상 활성화 (사용자가 언제든 연결 시도 가능)
-        # self.vo_connect_btn.setEnabled(enabled)
+    # ✅ DEPRECATED: VirtualOfficePanel 클래스로 대체됨 (약 230줄 제거)
+    # 이전 create_virtualoffice_panel() 메서드는 src/ui/panels/virtualoffice_panel.py로 이동됨
 
     # ✅ utils/datetime_utils.py의 parse_iso_datetime 사용으로 대체됨
     # def _parse_iso_datetime(self, value: Optional[str]) -> Optional[datetime]:
@@ -2076,16 +1684,7 @@ class SmartAssistantGUI(QMainWindow):
         try:
             # 연결 버튼 비활성화
             self.vo_connect_btn.setEnabled(False)
-            self.vo_status_label.setText("연결 중...")
-            self.vo_status_label.setStyleSheet("""
-                QLabel {
-                    color: #2563EB;
-                    background-color: #EFF6FF;
-                    padding: 6px;
-                    border-radius: 4px;
-                    font-size: 11px;
-                }
-            """)
+            self.vo_panel.update_connection_status("🔄 연결 중...", 'waiting')
             QApplication.processEvents()  # UI 업데이트
             
             # VirtualOfficeClient 생성
@@ -2181,11 +1780,6 @@ class SmartAssistantGUI(QMainWindow):
                 self.vo_connection_status_label.setText(success_text)
                 self.vo_connection_status_label.setStyleSheet(success_style)
             
-            # 서버 설정 섹션 레이블 업데이트
-            if hasattr(self, 'vo_status_label'):
-                self.vo_status_label.setText(success_text)
-                self.vo_status_label.setStyleSheet(success_style)
-            
             logger.info(f"✅ 연결 상태 레이블 업데이트: {len(personas)}개 페르소나")
             
             # 틱 히스토리 버튼 활성화
@@ -2210,16 +1804,7 @@ class SmartAssistantGUI(QMainWindow):
             
         except Exception as e:
             logger.error(f"❌ VirtualOffice 연결 실패: {e}", exc_info=True)
-            self.vo_status_label.setText(f"❌ 연결 실패: {str(e)}")
-            self.vo_status_label.setStyleSheet("""
-                QLabel {
-                    color: #DC2626;
-                    background-color: #FEE2E2;
-                    padding: 6px;
-                    border-radius: 4px;
-                    font-size: 11px;
-                }
-            """)
+            self.vo_panel.update_connection_status(f"❌ 연결 실패: {str(e)}", 'disconnected')
             QMessageBox.critical(self, "연결 오류", f"VirtualOffice 서버 연결에 실패했습니다.\n\n오류: {str(e)}")
         
         finally:
@@ -3422,13 +3007,10 @@ class SmartAssistantGUI(QMainWindow):
                     """
                     logger.warning("⚠️ 연결 상태 레이블 업데이트: 페르소나 없음")
                 
-                # 두 레이블 모두 업데이트
+                # 연결 상태 레이블 업데이트
                 if hasattr(self, 'vo_connection_status_label'):
                     self.vo_connection_status_label.setText(text)
                     self.vo_connection_status_label.setStyleSheet(style)
-                if hasattr(self, 'vo_status_label'):
-                    self.vo_status_label.setText(text)
-                    self.vo_status_label.setStyleSheet(style)
             else:
                 # 연결되지 않은 경우
                 text = "❌ 연결되지 않음"
@@ -3443,13 +3025,10 @@ class SmartAssistantGUI(QMainWindow):
                     }
                 """
                 
-                # 두 레이블 모두 업데이트
+                # 연결 상태 레이블 업데이트
                 if hasattr(self, 'vo_connection_status_label'):
                     self.vo_connection_status_label.setText(text)
                     self.vo_connection_status_label.setStyleSheet(style)
-                if hasattr(self, 'vo_status_label'):
-                    self.vo_status_label.setText(text)
-                    self.vo_status_label.setStyleSheet(style)
         except Exception as e:
             logger.error(f"연결 상태 업데이트 오류: {e}")
     
@@ -3505,15 +3084,10 @@ class SmartAssistantGUI(QMainWindow):
                     }
                 """
                 
-                # 페르소나 선택 아래 레이블 업데이트
+                # 연결 상태 레이블 업데이트
                 if hasattr(self, 'vo_connection_status_label'):
                     self.vo_connection_status_label.setText(config_loaded_text)
                     self.vo_connection_status_label.setStyleSheet(config_loaded_style)
-                
-                # 서버 설정 섹션 레이블 업데이트
-                if hasattr(self, 'vo_status_label'):
-                    self.vo_status_label.setText(config_loaded_text)
-                    self.vo_status_label.setStyleSheet(config_loaded_style)
             else:
                 logger.info("VirtualOffice 설정 파일이 없습니다. 기본값 사용")
                 # 환경 변수만 적용
