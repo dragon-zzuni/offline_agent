@@ -1951,41 +1951,46 @@ class SmartAssistantGUI(QMainWindow):
         try:
             cached_data = self._persona_cache.get(persona_key, {})
             
+            if not cached_data:
+                logger.warning(f"⚠️ 캐시에 데이터가 없음: {persona_key}")
+                return
+            
             # 메시지 데이터 복원
-            if 'messages' in cached_data:
-                self.collected_messages = cached_data['messages']
+            messages = cached_data.get('messages', [])
+            if messages:
+                self.collected_messages = messages
                 if hasattr(self.assistant, 'collected_messages'):
-                    self.assistant.collected_messages = cached_data['messages']
+                    self.assistant.collected_messages = messages
+                logger.info(f"📨 캐시에서 메시지 복원: {len(messages)}개")
             
             # TODO 데이터 복원
-            if 'todos' in cached_data and hasattr(self, 'todo_panel'):
-                todos = cached_data['todos']
+            todos = cached_data.get('todos', [])
+            if todos and hasattr(self, 'todo_panel'):
                 logger.info(f"📋 캐시에서 TODO 복원: {len(todos)}개")
-                if todos:
-                    self.todo_panel.populate_from_items(todos)
-                    logger.info(f"✅ TODO 패널 업데이트 완료: {len(todos)}개")
-                else:
-                    logger.warning("⚠️ 캐시에 TODO가 없음 - 빈 리스트")
+                # TODO 패널 새로고침
+                self.todo_panel.populate_from_items(todos)
+                logger.info(f"✅ TODO 패널 업데이트 완료: {len(todos)}개")
             else:
-                logger.warning("⚠️ 캐시에 'todos' 키가 없거나 todo_panel이 없음")
+                logger.warning(f"⚠️ 캐시에 TODO가 없음 (todos={len(todos)}, has_panel={hasattr(self, 'todo_panel')})")
             
             # 분석 결과 복원
-            if 'analysis_results' in cached_data:
-                self.analysis_results = cached_data['analysis_results']
+            analysis_results = cached_data.get('analysis_results', [])
+            if analysis_results:
+                self.analysis_results = analysis_results
                 if hasattr(self, 'analysis_result_panel'):
                     self.analysis_result_panel.update_analysis(
                         self.analysis_results, 
-                        self.collected_messages
+                        messages
                     )
+                logger.info(f"📊 캐시에서 분석 결과 복원: {len(analysis_results)}개")
             
-            # UI 업데이트
-            messages = cached_data.get('messages', [])
+            # UI 업데이트 (이메일 패널, 타임라인 등)
             self._update_ui_from_cache_only(messages)
             
-            logger.info(f"✅ 캐시에서 데이터 로드 완료: {len(cached_data.get('messages', []))}개 메시지")
+            logger.info(f"✅ 캐시에서 데이터 로드 완료: 메시지 {len(messages)}개, TODO {len(todos)}개, 분석 {len(analysis_results)}개")
             
         except Exception as e:
-            logger.error(f"캐시 로드 오류: {e}")
+            logger.error(f"❌ 캐시 로드 오류: {e}", exc_info=True)
     
     def _collect_and_cache_data(self, persona_key: str) -> None:
         """데이터 수집 및 캐시 저장
