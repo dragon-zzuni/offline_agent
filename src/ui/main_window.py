@@ -444,26 +444,6 @@ class SmartAssistantGUI(QMainWindow):
         self.sim_status_display = self.vo_panel.sim_status_display
         self.tick_history_btn = self.vo_panel.tick_history_btn
     
-    # mark_dataset_reload_needed 메서드 제거 (더 이상 사용하지 않음)
-
-    # ✅ DEPRECATED: VirtualOfficePanel 클래스로 대체됨 (약 230줄 제거)
-    # 이전 create_virtualoffice_panel() 메서드는 src/ui/panels/virtualoffice_panel.py로 이동됨
-
-    # ✅ utils/datetime_utils.py의 parse_iso_datetime 사용으로 대체됨
-    # def _parse_iso_datetime(self, value: Optional[str]) -> Optional[datetime]:
-    #     if not value:
-    #         return None
-    #     value = value.strip()
-    #     if not value:
-    #         return None
-    #     try:
-    #         return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    #     except Exception:
-    #         try:
-    #             return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-    #         except Exception:
-    #             return None
-
     def _show_summary_popup(self, title: str, text: str) -> None:
         """요약 다이얼로그 표시 (개선된 UI)"""
         
@@ -830,29 +810,6 @@ class SmartAssistantGUI(QMainWindow):
         layout.addWidget(self.tab_widget)
         return panel
     
-    # def create_todo_tab(self):
- 
-    #     tab = QWidget()
-    #     layout = QVBoxLayout(tab)
-
-    #     self.todo_list = QListWidget()
-    #     self.todo_list.setStyleSheet("""
-    #         QListWidget {
-    #             border: 1px solid #ddd;
-    #             border-radius: 5px;
-    #             background-color: #f8f9fa;
-    #         }
-    #         QListWidget::item {
-    #             padding: 5px;
-    #             border-bottom: 1px solid #eee;
-    #         }
-    #         QListWidget::item:selected {
-    #             background-color: #e3f2fd;
-    #         }
-    #     """)
-    #     layout.addWidget(self.todo_list)
-        
-    #     return tab
     def create_todo_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -1618,27 +1575,6 @@ class SmartAssistantGUI(QMainWindow):
         self.status_message.setText("오류 발생")
         
         QMessageBox.critical(self, "오류", error_message)
-    
-    # def update_todo_list(self, todo_items):
-    #     """TODO 리스트 업데이트"""
-    #     self.todo_list.clear()
-        
-    #     for item in todo_items[:30]:  # 상위 20개만 표시
-    #         todo_widget = TodoItemWidget(item)
-    #         list_item = QListWidgetItem()
-    #         list_item.setSizeHint(todo_widget.sizeHint())
-            
-    #         self.todo_list.addItem(list_item)
-    #         self.todo_list.setItemWidget(list_item, todo_widget)
-    # ✅ 이전 버전 호환성을 위해 유지 (현재는 AnalysisResultPanel 사용)
-    # def update_analysis_tab(self, analysis_report_text: Optional[str], analysis_results: Optional[list]):
-    #     """
-    #     분석결과 탭에 최종 텍스트를 채운다.
-    #     - 우선적으로 main.py에서 만들어둔 self.analysis_report_text(=analysis_report_text)를 사용
-    #     - 없으면 기존 방식으로 top 10 간단 요약을 만들어서 출력(폴백)
-    #     """
-    #     pass  # AnalysisResultPanel로 대체됨
-
     
     def auto_refresh(self):
         """자동 새로고침 (온라인 모드)"""
