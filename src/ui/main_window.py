@@ -124,6 +124,10 @@ from .analysis_result_panel import AnalysisResultPanel  # ✅ AnalysisResultPane
 from .styles import Colors, Fonts, FontSizes, FontWeights, Spacing, BorderRadius
 from utils.datetime_utils import parse_iso_datetime  # ✅ 날짜 파싱 유틸리티
 
+# 분리된 위젯 및 헬퍼 import
+from .widgets import WorkerThread, StatusIndicator, EmojiLabel, Chip
+from .helpers import WrapHelper
+
 # VirtualOffice 연동 관련 import
 from src.integrations.virtualoffice_client import VirtualOfficeClient
 from src.integrations.models import PersonaInfo, VirtualOfficeConfig
