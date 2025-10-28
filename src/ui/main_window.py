@@ -1949,10 +1949,14 @@ class SmartAssistantGUI(QMainWindow):
             persona_key: 페르소나 식별 키
         """
         try:
+            logger.info(f"📂 캐시 로드 시작: persona_key={persona_key}")
+            logger.info(f"📊 현재 캐시 키 목록: {list(self._persona_cache.keys())}")
+            
             cached_data = self._persona_cache.get(persona_key, {})
             
             if not cached_data:
                 logger.warning(f"⚠️ 캐시에 데이터가 없음: {persona_key}")
+                logger.warning(f"⚠️ 사용 가능한 캐시 키: {list(self._persona_cache.keys())}")
                 return
             
             # 메시지 데이터 복원
@@ -1999,9 +2003,12 @@ class SmartAssistantGUI(QMainWindow):
             persona_key: 페르소나 식별 키
         """
         try:
+            logger.info(f"📥 데이터 수집 시작: persona_key={persona_key}")
+            
             # 현재 데이터 수집
             data_source = self.assistant.data_source_manager.current_source
             if not data_source:
+                logger.warning("⚠️ 데이터 소스가 없음")
                 return
             
             # 비동기 데이터 수집
@@ -2014,18 +2021,17 @@ class SmartAssistantGUI(QMainWindow):
                     data_source.collect_messages({"incremental": False})
                 )
                 
+                logger.info(f"📨 메시지 수집 완료: {len(messages)}개")
+                
                 # 캐시에 저장할 데이터 준비
+                persona_info = self.selected_persona.__dict__ if self.selected_persona else {}
                 cache_data = {
                     'messages': messages,
                     'timestamp': time.time(),
-                    'persona': self.selected_persona.__dict__ if self.selected_persona else {}
+                    'persona': persona_info,
+                    'todos': [],  # 백그라운드 분석 후 업데이트
+                    'analysis_results': []  # 백그라운드 분석 후 업데이트
                 }
-                
-                # TODO와 분석 결과는 별도로 수집 (필요시)
-                if messages:
-                    # 간단한 분석만 수행 (전체 분석은 백그라운드에서)
-                    cache_data['todos'] = []
-                    cache_data['analysis_results'] = []
                 
                 # 현재 UI에 데이터 적용
                 self.collected_messages = messages
@@ -2036,23 +2042,25 @@ class SmartAssistantGUI(QMainWindow):
                 self._persona_cache[persona_key] = cache_data
                 self._cache_valid_until[persona_key] = time.time() + 300  # 5분 후 만료
                 
+                logger.info(f"💾 캐시 저장 완료: persona_key={persona_key}, 메시지={len(messages)}개")
+                logger.info(f"📊 현재 캐시 키 목록: {list(self._persona_cache.keys())}")
+                
                 # UI 즉시 업데이트
                 self._update_ui_with_new_data(messages)
                 
                 # 시뮬레이션 상태 업데이트
                 current_tick, is_running = self._get_simulation_status()
-                # 유효한 틱 값이 있을 때만 업데이트 (0은 오류 상태이므로 무시)
                 if current_tick > 0 or self._last_simulation_tick is None:
                     self._last_simulation_tick = current_tick
                 self._simulation_running = is_running
                 
-                logger.info(f"✅ 데이터 캐시 저장 및 UI 업데이트 완료: {len(messages)}개 메시지")
+                logger.info(f"✅ 데이터 수집 및 캐시 저장 완료: {len(messages)}개 메시지")
                 
             finally:
                 loop.close()
                 
         except Exception as e:
-            logger.error(f"데이터 수집 및 캐시 저장 오류: {e}")
+            logger.error(f"❌ 데이터 수집 및 캐시 저장 오류: {e}", exc_info=True)
     
     def _update_cache_with_analysis_results(self, todos: List[Dict], analysis_results: List[Dict]) -> None:
         """백그라운드 분석 결과로 캐시 업데이트
