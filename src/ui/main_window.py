@@ -1920,7 +1920,6 @@ class SmartAssistantGUI(QMainWindow):
                     "messenger_limit": None,
                     "overall_limit": None,
                     "force_reload": False,  # 기존 데이터 사용
-                    "skip_collection": True,  # 수집 건너뛰기
                 }
                 
                 self.worker_thread = WorkerThread(self.assistant, dataset_config, collect_options)
@@ -3031,6 +3030,122 @@ class SmartAssistantGUI(QMainWindow):
             
         except Exception as e:
             logger.error(f"VirtualOffice 설정 저장 실패: {e}")
+    
+    def _update_time_range_selector_data_range(self, messages: List[Dict]) -> None:
+        """TimeRangeSelector에 실제 데이터 범위 설정
+        
+        Args:
+            messages: 메시지 리스트
+        """
+        try:
+            if not messages:
+                logger.debug("메시지가 없어 데이터 범위를 설정할 수 없음")
+                return
+            
+            # 메시지에서 시간 정보 추출
+            message_times = []
+            
+            for message in messages:
+                # 다양한 시간 필드 확인
+                time_str = (
+                    message.get('date') or 
+                    message.get('timestamp') or 
+                    message.get('sent_at') or
+                    message.get('created_at') or
+                    message.get('time')
+                )
+                
+                if time_str:
+                    try:
+                        # 시간 파싱 시도
+                        if isinstance(time_str, str):
+                            # ISO 형식 시도
+                            if 'T' in time_str:
+                                message_time = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+                            else:
+                                # 다른 형식들 시도
+                                for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d']:
+                                    try:
+                                        message_time = datetime.strptime(time_str, fmt)
+                                        break
+                                    except ValueError:
+                                        continue
+                                else:
+                                    continue
+                        elif isinstance(time_str, datetime):
+                            message_time = time_str
+                        else:
+                            continue
+                            
+                        message_times.append(message_time)
+                        
+                    except Exception as parse_error:
+                        logger.debug(f"시간 파싱 실패: {time_str} - {parse_error}")
+                        continue
+            
+            if not message_times:
+                logger.debug("메시지에서 유효한 시간 정보를 찾을 수 없음")
+                return
+            
+            # 최소/최대 시간 계산
+            min_time = min(message_times)
+            max_time = max(message_times)
+            
+            # TimeRangeSelector에 데이터 범위 설정
+            if hasattr(self, 'left_control_panel') and hasattr(self.left_control_panel, 'time_range_selector'):
+                self.left_control_panel.time_range_selector.set_data_range(min_time, max_time)
+                
+                min_str = min_time.strftime('%Y-%m-%d %H:%M')
+                max_str = max_time.strftime('%Y-%m-%d %H:%M')
+                logger.info(f"📅 데이터 범위 설정: {min_str} ~ {max_str}")
+            else:
+                logger.debug("TimeRangeSelector를 찾을 수 없음")
+            
+        except Exception as e:
+            logger.error(f"데이터 범위 설정 오류: {e}", exc_info=True)
+    
+    def _start_data_collection_with_time_filter(self):
+        """시간 필터링을 적용한 데이터 수집 시작"""
+        try:
+            if not self.vo_client or not self.selected_persona:
+                logger.warning("VirtualOffice 연결 또는 페르소나가 설정되지 않음")
+                return
+            
+            logger.info("🔄 시간 필터링 적용된 데이터 수집 시작")
+            
+            # 기존 워커 스레드가 실행 중이면 중지
+            if hasattr(self, 'worker_thread') and self.worker_thread and self.worker_thread.isRunning():
+                logger.info("기존 워커 스레드 중지 중...")
+                self.worker_thread.quit()
+                self.worker_thread.wait(2000)
+            
+            # 새로운 워커 스레드로 데이터 수집 시작
+            from .widgets.worker_thread import WorkerThread
+            
+            dataset_config = dict(self.dataset_config)
+            collect_options = {
+                "email_limit": None,
+                "messenger_limit": None,
+                "overall_limit": None,
+                "force_reload": True,
+            }
+            
+            self.worker_thread = WorkerThread(self.assistant, dataset_config, collect_options)
+            self.worker_thread.progress_updated.connect(self.progress_bar.setValue)
+            self.worker_thread.status_updated.connect(self.status_message.setText)
+            self.worker_thread.result_ready.connect(self._handle_reanalysis_result)
+            self.worker_thread.error_occurred.connect(self.handle_error)
+            
+            # UI 상태 업데이트
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(0)
+            self.status_message.setText("시간 범위 적용된 데이터 수집 중...")
+            
+            self.worker_thread.start()
+            
+        except Exception as e:
+            logger.error(f"시간 필터링 데이터 수집 시작 오류: {e}", exc_info=True)
+            self.status_message.setText(f"데이터 수집 시작 오류: {e}")
 
 
 def main():

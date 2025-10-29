@@ -7,6 +7,7 @@ TimeRangeSelector 컴포넌트
 빠른 선택 버튼으로 자주 사용하는 범위를 쉽게 설정할 수 있습니다.
 """
 
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
@@ -17,6 +18,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, Qt, QDateTime
 
 from .styles import Colors, FontSizes, FontWeights, Styles, Spacing, BorderRadius
+
+logger = logging.getLogger(__name__)
 
 
 class TimeRangeSelector(QWidget):
@@ -181,21 +184,148 @@ class TimeRangeSelector(QWidget):
         """전체 기간 설정
         
         데이터셋의 실제 메시지 범위를 사용합니다.
-        데이터 범위가 설정되지 않은 경우 최근 1년을 사용합니다.
+        데이터 범위가 설정되지 않은 경우 부모 윈도우에서 데이터를 가져와 범위를 계산합니다.
         """
-        # 데이터 범위가 설정되어 있으면 사용
+        # 1. 이미 설정된 데이터 범위가 있으면 사용
         if hasattr(self, '_data_start') and hasattr(self, '_data_end'):
             self.start_datetime.setDateTime(QDateTime(self._data_start))
             self.end_datetime.setDateTime(QDateTime(self._data_end))
+            logger.info(f"📅 설정된 데이터 범위 사용: {self._data_start} ~ {self._data_end}")
         else:
-            # 데이터 범위가 없으면 최근 1년 사용
-            now = datetime.now()
-            start = now - timedelta(days=365)
-            self.start_datetime.setDateTime(QDateTime(start))
-            self.end_datetime.setDateTime(QDateTime(now))
+            # 2. 부모 윈도우에서 실제 데이터를 가져와서 범위 계산
+            data_range = self._get_actual_data_range()
+            if data_range:
+                start_time, end_time = data_range
+                self.start_datetime.setDateTime(QDateTime(start_time))
+                self.end_datetime.setDateTime(QDateTime(end_time))
+                # 계산된 범위를 저장
+                self._data_start = start_time
+                self._data_end = end_time
+                logger.info(f"📅 실제 데이터에서 범위 계산: {start_time} ~ {end_time}")
+            else:
+                # 3. 데이터를 찾을 수 없으면 최근 1년 사용
+                now = datetime.now()
+                start = now - timedelta(days=365)
+                self.start_datetime.setDateTime(QDateTime(start))
+                self.end_datetime.setDateTime(QDateTime(now))
+                logger.warning("📅 데이터를 찾을 수 없어 최근 1년으로 설정")
         
-        # 자동으로 적용
-        self._apply_range()
+        # 시간 범위만 설정하고 자동 적용하지 않음 (다른 버튼들과 동일한 동작)
+    
+    def _get_actual_data_range(self) -> Optional[Tuple[datetime, datetime]]:
+        """부모 윈도우에서 실제 데이터 범위 가져오기
+        
+        VirtualOffice에서 전체 데이터를 조회하여 실제 시간 범위를 계산합니다.
+        
+        Returns:
+            (start_time, end_time) 튜플 또는 None
+        """
+        try:
+            # 부모 윈도우 찾기
+            parent = self.parent()
+            while parent and not hasattr(parent, 'vo_client'):
+                parent = parent.parent()
+            
+            if not parent:
+                logger.warning("부모 윈도우를 찾을 수 없음")
+                return None
+            
+            # VirtualOffice 클라이언트가 있으면 전체 데이터 조회
+            if hasattr(parent, 'vo_client') and parent.vo_client and hasattr(parent, 'selected_persona') and parent.selected_persona:
+                logger.info("🔍 VirtualOffice에서 전체 데이터 범위 조회 중...")
+                
+                try:
+                    # 전체 이메일 조회 (since_id=None으로 전체 조회)
+                    emails = parent.vo_client.get_emails(
+                        mailbox=parent.selected_persona.email_address,
+                        since_id=None  # 전체 조회
+                    )
+                    
+                    # 전체 메시지 조회 (since_id=None으로 전체 조회)
+                    messages = parent.vo_client.get_messages(
+                        handle=parent.selected_persona.handle,
+                        since_id=None  # 전체 조회
+                    )
+                    
+                    all_messages = emails + messages
+                    logger.info(f"📊 전체 데이터 조회 완료: 이메일 {len(emails)}개, 메시지 {len(messages)}개")
+                    
+                    if all_messages:
+                        message_times = self._extract_times_from_messages(all_messages)
+                        if message_times:
+                            min_time = min(message_times)
+                            max_time = max(message_times)
+                            logger.info(f"📅 전체 데이터 범위: {min_time} ~ {max_time}")
+                            return min_time, max_time
+                    
+                except Exception as vo_error:
+                    logger.error(f"VirtualOffice 데이터 조회 오류: {vo_error}")
+            
+            # VirtualOffice 조회 실패 시 현재 수집된 메시지에서 범위 계산
+            logger.info("현재 수집된 메시지에서 데이터 범위 계산")
+            messages = getattr(parent, 'collected_messages', [])
+            if not messages and hasattr(parent, 'assistant') and hasattr(parent.assistant, 'collected_messages'):
+                messages = parent.assistant.collected_messages
+            
+            if messages:
+                message_times = self._extract_times_from_messages(messages)
+                if message_times:
+                    return min(message_times), max(message_times)
+            
+            logger.warning("데이터를 찾을 수 없음")
+            return None
+            
+        except Exception as e:
+            logger.error(f"실제 데이터 범위 계산 오류: {e}")
+            return None
+    
+    def _extract_times_from_messages(self, messages: list) -> list:
+        """메시지 리스트에서 시간 정보 추출
+        
+        Args:
+            messages: 메시지 리스트
+            
+        Returns:
+            datetime 객체 리스트
+        """
+        message_times = []
+        
+        for message in messages:
+            time_str = (
+                message.get('date') or 
+                message.get('timestamp') or 
+                message.get('sent_at') or
+                message.get('created_at') or
+                message.get('time')
+            )
+            
+            if time_str:
+                try:
+                    if isinstance(time_str, str):
+                        # ISO 형식 시도
+                        if 'T' in time_str:
+                            message_time = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+                        else:
+                            # 다른 형식들 시도
+                            for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d']:
+                                try:
+                                    message_time = datetime.strptime(time_str, fmt)
+                                    break
+                                except ValueError:
+                                    continue
+                            else:
+                                continue
+                    elif isinstance(time_str, datetime):
+                        message_time = time_str
+                    else:
+                        continue
+                        
+                    message_times.append(message_time)
+                    
+                except Exception:
+                    continue
+        
+        return message_times
     
     def set_data_range(self, start: datetime, end: datetime):
         """데이터의 실제 시간 범위 설정
