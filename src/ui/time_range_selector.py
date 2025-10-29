@@ -257,7 +257,7 @@ class TimeRangeSelector(QWidget):
         self.end_datetime.setDateTime(QDateTime(end))
     
     def _apply_range(self):
-        """선택한 시간 범위 적용"""
+        """선택한 시간 범위 적용 및 즉시 데이터 수집"""
         start = self.start_datetime.dateTime().toPyDateTime()
         end = self.end_datetime.dateTime().toPyDateTime()
         
@@ -265,7 +265,7 @@ class TimeRangeSelector(QWidget):
         if not self._validate_range(start, end):
             return
         
-        # 시그널 발생
+        # 시그널 발생 (시간 범위 변경 + 즉시 수집 요청)
         self.time_range_changed.emit(start, end)
     
     def _validate_range(self, start: datetime, end: datetime) -> bool:

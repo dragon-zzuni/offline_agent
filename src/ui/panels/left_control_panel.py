@@ -130,18 +130,18 @@ class LeftControlPanel(QWidget):
         control_group = QGroupBox("제어")
         control_layout = QVBoxLayout(control_group)
         
-        # VirtualOffice 연결 테스트 버튼
-        self.vo_connect_btn = QPushButton("🔌 실시간 연결 테스트")
-        self.vo_connect_btn.clicked.connect(lambda: self.connect_vo_requested.emit())
-        self.vo_connect_btn.setStyleSheet("""
+        # 통합된 연결 및 수집 버튼
+        self.connect_collect_button = QPushButton("🔌 실시간 연결 및 메시지 수집")
+        self.connect_collect_button.clicked.connect(lambda: self.connect_vo_requested.emit())
+        self.connect_collect_button.setStyleSheet("""
             QPushButton {
                 background-color: #3B82F6;
                 color: white;
                 border: none;
-                padding: 8px;
-                border-radius: 4px;
+                padding: 10px;
+                border-radius: 6px;
                 font-weight: bold;
-                font-size: 12px;
+                font-size: 13px;
             }
             QPushButton:hover {
                 background-color: #2563EB;
@@ -150,71 +150,7 @@ class LeftControlPanel(QWidget):
                 background-color: #9CA3AF;
             }
         """)
-        control_layout.addWidget(self.vo_connect_btn)
-        
-        # 시작 버튼
-        self.start_button = QPushButton("🔄 메시지 수집")
-        self.start_button.clicked.connect(lambda: self.collection_started.emit())
-        self.start_button.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #229954;
-            }
-            QPushButton:disabled {
-                background-color: #bdc3c7;
-            }
-        """)
-        control_layout.addWidget(self.start_button)
-        
-        # 중지 버튼
-        self.stop_button = QPushButton("⏹️ 중지")
-        self.stop_button.clicked.connect(lambda: self.collection_stopped.emit())
-        self.stop_button.setEnabled(False)
-        self.stop_button.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #c0392b;
-            }
-            QPushButton:disabled {
-                background-color: #bdc3c7;
-            }
-        """)
-        control_layout.addWidget(self.stop_button)
-        
-        # 정리 버튼
-        self.cleanup_button = QPushButton("🧹 정리")
-        self.cleanup_button.clicked.connect(lambda: self.cleanup_requested.emit())
-        self.cleanup_button.setStyleSheet("""
-            QPushButton {
-                background-color: #f39c12;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #e67e22;
-            }
-        """)
-        control_layout.addWidget(self.cleanup_button)
+        control_layout.addWidget(self.connect_collect_button)
         
         layout.addWidget(control_group)
     
@@ -319,16 +255,10 @@ class LeftControlPanel(QWidget):
         """상태 메시지 설정"""
         self.status_message.setText(message)
     
-    def set_buttons_enabled(self, start=None, stop=None, cleanup=None, vo_connect=None):
+    def set_buttons_enabled(self, connect_collect=None):
         """버튼 활성화/비활성화"""
-        if start is not None:
-            self.start_button.setEnabled(start)
-        if stop is not None:
-            self.stop_button.setEnabled(stop)
-        if cleanup is not None:
-            self.cleanup_button.setEnabled(cleanup)
-        if vo_connect is not None:
-            self.vo_connect_btn.setEnabled(vo_connect)
+        if connect_collect is not None:
+            self.connect_collect_button.setEnabled(connect_collect)
     
     def update_weather_status(self, status_text, tip_text=None):
         """날씨 상태 업데이트"""

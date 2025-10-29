@@ -662,14 +662,12 @@ class TodoPanel(QWidget):
         self.top3_rule_btn.clicked.connect(self.open_top3_rule_dialog)
         self.top3_nl_btn = QPushButton("자연어 규칙")
         self.top3_nl_btn.clicked.connect(self.open_top3_nl_dialog)
-        self.top3_popup_btn = QPushButton("팝업으로 보기")
-        self.top3_popup_btn.setEnabled(False)
-        self.top3_popup_btn.clicked.connect(self.show_top3_dialog)
+
         top_header.addWidget(self.top3_label)
         top_header.addWidget(self.top3_rule_btn)
         top_header.addWidget(self.top3_nl_btn)
         top_header.addStretch(1)
-        top_header.addWidget(self.top3_popup_btn)
+
 
         filter_row = QHBoxLayout()
         self.search_input = QLineEdit()
@@ -929,12 +927,12 @@ class TodoPanel(QWidget):
     def _update_top3_header(self, top3: List[dict]) -> None:
         if not top3:
             self.top3_label.setText("🔺 Top-3 (즉시 처리)")
-            self.top3_popup_btn.setEnabled(False)
+
             self._current_top3 = []
             return
 
         self.top3_label.setText(f"🔺 Top-3 (즉시 처리) · {len(top3)}")
-        self.top3_popup_btn.setEnabled(True)
+
         self._current_top3 = top3
 
     def _set_render_lists(self, all_rows: List[dict], top3_items: List[dict], rest_items: List[dict]) -> None:

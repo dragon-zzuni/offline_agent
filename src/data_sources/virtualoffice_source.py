@@ -6,6 +6,7 @@ VirtualOffice API 기반 데이터 소스
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from data_sources.manager import DataSource
@@ -78,6 +79,7 @@ class VirtualOfficeDataSource(DataSource):
             options: 수집 옵션
                 - incremental: True면 증분 수집, False면 전체 수집 (기본값: False)
                 - parallel: True면 병렬 수집, False면 순차 수집 (기본값: True)
+                - time_range: 시간 범위 필터링 {"start": datetime, "end": datetime}
             
         Returns:
             메시지 리스트
@@ -85,6 +87,7 @@ class VirtualOfficeDataSource(DataSource):
         options = options or {}
         incremental = options.get("incremental", False)
         parallel = options.get("parallel", True)
+        time_range = options.get("time_range")
         
         # 선택된 페르소나의 메일박스와 핸들
         mailbox = self.selected_persona.get("email_address")
@@ -135,6 +138,11 @@ class VirtualOfficeDataSource(DataSource):
         # 통합 및 정렬
         all_messages = emails + messages
         all_messages.sort(key=lambda m: m["date"])
+        
+        # 시간 범위 필터링 적용 (옵션)
+        if time_range:
+            all_messages = self._apply_time_filter(all_messages, time_range)
+            logger.info(f"⏰ 시간 필터링 적용: {time_range['start']} ~ {time_range['end']}")
         
         logger.info(
             f"메시지 수집 완료: 이메일 {len(emails)}개, 채팅 {len(messages)}개 "
@@ -469,3 +477,103 @@ class VirtualOfficeDataSource(DataSource):
         except Exception as e:
             logger.error(f"페르소나 캐시 갱신 실패: {e}")
             return False
+    def _apply_time_filter(self, messages: List[Dict[str, Any]], time_range: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """메시지 리스트에 시간 범위 필터링 적용
+        
+        Args:
+            messages: 필터링할 메시지 리스트
+            time_range: 시간 범위 {"start": datetime, "end": datetime}
+            
+        Returns:
+            필터링된 메시지 리스트
+        """
+        try:
+            start_time = time_range.get("start")
+            end_time = time_range.get("end")
+            
+            if not start_time or not end_time:
+                logger.warning("시간 범위가 불완전합니다")
+                return messages
+            
+            # UTC로 변환
+            if start_time.tzinfo is None:
+                start_time = start_time.replace(tzinfo=timezone.utc)
+            else:
+                start_time = start_time.astimezone(timezone.utc)
+                
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=timezone.utc)
+            else:
+                end_time = end_time.astimezone(timezone.utc)
+            
+            filtered_messages = []
+            
+            for message in messages:
+                message_time = self._parse_message_time(message)
+                if message_time and start_time <= message_time <= end_time:
+                    filtered_messages.append(message)
+            
+            original_count = len(messages)
+            filtered_count = len(filtered_messages)
+            
+            logger.info(f"⏰ 시간 필터링 결과: {original_count}개 → {filtered_count}개")
+            
+            return filtered_messages
+            
+        except Exception as e:
+            logger.error(f"시간 필터링 오류: {e}")
+            return messages  # 오류 시 원본 반환
+    
+    def _parse_message_time(self, message: Dict[str, Any]) -> Optional[datetime]:
+        """메시지에서 시간 정보 파싱
+        
+        Args:
+            message: 메시지 딕셔너리
+            
+        Returns:
+            파싱된 datetime (UTC) 또는 None
+        """
+        try:
+            try:
+                import dateutil.parser
+            except ImportError:
+                logger.warning("python-dateutil 패키지가 설치되지 않음. 기본 datetime 파싱만 사용")
+                dateutil = None
+            
+            # 다양한 시간 필드 시도
+            time_fields = ['date', 'timestamp', 'sent_at', 'created_at']
+            
+            for field in time_fields:
+                if field in message and message[field]:
+                    time_value = message[field]
+                    
+                    if isinstance(time_value, datetime):
+                        # 이미 datetime 객체
+                        if time_value.tzinfo is None:
+                            return time_value.replace(tzinfo=timezone.utc)
+                        return time_value.astimezone(timezone.utc)
+                    
+                    elif isinstance(time_value, str):
+                        # 문자열 파싱
+                        try:
+                            if dateutil:
+                                dt = dateutil.parser.parse(time_value)
+                            else:
+                                # 기본 ISO 형식만 지원
+                                dt = datetime.fromisoformat(time_value.replace('Z', '+00:00'))
+                            
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            return dt.astimezone(timezone.utc)
+                        except Exception:
+                            continue
+                    
+                    elif isinstance(time_value, (int, float)):
+                        # 타임스탬프
+                        return datetime.fromtimestamp(time_value, tz=timezone.utc)
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"메시지 시간 파싱 오류: {e}")
+            return None

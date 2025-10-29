@@ -15,15 +15,15 @@ from pathlib import Path
 
 from datetime import datetime, timezone, timedelta
 from collections import Counter
-import math, uuid, json, sqlite3
-import requests
+import uuid, json, sqlite3
 
 # 로거 초기화
 logger = logging.getLogger(__name__)
 
-
-
-
+# 서비스 import
+from ..services.time_filter_service import TimeFilterService
+from ..services.vdos_integration_service import VDOSIntegrationService
+from ..services.data_collection_service import DataCollectionService
 
 # TODO DB는 VDOS DB와 같은 위치에 저장 (동적으로 설정됨)
 TODO_DB_PATH = None  # 초기화 시 설정됨
@@ -74,8 +74,7 @@ from .panels import LeftControlPanel, VirtualOfficePanel
 from .dialogs.summary_dialog import SummaryDialog
 
 # 분리된 위젯 및 헬퍼 import
-from .widgets import WorkerThread, StatusIndicator, EmojiLabel, Chip
-from .helpers import WrapHelper
+from .widgets import WorkerThread
 
 # 서비스 import
 from src.services import WeatherService
@@ -88,10 +87,7 @@ from src.integrations.simulation_monitor import SimulationMonitor
 
 # 시각적 알림 관련 import
 from src.ui.visual_notification import NotificationManager, VisualNotification
-from src.ui.new_badge_widget import NewBadgeWidget, MessageItemWidget
 from src.ui.tick_history_dialog import TickHistoryDialog
-
-
 
 def _init_todo_schema(conn: sqlite3.Connection):
     cur = conn.cursor()
@@ -273,24 +269,17 @@ class SmartAssistantGUI(QMainWindow):
         kma_api_key = os.environ.get("KMA_API_KEY")
         self.weather_service = WeatherService(kma_api_key=kma_api_key)
         
-        # VDOS 연동 초기화 (people 데이터용)
-        from src.utils.vdos_connector import VDOSConnector
-        self.vdos_connector = VDOSConnector()
+        # VDOS 통합 서비스 초기화
+        self.vdos_service = VDOSIntegrationService()
         
-        # TODO DB 경로 설정 (VDOS DB와 같은 위치)
+        # TODO DB 경로 설정
         global TODO_DB_PATH
-        if self.vdos_connector.is_available:
-            vdos_dir = os.path.dirname(self.vdos_connector.vdos_db_path)
-            TODO_DB_PATH = os.path.join(vdos_dir, "todos_cache.db")
-            logger.info(f"[MainWindow] TODO DB 경로: {TODO_DB_PATH}")
-        else:
-            # 폴백: 기본 경로
-            TODO_DB_PATH = os.path.join("data", "todos_cache.db")
-            logger.warning(f"[MainWindow] VDOS 연결 실패, 폴백 경로 사용: {TODO_DB_PATH}")
+        TODO_DB_PATH = self.vdos_service.get_todo_db_path()
+        logger.info(f"[MainWindow] TODO DB 경로: {TODO_DB_PATH}")
         
         # Top3 서비스 초기화 (VDOS 연동)
         from src.services import Top3Service
-        self.top3_service = Top3Service(vdos_connector=self.vdos_connector)
+        self.top3_service = Top3Service(vdos_connector=self.vdos_service.vdos_connector)
         
         # VirtualOffice 연동 관련 속성
         self.vo_client: Optional[VirtualOfficeClient] = None
@@ -305,15 +294,20 @@ class SmartAssistantGUI(QMainWindow):
         self._cache_valid_until: Dict[str, float] = {}  # 캐시 유효 시간 (페르소나별)
         self.sim_monitor: Optional[SimulationMonitor] = None
         self.vo_config: Optional[VirtualOfficeConfig] = None
-        # VirtualOffice 설정 파일 경로 (VDOS DB와 같은 위치)
-        if self.vdos_connector and self.vdos_connector.is_available:
-            vdos_dir = os.path.dirname(self.vdos_connector.vdos_db_path)
-            self.vo_config_path = Path(vdos_dir) / "virtualoffice_config.json"
-        else:
-            self.vo_config_path = Path("data/virtualoffice_config.json")
+        # VirtualOffice 설정 파일 경로
+        self.vo_config_path = self.vdos_service.get_vo_config_path()
         
         # 시각적 알림 관리자
         self.notification_manager = NotificationManager()
+        
+        # 시간 필터링 서비스 초기화
+        self.time_filter_service = TimeFilterService()
+        
+        # 데이터 수집 서비스 초기화
+        self.data_collection_service = DataCollectionService(
+            self.assistant, 
+            self.time_filter_service
+        )
         
         # 새 메시지 ID 추적 (NEW 배지 표시용)
         self.new_message_ids = set()
@@ -404,9 +398,7 @@ class SmartAssistantGUI(QMainWindow):
     def _connect_control_panel_signals(self):
         """제어 패널 시그널 연결"""
         self.left_control_panel.status_toggled.connect(self.toggle_status)
-        self.left_control_panel.collection_started.connect(self.start_collection)
-        self.left_control_panel.collection_stopped.connect(self.stop_collection)
-        self.left_control_panel.cleanup_requested.connect(self.offline_cleanup)
+# 제거됨: 버튼 통합으로 인해 불필요
         self.left_control_panel.time_range_changed.connect(self._on_time_range_changed)
         self.left_control_panel.weather_update_requested.connect(self.fetch_weather)
         self.left_control_panel.daily_summary_requested.connect(self.show_daily_summary)
@@ -416,10 +408,9 @@ class SmartAssistantGUI(QMainWindow):
         # 기존 위젯 참조 유지 (하위 호환성)
         self.status_indicator = self.left_control_panel.status_indicator
         self.status_button = self.left_control_panel.status_button
-        self.vo_connect_btn = self.left_control_panel.vo_connect_btn
-        self.start_button = self.left_control_panel.start_button
-        self.stop_button = self.left_control_panel.stop_button
-        self.cleanup_button = self.left_control_panel.cleanup_button
+        self.connect_collect_button = self.left_control_panel.connect_collect_button
+# 제거됨: 버튼 통합으로 인해 불필요
+# 제거됨: cleanup_button 삭제됨
         self.progress_bar = self.left_control_panel.progress_bar
         self.status_message = self.left_control_panel.status_message
         self.time_range_selector = self.left_control_panel.time_range_selector
@@ -432,7 +423,7 @@ class SmartAssistantGUI(QMainWindow):
     
     def _connect_vo_panel_signals(self):
         """VirtualOffice 패널 시그널 연결"""
-        self.vo_panel.connect_requested.connect(self.connect_virtualoffice)
+# 중복 제거: left_control_panel에서 이미 연결됨
         self.vo_panel.persona_changed.connect(self.on_persona_changed)
         self.vo_panel.tick_history_requested.connect(self.show_tick_history)
         
@@ -963,25 +954,120 @@ class SmartAssistantGUI(QMainWindow):
         """시간 범위 변경 핸들러
         
         TimeRangeSelector에서 시간 범위가 변경되면 호출됩니다.
-        변경된 시간 범위를 collect_options에 저장하고 상태 메시지를 업데이트합니다.
+        변경된 시간 범위를 TimeFilterService에 설정하고 즉시 필터링을 적용합니다.
         
         Args:
             start: 시작 시간 (UTC aware datetime)
             end: 종료 시간 (UTC aware datetime)
         """
-        # 시간 범위를 collect_options에 저장
-        self.collect_options["time_range"] = {
-            "start": start,
-            "end": end
-        }
+        try:
+            # TimeFilterService에 시간 범위 설정
+            self.time_filter_service.set_time_range(start, end)
+            
+            # collect_options에도 저장 (하위 호환성)
+            self.collect_options["time_range"] = {
+                "start": start,
+                "end": end
+            }
+            
+            # 상태 메시지 업데이트
+            start_str = start.strftime('%Y-%m-%d %H:%M')
+            end_str = end.strftime('%Y-%m-%d %H:%M')
+            self.status_message.setText(f"⏰ 시간 범위: {start_str} ~ {end_str}")
+            
+            # 즉시 새 데이터 수집 시작 (시간 범위 적용)
+            if self.vo_client and self.selected_persona:
+                logger.info(f"🚀 시간 범위 변경으로 인한 자동 데이터 수집 시작")
+                self._start_data_collection_with_time_filter()
+            else:
+                logger.info(f"⏰ 시간 범위 설정됨: {start_str} ~ {end_str} (연결 후 적용)")
+                
+        except Exception as e:
+            logger.error(f"❌ 시간 범위 변경 오류: {e}", exc_info=True)
+            self.status_message.setText(f"시간 범위 설정 오류: {e}")
+    
+    def _apply_time_filtering(self):
+        """현재 데이터에 시간 필터링 적용"""
+        try:
+            if not self.time_filter_service.is_enabled:
+                logger.debug("시간 필터링이 비활성화됨")
+                return
+            
+            logger.info("🔄 시간 필터링 적용 중...")
+            
+            # 메시지 필터링
+            original_count = len(self.collected_messages)
+            filtered_messages = self.time_filter_service.filter_messages(self.collected_messages)
+            
+            # 필터링된 메시지로 UI 업데이트
+            if len(filtered_messages) != original_count:
+                logger.info(f"📧 메시지 필터링: {original_count}개 → {len(filtered_messages)}개")
+                
+                # 분석 결과도 필터링
+                if hasattr(self, 'analysis_results'):
+                    filtered_analysis = self.time_filter_service.filter_messages(self.analysis_results)
+                    self.analysis_results = filtered_analysis
+                
+                # UI 업데이트
+                self._update_ui_with_filtered_data(filtered_messages)
+                
+                # TODO 재생성 (필터링된 메시지 기반)
+                self._regenerate_todos_from_filtered_messages(filtered_messages)
+            else:
+                logger.info("📧 필터링 결과: 변경 없음")
+                
+        except Exception as e:
+            logger.error(f"❌ 시간 필터링 적용 오류: {e}", exc_info=True)
+    
+    def _update_ui_with_filtered_data(self, filtered_messages: List[Dict]):
+        """필터링된 데이터로 UI 업데이트
         
-        # 상태 메시지 업데이트
-        start_str = start.strftime('%Y-%m-%d %H:%M')
-        end_str = end.strftime('%Y-%m-%d %H:%M')
-        self.status_message.setText(
-            f"시간 범위 설정: {start_str} ~ {end_str}\n"
-            "'메시지 수집 시작'을 눌러 분석하세요."
-        )
+        Args:
+            filtered_messages: 필터링된 메시지 리스트
+        """
+        try:
+            # 이메일 패널 업데이트
+            if hasattr(self, 'email_panel'):
+                email_messages = [m for m in filtered_messages if m.get("type") == "email"]
+                self.email_panel.update_emails(email_messages)
+            
+            # 메시지 요약 패널 업데이트
+            if hasattr(self, 'message_summary_panel'):
+                self._update_message_summaries("day")
+            
+            # 분석 결과 패널 업데이트
+            if hasattr(self, 'analysis_result_panel') and hasattr(self, 'analysis_results'):
+                self.analysis_result_panel.update_analysis(
+                    self.analysis_results, 
+                    filtered_messages
+                )
+            
+            logger.info("✅ 필터링된 데이터로 UI 업데이트 완료")
+            
+        except Exception as e:
+            logger.error(f"❌ 필터링된 데이터 UI 업데이트 오류: {e}")
+    
+    def _regenerate_todos_from_filtered_messages(self, filtered_messages: List[Dict]):
+        """필터링된 메시지에서 TODO 재생성
+        
+        Args:
+            filtered_messages: 필터링된 메시지 리스트
+        """
+        try:
+            if not filtered_messages:
+                # 메시지가 없으면 TODO도 비움
+                if hasattr(self, 'todo_panel'):
+                    self.todo_panel.populate_from_items([])
+                logger.info("📋 필터링 결과: TODO 없음")
+                return
+            
+            logger.info(f"🔄 필터링된 메시지로 TODO 재생성: {len(filtered_messages)}개 메시지")
+            
+            # 백그라운드에서 TODO 재생성
+            self._trigger_background_analysis(filtered_messages)
+            
+        except Exception as e:
+            logger.error(f"❌ TODO 재생성 오류: {e}")
     
     def _on_summary_unit_changed(self, unit: str):
         """요약 단위 변경 핸들러
@@ -1277,8 +1363,7 @@ class SmartAssistantGUI(QMainWindow):
         dataset_config["force_reload"] = dataset_config.get("force_reload", False) or True
 
         # UI 상태 변경
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
+        self.connect_collect_button.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         
@@ -1300,14 +1385,12 @@ class SmartAssistantGUI(QMainWindow):
             self.worker_thread.stop()
             self.worker_thread.wait(3000)
         
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self.connect_collect_button.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.status_message.setText("수집 중지됨")
     
     def handle_result(self, result):
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self.connect_collect_button.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.status_message.setText("수집 완료")
 
@@ -1317,7 +1400,6 @@ class SmartAssistantGUI(QMainWindow):
             if items:
                 if hasattr(self, "todo_panel"):
                     self.todo_panel.populate_from_items(items)
-                    self.todo_panel.show_top3_dialog()
                 try:
                     _save_todos_to_db(items, db_path=TODO_DB_PATH)
                 except Exception as e:
@@ -1381,8 +1463,7 @@ class SmartAssistantGUI(QMainWindow):
     
     def handle_error(self, error_message):
         """오류 처리"""
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self.connect_collect_button.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.status_message.setText("오류 발생")
         
@@ -1431,7 +1512,7 @@ class SmartAssistantGUI(QMainWindow):
         """VirtualOffice 연결 테스트 및 페르소나 조회"""
         try:
             # 연결 버튼 비활성화
-            self.vo_connect_btn.setEnabled(False)
+            self.connect_collect_button.setEnabled(False)
             self.vo_panel.update_connection_status("🔄 연결 중...", 'waiting')
             QApplication.processEvents()
             
@@ -1538,7 +1619,7 @@ class SmartAssistantGUI(QMainWindow):
         
         finally:
             # 연결 버튼 다시 활성화
-            self.vo_connect_btn.setEnabled(True)
+            self.connect_collect_button.setEnabled(True)
     
     def _setup_personas(self, personas: list):
         """페르소나 드롭다운 설정 및 PM 자동 선택"""
@@ -1669,6 +1750,23 @@ class SmartAssistantGUI(QMainWindow):
                 return
             
             logger.info(f"📬 새 데이터 수신: 메일 {len(emails)}개, 메시지 {len(messages)}개")
+            
+            # 시간 필터링 적용 (활성화된 경우)
+            if self.time_filter_service.is_enabled:
+                original_count = len(all_messages)
+                all_messages = self.time_filter_service.filter_messages(all_messages)
+                emails = [m for m in all_messages if m.get("type") == "email"]
+                messages = [m for m in all_messages if m.get("type") == "messenger"]
+                
+                filtered_count = len(all_messages)
+                if filtered_count != original_count:
+                    logger.info(f"⏰ 새 데이터 시간 필터링: {original_count}개 → {filtered_count}개")
+                    total_new = len(emails) + len(messages)
+                    
+                    # 필터링 후 데이터가 없으면 종료
+                    if total_new == 0:
+                        logger.info("⏰ 시간 필터링 후 새 데이터 없음")
+                        return
             
             # 대량 데이터 처리 시 프로그레스 바 표시
             show_progress = total_new > 50
@@ -1806,7 +1904,7 @@ class SmartAssistantGUI(QMainWindow):
             # 메시지 수집 없이 분석만 다시 실행
             if hasattr(self, 'collected_messages') and self.collected_messages:
                 # 워커 스레드로 분석 실행
-                self.start_button.setEnabled(False)
+                self.connect_collect_button.setEnabled(False)
                 self.progress_bar.setVisible(True)
                 self.progress_bar.setValue(0)
                 
@@ -1836,7 +1934,7 @@ class SmartAssistantGUI(QMainWindow):
     def _handle_reanalysis_result(self, result):
         """재분석 결과 처리"""
         try:
-            self.start_button.setEnabled(True)
+            self.connect_collect_button.setEnabled(True)
             self.progress_bar.setVisible(False)
             
             if result.get("success"):
@@ -2020,8 +2118,21 @@ class SmartAssistantGUI(QMainWindow):
             asyncio.set_event_loop(loop)
             
             try:
+                # 수집 옵션 준비 (시간 범위 포함)
+                collect_options = {"incremental": False}
+                
+                # 시간 필터링이 활성화된 경우 시간 범위 추가
+                if self.time_filter_service.is_enabled:
+                    time_params = self.time_filter_service.get_collection_params()
+                    if time_params.get("time_filter_enabled"):
+                        collect_options["time_range"] = {
+                            "start": self.time_filter_service.current_range[0],
+                            "end": self.time_filter_service.current_range[1]
+                        }
+                        logger.info(f"⏰ 시간 범위로 데이터 수집: {collect_options['time_range']}")
+                
                 messages = loop.run_until_complete(
-                    data_source.collect_messages({"incremental": False})
+                    data_source.collect_messages(collect_options)
                 )
                 
                 logger.info(f"📨 메시지 수집 완료: {len(messages)}개")
@@ -2220,6 +2331,12 @@ class SmartAssistantGUI(QMainWindow):
         """
         try:
             logger.info(f"🔄 UI 업데이트 시작: {len(messages)}개 메시지")
+            
+            # 0. TimeRangeSelector에 데이터 범위 설정
+            try:
+                self._update_time_range_selector_data_range(messages)
+            except Exception as e:
+                logger.debug(f"TimeRangeSelector 데이터 범위 설정 오류: {e}")
             
             # 1. 이메일 패널 업데이트
             if hasattr(self, 'email_panel'):
@@ -2469,11 +2586,7 @@ class SmartAssistantGUI(QMainWindow):
         except Exception as e:
             logger.error(f"타임라인 업데이트 오류: {e}")
     
-    def _clear_new_message_ids(self):
-        """새 메시지 ID 목록 초기화"""
-        self.new_message_ids.clear()
-        logger.debug("새 메시지 ID 목록 초기화")
-    
+
     def on_polling_error(self, error_msg: str):
         """폴링 오류 핸들러
         
@@ -2914,60 +3027,19 @@ class SmartAssistantGUI(QMainWindow):
         except Exception as e:
             logger.error(f"VirtualOffice 설정 저장 실패: {e}")
 
+
 def main():
+    """메인 함수"""
     app = QApplication(sys.argv)
-    app.setApplicationName("OFFLINE Agent")
-    app.setApplicationVersion("1.0")
-
-    # 1) OS 일관 테마
-    app.setStyle(QStyleFactory.create("Fusion"))
-
-    # 2) 전역 기본 글꼴(한글)
-    #  - 윈도우: 맑은 고딕이 가장 안정적
-    #  - Noto Sans KR 폰트를 동봉했다면 addApplicationFont로 등록 후 이름만 바꾸면 됩니다.
-    base_korean_font = QFont("Malgun Gothic", 10)
-    app.setFont(base_korean_font)
-
-    # 3) 전역 팔레트(살짝 명도 올린 중립 톤)
-    from PyQt6.QtGui import QPalette, QColor
-    pal = app.palette()
-    pal.setColor(QPalette.ColorRole.Window, QColor("#FAFAFA"))
-    pal.setColor(QPalette.ColorRole.Base,   QColor("#FFFFFF"))
-    pal.setColor(QPalette.ColorRole.Text,   QColor("#222222"))
-    pal.setColor(QPalette.ColorRole.Button, QColor("#FFFFFF"))
-    # 탭/라벨 등의 텍스트 컬러를 명확히 지정 (화이트 텍스트 문제 방지)
-    pal.setColor(QPalette.ColorRole.WindowText, QColor("#111827"))
-    pal.setColor(QPalette.ColorRole.ButtonText, QColor("#111827"))
-    app.setPalette(pal)
-
-    # 4) 전역 스타일시트(여백/모서리/폰트크기 통일)
-    app.setStyleSheet("""
-        * { font-size: 12px; }
-        /* PoC: 모든 일반 텍스트를 검정으로 강제하여 가독성 확보 */
-        QWidget { color: #000000; }
-        QLabel { color: #000000; }
-        QLineEdit, QTextEdit, QPlainTextEdit { color: #000000; }
-        QListWidget, QListView, QTreeView, QTableWidget, QTableView { color: #000000; }
-        QTabBar::tab { color: #000000; }
-        QHeaderView::section { color: #000000; }
-        QGroupBox { font-weight: 600; border: 1px solid #E5E7EB; border-radius: 8px; margin-top: 8px; }
-        QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color:#111827; }
-        QLabel[role="title"] { font-size: 18px; font-weight: 800; color:#1F2937; }
-        QPushButton {
-            border: 0; border-radius: 8px; padding: 10px 12px; font-weight: 700;
-        }
-        QTableWidget, QListWidget {
-            border: 1px solid #E5E7EB; border-radius: 8px; background: #FFFFFF;
-        }
-        QHeaderView::section {
-            background: #F3F4F6; border: 0; padding: 8px; font-weight: 600;
-        }
-    """)
-
+    
+    # 한글 폰트 설정
+    font = QFont("맑은 고딕", 9)
+    app.setFont(font)
+    
     window = SmartAssistantGUI()
     window.show()
+    
     sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
-
