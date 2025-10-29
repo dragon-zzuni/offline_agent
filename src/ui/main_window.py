@@ -248,28 +248,33 @@ class SmartAssistantGUI(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        self._init_basic_attributes()
+        self._init_services()
+        self._init_virtualoffice_attributes()
+        self._init_cache_system()
+        self._init_ui_components()
+        self._finalize_initialization()
+    
+    def _init_basic_attributes(self):
+        """기본 속성 초기화"""
         self.assistant = SmartAssistant()
         self.worker_thread = None
         self.current_status = "offline"
-        # 로컬 JSON 파일은 더 이상 사용하지 않음 (VDOS 전용)
-        self.dataset_config = {
-            "dataset_root": None,  # VirtualOffice 전용
-            "force_reload": False,
-        }
+        self.dataset_config = {"dataset_root": None, "force_reload": False}
         self.collect_options = {
-            "email_limit": None,
-            "messenger_limit": None,
-            "overall_limit": None,
-            "force_reload": True,
+            "email_limit": None, "messenger_limit": None, 
+            "overall_limit": None, "force_reload": True
         }
         self.analysis_results: List[Dict] = []
         self.collected_messages: List[Dict] = []
-        
-        # 날씨 서비스 초기화
+    
+    def _init_services(self):
+        """서비스 초기화"""
+        # 날씨 서비스
         kma_api_key = os.environ.get("KMA_API_KEY")
         self.weather_service = WeatherService(kma_api_key=kma_api_key)
         
-        # VDOS 통합 서비스 초기화
+        # VDOS 통합 서비스
         self.vdos_service = VDOSIntegrationService()
         
         # TODO DB 경로 설정
@@ -277,53 +282,46 @@ class SmartAssistantGUI(QMainWindow):
         TODO_DB_PATH = self.vdos_service.get_todo_db_path()
         logger.info(f"[MainWindow] TODO DB 경로: {TODO_DB_PATH}")
         
-        # Top3 서비스 초기화 (VDOS 연동)
+        # Top3 서비스
         from src.services import Top3Service
         self.top3_service = Top3Service(vdos_connector=self.vdos_service.vdos_connector)
         
-        # VirtualOffice 연동 관련 속성
+        # 시간 필터링 및 데이터 수집 서비스
+        self.time_filter_service = TimeFilterService()
+        self.data_collection_service = DataCollectionService(
+            self.assistant, self.time_filter_service
+        )
+    
+    def _init_virtualoffice_attributes(self):
+        """VirtualOffice 관련 속성 초기화"""
         self.vo_client: Optional[VirtualOfficeClient] = None
         self.selected_persona: Optional[PersonaInfo] = None
-        self.data_source_type: str = "virtualoffice"  # VirtualOffice 전용
+        self.data_source_type: str = "virtualoffice"
         self.polling_worker: Optional[PollingWorker] = None
-        
-        # 캐시 시스템 (성능 개선)
-        self._persona_cache: Dict[str, Dict] = {}  # 페르소나별 캐시된 데이터
-        self._last_simulation_tick: Optional[int] = None  # 마지막 시뮬레이션 틱
-        self._simulation_running: bool = False  # 시뮬레이션 실행 상태
-        self._cache_valid_until: Dict[str, float] = {}  # 캐시 유효 시간 (페르소나별)
         self.sim_monitor: Optional[SimulationMonitor] = None
         self.vo_config: Optional[VirtualOfficeConfig] = None
-        # VirtualOffice 설정 파일 경로
         self.vo_config_path = self.vdos_service.get_vo_config_path()
-        
-        # 시각적 알림 관리자
+    
+    def _init_cache_system(self):
+        """캐시 시스템 초기화"""
+        self._persona_cache: Dict[str, Dict] = {}
+        self._last_simulation_tick: Optional[int] = None
+        self._simulation_running: bool = False
+        self._cache_valid_until: Dict[str, float] = {}
+    
+    def _init_ui_components(self):
+        """UI 컴포넌트 초기화"""
         self.notification_manager = NotificationManager()
-        
-        # 시간 필터링 서비스 초기화
-        self.time_filter_service = TimeFilterService()
-        
-        # 데이터 수집 서비스 초기화
-        self.data_collection_service = DataCollectionService(
-            self.assistant, 
-            self.time_filter_service
-        )
-        
-        # 새 메시지 ID 추적 (NEW 배지 표시용)
         self.new_message_ids = set()
-        
-        # 프로그레스 바 (UI 반응성 개선용)
         self._progress_bar = None
         self._progress_label = None
-        
+    
+    def _finalize_initialization(self):
+        """초기화 완료"""
         self.init_ui()
         self.setup_timers()
         self.initialize_online_state()
-        
-        # VirtualOffice 설정 로드
         self._load_vo_config()
-        
-        # 연결 상태 레이블 강제 업데이트 (자동 연결 후)
         QTimer.singleShot(1000, self._update_connection_status)
 
     
@@ -1511,115 +1509,125 @@ class SmartAssistantGUI(QMainWindow):
     def connect_virtualoffice(self):
         """VirtualOffice 연결 테스트 및 페르소나 조회"""
         try:
-            # 연결 버튼 비활성화
-            self.connect_collect_button.setEnabled(False)
-            self.vo_panel.update_connection_status("🔄 연결 중...", 'waiting')
-            QApplication.processEvents()
-            
-            # 서버 URL 가져오기 및 검증
-            server_urls = self.vo_panel.get_server_urls()
-            if not all(server_urls.values()):
-                raise ValueError("모든 서버 URL을 입력해주세요.")
-            
-            # VirtualOfficeClient 생성 및 연결 테스트
-            self.vo_client = VirtualOfficeClient(
-                server_urls['email'],
-                server_urls['chat'],
-                server_urls['sim']
-            )
-            
-            logger.info("VirtualOffice 서버 연결 테스트 중...")
-            connection_status = self.vo_client.test_connection()
-            
-            if not all(connection_status.values()):
-                failed_servers = [k for k, v in connection_status.items() if not v]
-                raise ConnectionError(f"일부 서버 연결 실패: {', '.join(failed_servers)}")
-            
-            logger.info("✅ 모든 서버 연결 성공")
-            
-            # 페르소나 목록 조회
-            logger.info("페르소나 목록 조회 중...")
-            personas = self.vo_client.get_personas()
-            
-            if not personas:
-                raise ValueError("페르소나 목록이 비어있습니다.")
-            
-            logger.info(f"✅ {len(personas)}개 페르소나 조회 완료")
-            
-            # 페르소나 드롭다운 업데이트
-            self._setup_personas(personas)
-            
-            # 시뮬레이션 상태 조회
-            sim_status = self.vo_client.get_simulation_status()
-            self._update_sim_status_display(sim_status)
-            
-            # SimulationMonitor 생성 및 시작
-            logger.info("SimulationMonitor 시작 중...")
-            self.sim_monitor = SimulationMonitor(self.vo_client)
-            self.sim_monitor.status_updated.connect(self.on_sim_status_updated)
-            self.sim_monitor.tick_advanced.connect(self.on_tick_advanced)
-            self.sim_monitor.start_monitoring()
-            logger.info("✅ SimulationMonitor 시작됨")
-            
-            # PollingWorker 생성 및 시작 (VirtualOffice 데이터 소스가 설정된 경우에만)
-            if self.data_source_type == "virtualoffice" and self.selected_persona:
-                logger.info("PollingWorker 시작 중...")
-                data_source = self.assistant.data_source_manager.current_source
-                if data_source:
-                    self.polling_worker = PollingWorker(data_source, polling_interval=30)  # 30초
-                    self.polling_worker.new_data_received.connect(self.on_new_data_received)
-                    self.polling_worker.error_occurred.connect(self.on_polling_error)
-                    self.polling_worker.start()
-                    logger.info("✅ PollingWorker 시작됨 (폴링 간격: 30초)")
-            
-            # 연결 성공 표시 (두 레이블 모두 업데이트)
-            success_text = f"✅ 연결 성공 ({len(personas)}개 페르소나)"
-            success_style = """
-                QLabel {
-                    color: #059669;
-                    background-color: #D1FAE5;
-                    padding: 6px;
-                    border-radius: 4px;
-                    font-size: 11px;
-                    font-weight: 600;
-                }
-            """
-            
-            # 페르소나 선택 아래 레이블 업데이트
-            if hasattr(self, 'vo_connection_status_label'):
-                self.vo_connection_status_label.setText(success_text)
-                self.vo_connection_status_label.setStyleSheet(success_style)
-            
-            logger.info(f"✅ 연결 상태 레이블 업데이트: {len(personas)}개 페르소나")
-            
-            # 틱 히스토리 버튼 활성화
-            if hasattr(self, 'tick_history_btn'):
-                self.tick_history_btn.setEnabled(True)
-            
-            # 설정 저장
-            self._save_vo_config()
-            
-            QMessageBox.information(
-                self, 
-                "연결 성공", 
-                f"VirtualOffice 서버에 성공적으로 연결되었습니다.\n\n"
-                f"페르소나: {len(personas)}개\n"
-                f"현재 틱: {sim_status.current_tick}\n"
-                f"시뮬레이션 시간: {sim_status.sim_time}"
-            )
-            
-            # 연결 성공 후 1초 뒤 자동으로 분석 시작
-            logger.info("🚀 연결 성공 - 1초 후 자동 분석 시작")
-            QTimer.singleShot(1000, self._auto_start_analysis)
+            self._prepare_connection()
+            self.vo_client = self._create_vo_client()
+            personas = self._fetch_personas()
+            sim_status = self._setup_simulation_monitoring()
+            self._setup_polling_worker()
+            self._finalize_connection(personas, sim_status)
             
         except Exception as e:
-            logger.error(f"❌ VirtualOffice 연결 실패: {e}", exc_info=True)
-            self.vo_panel.update_connection_status(f"❌ 연결 실패: {str(e)}", 'disconnected')
-            QMessageBox.critical(self, "연결 오류", f"VirtualOffice 서버 연결에 실패했습니다.\n\n오류: {str(e)}")
-        
+            self._handle_connection_error(e)
         finally:
-            # 연결 버튼 다시 활성화
             self.connect_collect_button.setEnabled(True)
+    
+    def _prepare_connection(self):
+        """연결 준비"""
+        self.connect_collect_button.setEnabled(False)
+        self.vo_panel.update_connection_status("🔄 연결 중...", 'waiting')
+        QApplication.processEvents()
+    
+    def _create_vo_client(self):
+        """VirtualOffice 클라이언트 생성 및 연결 테스트"""
+        server_urls = self.vo_panel.get_server_urls()
+        if not all(server_urls.values()):
+            raise ValueError("모든 서버 URL을 입력해주세요.")
+        
+        vo_client = VirtualOfficeClient(
+            server_urls['email'], server_urls['chat'], server_urls['sim']
+        )
+        
+        logger.info("VirtualOffice 서버 연결 테스트 중...")
+        connection_status = vo_client.test_connection()
+        
+        if not all(connection_status.values()):
+            failed_servers = [k for k, v in connection_status.items() if not v]
+            raise ConnectionError(f"일부 서버 연결 실패: {', '.join(failed_servers)}")
+        
+        logger.info("✅ 모든 서버 연결 성공")
+        return vo_client
+    
+    def _fetch_personas(self):
+        """페르소나 목록 조회"""
+        logger.info("페르소나 목록 조회 중...")
+        personas = self.vo_client.get_personas()
+        
+        if not personas:
+            raise ValueError("페르소나 목록이 비어있습니다.")
+        
+        logger.info(f"✅ {len(personas)}개 페르소나 조회 완료")
+        self._setup_personas(personas)
+        return personas
+    
+    def _setup_simulation_monitoring(self):
+        """시뮬레이션 모니터링 설정"""
+        sim_status = self.vo_client.get_simulation_status()
+        self._update_sim_status_display(sim_status)
+        
+        logger.info("SimulationMonitor 시작 중...")
+        self.sim_monitor = SimulationMonitor(self.vo_client)
+        self.sim_monitor.status_updated.connect(self.on_sim_status_updated)
+        self.sim_monitor.tick_advanced.connect(self.on_tick_advanced)
+        self.sim_monitor.start_monitoring()
+        logger.info("✅ SimulationMonitor 시작됨")
+        return sim_status
+    
+    def _setup_polling_worker(self):
+        """폴링 워커 설정"""
+        if self.data_source_type == "virtualoffice" and self.selected_persona:
+            logger.info("PollingWorker 시작 중...")
+            data_source = self.assistant.data_source_manager.current_source
+            if data_source:
+                self.polling_worker = PollingWorker(data_source, polling_interval=30)
+                self.polling_worker.new_data_received.connect(self.on_new_data_received)
+                self.polling_worker.error_occurred.connect(self.on_polling_error)
+                self.polling_worker.start()
+                logger.info("✅ PollingWorker 시작됨 (폴링 간격: 30초)")
+    
+    def _finalize_connection(self, personas, sim_status):
+        """연결 완료 처리"""
+        self._update_connection_ui(personas)
+        self._save_vo_config()
+        self._show_connection_success_dialog(personas, sim_status)
+        
+        # 연결 성공 후 1초 뒤 자동으로 분석 시작
+        logger.info("🚀 연결 성공 - 1초 후 자동 분석 시작")
+        QTimer.singleShot(1000, self._auto_start_analysis)
+    
+    def _update_connection_ui(self, personas):
+        """연결 성공 UI 업데이트"""
+        success_text = f"✅ 연결 성공 ({len(personas)}개 페르소나)"
+        success_style = """
+            QLabel {
+                color: #059669; background-color: #D1FAE5; padding: 6px;
+                border-radius: 4px; font-size: 11px; font-weight: 600;
+            }
+        """
+        
+        if hasattr(self, 'vo_connection_status_label'):
+            self.vo_connection_status_label.setText(success_text)
+            self.vo_connection_status_label.setStyleSheet(success_style)
+        
+        if hasattr(self, 'tick_history_btn'):
+            self.tick_history_btn.setEnabled(True)
+        
+        logger.info(f"✅ 연결 상태 레이블 업데이트: {len(personas)}개 페르소나")
+    
+    def _show_connection_success_dialog(self, personas, sim_status):
+        """연결 성공 다이얼로그 표시"""
+        QMessageBox.information(
+            self, "연결 성공", 
+            f"VirtualOffice 서버에 성공적으로 연결되었습니다.\n\n"
+            f"페르소나: {len(personas)}개\n"
+            f"현재 틱: {sim_status.current_tick}\n"
+            f"시뮬레이션 시간: {sim_status.sim_time}"
+        )
+    
+    def _handle_connection_error(self, error):
+        """연결 오류 처리"""
+        logger.error(f"❌ VirtualOffice 연결 실패: {error}", exc_info=True)
+        self.vo_panel.update_connection_status(f"❌ 연결 실패: {str(error)}", 'disconnected')
+        QMessageBox.critical(self, "연결 오류", f"VirtualOffice 서버 연결에 실패했습니다.\n\n오류: {str(error)}")
     
     def _setup_personas(self, personas: list):
         """페르소나 드롭다운 설정 및 PM 자동 선택"""
@@ -1728,22 +1736,9 @@ class SmartAssistantGUI(QMainWindow):
     # on_data_source_changed 메서드 제거 (VirtualOffice 전용으로 변경)
     
     def on_new_data_received(self, data: dict):
-        """새 데이터 수신 핸들러 (점진적 UI 업데이트)
-        
-        Args:
-            data: {
-                "emails": List[Dict],
-                "messages": List[Dict],
-                "timestamp": str,
-                "all_messages": List[Dict]
-            }
-        """
+        """새 데이터 수신 핸들러 (점진적 UI 업데이트)"""
         try:
-            emails = data.get("emails", [])
-            messages = data.get("messages", [])
-            all_messages = data.get("all_messages", emails + messages)
-            timestamp = data.get("timestamp", "")
-            
+            emails, messages, all_messages, timestamp = self._extract_new_data(data)
             total_new = len(emails) + len(messages)
             
             if total_new == 0:
@@ -1751,114 +1746,124 @@ class SmartAssistantGUI(QMainWindow):
             
             logger.info(f"📬 새 데이터 수신: 메일 {len(emails)}개, 메시지 {len(messages)}개")
             
-            # 시간 필터링 적용 (활성화된 경우)
-            if self.time_filter_service.is_enabled:
-                original_count = len(all_messages)
-                all_messages = self.time_filter_service.filter_messages(all_messages)
-                emails = [m for m in all_messages if m.get("type") == "email"]
-                messages = [m for m in all_messages if m.get("type") == "messenger"]
-                
-                filtered_count = len(all_messages)
-                if filtered_count != original_count:
-                    logger.info(f"⏰ 새 데이터 시간 필터링: {original_count}개 → {filtered_count}개")
-                    total_new = len(emails) + len(messages)
-                    
-                    # 필터링 후 데이터가 없으면 종료
-                    if total_new == 0:
-                        logger.info("⏰ 시간 필터링 후 새 데이터 없음")
-                        return
-            
-            # 대량 데이터 처리 시 프로그레스 바 표시
-            show_progress = total_new > 50
-            if show_progress:
-                self._show_progress_bar(f"새 데이터 처리 중... ({total_new}개)")
-            
-            # SimulationMonitor에 데이터 기록 (틱 히스토리용)
-            if hasattr(self, 'sim_monitor') and self.sim_monitor is not None:
-                self.sim_monitor.record_new_data(
-                    email_count=len(emails),
-                    message_count=len(messages)
-                )
-            
-            # 새 메시지 ID 추적 (NEW 배지 표시용)
-            for msg in all_messages:
-                msg_id = msg.get("msg_id")
-                if msg_id:
-                    self.new_message_ids.add(msg_id)
-            
-            if show_progress:
-                self._update_progress_bar(30)
-            
-            # 기존 데이터에 추가
-            if hasattr(self.assistant, 'collected_messages'):
-                self.assistant.collected_messages.extend(emails)
-                self.assistant.collected_messages.extend(messages)
-                self.collected_messages = self.assistant.collected_messages
-            
-            if show_progress:
-                self._update_progress_bar(50)
-            
-            # 시각적 알림 효과 표시 (0.5초)
-            self._show_visual_notification()
-            
-            # UI 업데이트 (점진적)
-            if hasattr(self, 'message_summary_panel'):
-                # 메시지 요약 패널에 시각적 알림 표시
-                self.notification_manager.register_widget(
-                    self.message_summary_panel, 
-                    "visual"
-                )
-                self.notification_manager.show_notification(
-                    self.message_summary_panel,
-                    duration_ms=500
-                )
-            
-            if show_progress:
-                self._update_progress_bar(70)
-            
-            if hasattr(self, 'email_panel'):
-                # 이메일 패널 업데이트
-                email_messages = [m for m in self.collected_messages if m.get("type") == "email"]
-                self.email_panel.update_emails(email_messages)
-                
-                # 이메일 패널에 시각적 알림 표시
-                self.notification_manager.register_widget(
-                    self.email_panel,
-                    "visual"
-                )
-                self.notification_manager.show_notification(
-                    self.email_panel,
-                    duration_ms=500
-                )
-            
-            if show_progress:
-                self._update_progress_bar(90)
-            
-            # 타임라인 업데이트 (NEW 배지 포함)
-            if hasattr(self, 'timeline_list'):
-                self._update_timeline_with_badges()
-            
-            if show_progress:
-                self._update_progress_bar(100)
-                self._hide_progress_bar()
-            
-            # 새 메시지에 대한 자동 재분석 트리거 (2초 후)
-            if total_new > 0:
-                logger.info(f"🔄 새 메시지 {total_new}개 수신 - 2초 후 자동 재분석 시작")
-                self._process_new_messages_async(all_messages)
-            
-            # 상태바에 알림 표시
-            self.statusBar().showMessage(
-                f"📬 새 데이터 도착: 메일 {len(emails)}개, 메시지 {len(messages)}개 ({timestamp})",
-                5000  # 5초 동안 표시
+            # 시간 필터링 적용
+            emails, messages, all_messages, total_new = self._apply_time_filtering_to_new_data(
+                emails, messages, all_messages
             )
             
-            logger.info(f"✅ UI 업데이트 완료 (총 {len(self.collected_messages)}개 메시지)")
+            if total_new == 0:
+                return
+            
+            # 데이터 처리 및 UI 업데이트
+            show_progress = total_new > 50
+            self._process_new_data(emails, messages, all_messages, show_progress)
+            self._update_ui_for_new_data(emails, messages, show_progress)
+            self._finalize_new_data_processing(all_messages, total_new, timestamp)
             
         except Exception as e:
             logger.error(f"❌ 새 데이터 처리 오류: {e}", exc_info=True)
-            if hasattr(self, '_progress_bar') and self._progress_bar:
-                self._hide_progress_bar()
+    
+    def _extract_new_data(self, data: dict):
+        """새 데이터 추출"""
+        emails = data.get("emails", [])
+        messages = data.get("messages", [])
+        all_messages = data.get("all_messages", emails + messages)
+        timestamp = data.get("timestamp", "")
+        return emails, messages, all_messages, timestamp
+    
+    def _apply_time_filtering_to_new_data(self, emails, messages, all_messages):
+        """새 데이터에 시간 필터링 적용"""
+        if self.time_filter_service.is_enabled:
+            original_count = len(all_messages)
+            all_messages = self.time_filter_service.filter_messages(all_messages)
+            emails = [m for m in all_messages if m.get("type") == "email"]
+            messages = [m for m in all_messages if m.get("type") == "messenger"]
+            
+            filtered_count = len(all_messages)
+            if filtered_count != original_count:
+                logger.info(f"⏰ 새 데이터 시간 필터링: {original_count}개 → {filtered_count}개")
+                total_new = len(emails) + len(messages)
+                
+                if total_new == 0:
+                    logger.info("⏰ 시간 필터링 후 새 데이터 없음")
+                    
+        return emails, messages, all_messages, len(emails) + len(messages)
+    
+    def _process_new_data(self, emails, messages, all_messages, show_progress):
+        """새 데이터 처리"""
+        if show_progress:
+            self._show_progress_bar(f"새 데이터 처리 중... ({len(all_messages)}개)")
+        
+        # SimulationMonitor에 데이터 기록
+        if hasattr(self, 'sim_monitor') and self.sim_monitor is not None:
+            self.sim_monitor.record_new_data(
+                email_count=len(emails), message_count=len(messages)
+            )
+        
+        # 새 메시지 ID 추적
+        for msg in all_messages:
+            msg_id = msg.get("msg_id")
+            if msg_id:
+                self.new_message_ids.add(msg_id)
+        
+        if show_progress:
+            self._update_progress_bar(30)
+        
+        # 기존 데이터에 추가
+        if hasattr(self.assistant, 'collected_messages'):
+            self.assistant.collected_messages.extend(emails)
+            self.assistant.collected_messages.extend(messages)
+            self.collected_messages = self.assistant.collected_messages
+        
+        if show_progress:
+            self._update_progress_bar(50)
+    
+    def _update_ui_for_new_data(self, emails, messages, show_progress):
+        """새 데이터를 위한 UI 업데이트"""
+        self._show_visual_notification()
+        
+        # 메시지 요약 패널 업데이트
+        if hasattr(self, 'message_summary_panel'):
+            self.notification_manager.register_widget(self.message_summary_panel, "visual")
+            self.notification_manager.show_notification(self.message_summary_panel, duration_ms=500)
+        
+        if show_progress:
+            self._update_progress_bar(70)
+        
+        # 이메일 패널 업데이트
+        if hasattr(self, 'email_panel'):
+            email_messages = [m for m in self.collected_messages if m.get("type") == "email"]
+            self.email_panel.update_emails(email_messages)
+            
+            self.notification_manager.register_widget(self.email_panel, "visual")
+            self.notification_manager.show_notification(self.email_panel, duration_ms=500)
+        
+        if show_progress:
+            self._update_progress_bar(90)
+        
+        # 타임라인 업데이트
+        if hasattr(self, 'timeline_list'):
+            self._update_timeline_with_badges()
+        
+        if show_progress:
+            self._update_progress_bar(100)
+            self._hide_progress_bar()
+    
+    def _finalize_new_data_processing(self, all_messages, total_new, timestamp):
+        """새 데이터 처리 완료"""
+        if total_new > 0:
+            logger.info(f"🔄 새 메시지 {total_new}개 수신 - 2초 후 자동 재분석 시작")
+            self._process_new_messages_async(all_messages)
+        
+        # 상태바에 알림 표시
+        emails_count = len([m for m in all_messages if m.get("type") == "email"])
+        messages_count = len([m for m in all_messages if m.get("type") == "messenger"])
+        self.statusBar().showMessage(
+            f"📬 새 데이터 도착: 메일 {emails_count}개, 메시지 {messages_count}개 ({timestamp})",
+            5000
+        )
+        
+        logger.info(f"✅ UI 업데이트 완료 (총 {len(self.collected_messages)}개 메시지)")
     
     def _auto_start_analysis(self):
         """연결 성공 후 자동으로 분석 시작"""
