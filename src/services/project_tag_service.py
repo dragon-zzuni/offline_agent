@@ -147,32 +147,9 @@ class ProjectTagService:
             conn.close()
     
     def _extract_project_code_from_name(self, project_name: str) -> str:
-        """프로젝트 이름에서 실제 프로젝트 코드 추출"""
-        # 실제 프로젝트명에서 의미있는 코드 추출
-        name_lower = project_name.lower()
-        
-        # 알려진 프로젝트 패턴 매칭 (정확한 순서로)
-        if "care connect" in name_lower or "careconnect" in name_lower:
-            return "CARE"
-        elif "healthcore" in name_lower or "health core" in name_lower:
-            return "HA"  # HealthCore API
-        elif "bridge" in name_lower or "carebridge" in name_lower:
-            return "BRIDGE"  
-        elif "insight dashboard" in name_lower or "welllink insight" in name_lower:
-            return "WD"  # WellLink Insight Dashboard
-        elif "welllink" in name_lower and "브랜드" in project_name:
-            return "LINK"  # WellLink 브랜드 런칭
-        elif "health link" in name_lower or "healthlink" in name_lower:
-            return "HEAL"
-        elif "wellness care" in name_lower:
-            return "WC"
-        elif "wellness dashboard" in name_lower:
-            return "WD"
-        elif "link" in name_lower:
-            return "LINK"
-        else:
-            # 기본 약어 생성 로직
-            return self._generate_project_code(project_name)
+        """프로젝트 이름에서 실제 프로젝트 코드 추출 (동적 생성)"""
+        # 기본 약어 생성 로직 사용 (하드코딩 제거)
+        return self._generate_project_code(project_name)
     
     def _generate_project_code(self, project_name: str) -> str:
         """프로젝트 이름에서 약어 생성"""
@@ -197,52 +174,44 @@ class ProjectTagService:
                 return f"P{hash(project_name) % 1000:03d}"
     
     def _get_project_color(self, project_code: str) -> str:
-        """프로젝트 코드에 따른 색상 반환"""
-        colors = {
-            "CARE": "#3B82F6",    # 파란색 - Care Connect
-            "HA": "#DC2626",      # 진한 빨간색 - HealthCore API
-            "BRIDGE": "#F59E0B",  # 주황색 - CareBridge
-            "WD": "#10B981",      # 녹색 - WellLink Insight Dashboard
-            "LINK": "#EF4444",    # 빨간색 - WellLink 브랜드 런칭
-            "HEAL": "#8B5CF6",    # 보라색 - Health Link (예비)
-            "WC": "#06B6D4"       # 청록색 - Wellness Care (예비)
-        }
-        return colors.get(project_code, "#6B7280")  # 기본 회색
+        """프로젝트 코드에 따른 색상 반환 (동적 생성)"""
+        # 색상 팔레트 (순환 사용)
+        color_palette = [
+            "#3B82F6",  # 파란색
+            "#EF4444",  # 빨간색
+            "#10B981",  # 녹색
+            "#F59E0B",  # 주황색
+            "#8B5CF6",  # 보라색
+            "#EC4899",  # 핑크색
+            "#06B6D4",  # 청록색
+            "#F97316",  # 진한 주황색
+            "#14B8A6",  # 틸색
+            "#A855F7",  # 진한 보라색
+        ]
+        
+        # 프로젝트 코드의 해시값으로 색상 선택 (일관성 유지)
+        color_index = hash(project_code) % len(color_palette)
+        return color_palette[color_index]
     
     def _load_default_projects(self):
-        """기본 프로젝트 태그 로드 (VDOS 연결 실패 시)"""
-        self.project_tags = {
-            "CARE": ProjectTag("CARE", "Care Connect", "#3B82F6", "헬스케어 연결 플랫폼"),
-            "HEAL": ProjectTag("HEAL", "Health Link", "#8B5CF6", "건강 관리 시스템"),
-            "WC": ProjectTag("WC", "WellCare", "#06B6D4", "웰케어 서비스"),
-            "WD": ProjectTag("WD", "WellData", "#10B981", "웰데이터 분석"),
-            "BRIDGE": ProjectTag("BRIDGE", "CareBridge", "#F59E0B", "케어브릿지 통합"),
-            "LINK": ProjectTag("LINK", "WellLink", "#EF4444", "웰링크 대시보드"),
-        }
-        logger.info(f"✅ 기본 프로젝트 태그 {len(self.project_tags)}개 로드")
+        """기본 프로젝트 태그 로드 (VDOS 연결 실패 시)
+        
+        VDOS DB를 찾을 수 없을 때만 사용되는 최소한의 폴백입니다.
+        실제 프로젝트는 VDOS DB에서 동적으로 로드됩니다.
+        """
+        self.project_tags = {}
+        logger.warning("⚠️ VDOS DB를 찾을 수 없어 빈 프로젝트 목록으로 시작합니다.")
+        logger.info("프로젝트는 TODO 분석 시 동적으로 생성됩니다.")
     
     def _ensure_all_projects_loaded(self):
-        """VDOS에서 로드되지 않은 프로젝트들을 기본 프로젝트로 추가"""
-        required_projects = {
-            "CARE": ProjectTag("CARE", "Care Connect", "#3B82F6", "헬스케어 연결 플랫폼"),
-            "HEAL": ProjectTag("HEAL", "Health Link", "#8B5CF6", "건강 관리 시스템"),
-            "WC": ProjectTag("WC", "WellCare", "#06B6D4", "웰케어 서비스"),
-            "WD": ProjectTag("WD", "WellData", "#10B981", "웰데이터 분석"),
-            "BRIDGE": ProjectTag("BRIDGE", "CareBridge", "#F59E0B", "케어브릿지 통합"),
-            "LINK": ProjectTag("LINK", "WellLink", "#EF4444", "웰링크 대시보드"),
-        }
+        """VDOS에서 로드되지 않은 프로젝트들을 기본 프로젝트로 추가
         
-        added_count = 0
-        for code, tag in required_projects.items():
-            if code not in self.project_tags:
-                self.project_tags[code] = tag
-                added_count += 1
-                logger.info(f"[프로젝트 태그] 누락된 프로젝트 {code} 추가")
-        
-        if added_count > 0:
-            logger.info(f"✅ {added_count}개 누락된 프로젝트 태그 추가 완료")
-        
-        return added_count
+        이 메서드는 더 이상 사용되지 않습니다.
+        모든 프로젝트는 VDOS DB에서 동적으로 로드됩니다.
+        """
+        # 하드코딩된 프로젝트 추가 비활성화
+        logger.debug("_ensure_all_projects_loaded() 호출됨 (비활성화됨)")
+        return 0
     
     def extract_project_from_message(self, message: Dict) -> Optional[str]:
         """메시지에서 프로젝트 코드 추출 (LLM 기반 지능 분류)
@@ -280,44 +249,31 @@ class ProjectTagService:
             return None
     
     def _extract_explicit_project(self, message: Dict) -> Optional[str]:
-        """메시지에서 명시적으로 언급된 프로젝트명 추출"""
+        """메시지에서 명시적으로 언급된 프로젝트명 추출 (동적 매칭)"""
         content = message.get("content", "")
         subject = message.get("subject", "")
         text = f"{subject} {content}".lower()
         
-        # 알려진 프로젝트명 패턴 매칭 (우선순위 순서로 정렬)
-        # OrderedDict를 사용하여 순서 보장
-        from collections import OrderedDict
-        project_patterns = OrderedDict([
-            ("CARE", [
-                "care connect 2.0", "care connect 2", "[care connect 2.0]", "[care connect",
-                "care connect", "careconnect", "케어 커넥트", "케어커넥트", "care connect]"
-            ]),
-            ("HA", [
-                "healthcore api", "healthcore", "health core", "헬스코어", "헬스 코어"
-            ]),
-            ("BRIDGE", [
-                "carebridge integration", "carebridge", "care bridge", "케어브릿지", "케어 브릿지"
-            ]),
-            ("WD", [
-                "welllink insight dashboard", "insight dashboard", "kpi 대시보드", "kpi dashboard",
-                "wellness dashboard", "웰니스대시보드", "웰니스 대시보드"
-            ]),
-            ("LINK", [
-                "welllink 브랜드", "welllink 런칭", "welllink 캠페인", "브랜드 런칭",
-                "welllink", "well link", "웰링크", "웰 링크"
-            ]),
-            ("HEAL", [
-                "health link", "healthlink", "헬스링크", "헬스 링크"
-            ]),
-            ("WC", [
-                "wellness care", "웰니스케어", "웰니스 케어"
-            ])
-        ])
-        
-        for project_code, patterns in project_patterns.items():
+        # 현재 로드된 모든 프로젝트에 대해 패턴 매칭
+        for project_code, project_tag in self.project_tags.items():
+            # 프로젝트 이름의 다양한 변형 생성
+            project_name_lower = project_tag.name.lower()
+            
+            # 기본 패턴들
+            patterns = [
+                project_name_lower,  # 전체 이름
+                project_code.lower(),  # 코드
+                f"[{project_name_lower}]",  # 대괄호 포함
+                project_name_lower.replace(" ", ""),  # 공백 제거
+            ]
+            
+            # 숫자 버전 패턴 추가 (예: "Project 2.0", "Project 2")
+            if any(char.isdigit() for char in project_name_lower):
+                patterns.append(project_name_lower.split()[0])  # 첫 단어만
+            
+            # 패턴 매칭
             for pattern in patterns:
-                if pattern in text:
+                if pattern and pattern in text:
                     logger.info(f"[프로젝트 태그] 명시적 패턴 매칭: '{pattern}' → {project_code}")
                     return project_code
         
@@ -497,3 +453,45 @@ class ProjectTagService:
     def get_project_tag(self, project_code: str) -> Optional[ProjectTag]:
         """프로젝트 코드로 ProjectTag 객체 반환"""
         return self.project_tags.get(project_code)
+    
+    def add_project_dynamically(self, project_name: str, project_description: str = "") -> str:
+        """동적으로 새 프로젝트 추가
+        
+        Args:
+            project_name: 프로젝트 이름
+            project_description: 프로젝트 설명
+            
+        Returns:
+            생성된 프로젝트 코드
+        """
+        project_code = self._generate_project_code(project_name)
+        
+        # 이미 존재하는 코드면 숫자 추가
+        original_code = project_code
+        counter = 1
+        while project_code in self.project_tags:
+            project_code = f"{original_code}{counter}"
+            counter += 1
+        
+        # 새 프로젝트 태그 생성
+        color = self._get_project_color(project_code)
+        self.project_tags[project_code] = ProjectTag(
+            code=project_code,
+            name=project_name,
+            color=color,
+            description=project_description
+        )
+        
+        logger.info(f"✅ 새 프로젝트 동적 추가: {project_code} ({project_name})")
+        return project_code
+    
+    def reload_projects_from_vdos(self):
+        """VDOS DB에서 프로젝트 재로드
+        
+        데이터베이스가 업데이트된 후 호출하여 프로젝트 목록을 갱신합니다.
+        """
+        logger.info("🔄 VDOS DB에서 프로젝트 재로드 중...")
+        self.project_tags.clear()
+        self.person_project_mapping.clear()
+        self._load_projects_from_vdos()
+        logger.info(f"✅ 프로젝트 재로드 완료: {len(self.project_tags)}개")
