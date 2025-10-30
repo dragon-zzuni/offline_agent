@@ -59,9 +59,12 @@ class PollingWorker(QThread):
         logger.info(f"PollingWorker 초기화: 폴링 간격={polling_interval}초")
     
     def trigger_immediate_poll(self) -> None:
-        """즉시 폴링 요청 (페르소나 변경 시 사용)"""
+        """즉시 폴링 요청 (페르소나 변경 시 사용)
+        
+        플래그를 설정하여 현재 대기 중인 sleep을 중단하고 즉시 폴링을 실행합니다.
+        """
         self._immediate_poll_requested = True
-        logger.info("즉시 폴링 요청됨")
+        logger.info("✅ 즉시 폴링 요청됨")
 
     def run(self) -> None:
         """폴링 루프 실행
@@ -117,11 +120,21 @@ class PollingWorker(QThread):
                 # 즉시 폴링 요청이 있으면 대기 없이 다음 폴링
                 if self._immediate_poll_requested:
                     self._immediate_poll_requested = False
-                    logger.info("즉시 폴링 실행")
+                    logger.info("⚡ 즉시 폴링 실행 (대기 생략)")
                     continue
                 
-                # 폴링 간격만큼 대기
-                time.sleep(self.polling_interval)
+                # 폴링 간격만큼 대기 (0.5초 단위로 체크하여 즉시 폴링 요청에 빠르게 반응)
+                elapsed = 0
+                check_interval = 0.5  # 0.5초마다 즉시 폴링 플래그 체크
+                while elapsed < self.polling_interval and self.running:
+                    time.sleep(check_interval)
+                    elapsed += check_interval
+                    
+                    # 즉시 폴링 요청이 들어오면 대기 중단
+                    if self._immediate_poll_requested:
+                        self._immediate_poll_requested = False
+                        logger.info("⚡ 즉시 폴링 요청 감지 - 대기 중단")
+                        break
                 
             except Exception as e:
                 # 연속 실패 카운터 증가

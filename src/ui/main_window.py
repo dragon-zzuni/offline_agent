@@ -1741,26 +1741,34 @@ class SmartAssistantGUI(QMainWindow):
                 
                 if cached_result:
                     # 캐시 히트: 즉시 결과 표시
-                    logger.info(f"✅ 캐시 히트: {persona.name}")
+                    logger.info(f"✅ 캐시 히트: {persona.name} - 즉시 표시")
                     self.status_message.setText(f"캐시에서 로드 중: {persona.name}...")
                     self._display_cached_result(cached_result)
                     self.status_message.setText(f"페르소나 변경됨 (캐시): {persona.name}")
                     
-                    # PollingWorker 페르소나 업데이트 및 즉시 폴링 트리거
+                    # ✅ 캐시 히트 시: 폴링 워커만 업데이트 (즉시 폴링 안 함)
                     self._update_polling_worker_persona(persona)
-                    self._trigger_immediate_polling()
+                    logger.info(f"⏰ 캐시 히트 - 정기 폴링만 활성화 (즉시 폴링 생략)")
+                    
+                    # ✅ 다음 정기 폴링 결과는 재분석 건너뛰기
+                    self._skip_reanalysis_after_cache_hit = True
+                    logger.info(f"🚫 다음 정기 폴링 결과는 재분석 건너뜀")
                     
                 else:
                     # 캐시 미스: 분석 파이프라인 실행
-                    logger.info(f"❌ 캐시 미스: {persona.name}")
+                    logger.info(f"❌ 캐시 미스: {persona.name} - 데이터 수집 시작")
                     self.status_message.setText(f"데이터 분석 중: {persona.name}...")
+                    
+                    # ✅ 캐시 미스 시: 재분석 플래그 리셋
+                    self._skip_reanalysis_after_cache_hit = False
                     
                     # 데이터 소스 업데이트
                     self.assistant.set_virtualoffice_source(self.vo_client, persona)
                     
-                    # PollingWorker 업데이트 및 즉시 폴링 트리거
+                    # ✅ 캐시 미스 시: 폴링 워커 업데이트 및 즉시 폴링 트리거
                     self._update_polling_worker_persona(persona)
                     self._trigger_immediate_polling()
+                    logger.info(f"🔄 캐시 미스 - 즉시 폴링 트리거")
                     
                     # 새 데이터 수집 및 분석 (캐시 저장은 분석 완료 후)
                     self._collect_and_cache_data(persona_key)
@@ -1891,8 +1899,16 @@ class SmartAssistantGUI(QMainWindow):
     def _finalize_new_data_processing(self, all_messages, total_new, timestamp):
         """새 데이터 처리 완료"""
         if total_new > 0:
-            logger.info(f"🔄 새 메시지 {total_new}개 수신 - 2초 후 자동 재분석 시작")
-            self._process_new_messages_async(all_messages)
+            # ✅ 캐시 히트 후에는 재분석 건너뛰기
+            skip_reanalysis = getattr(self, '_skip_reanalysis_after_cache_hit', False)
+            
+            if skip_reanalysis:
+                logger.info(f"⏭️ 캐시 히트 후 정기 폴링 - 재분석 건너뜀 ({total_new}개 메시지)")
+                # 플래그 리셋 (다음 정기 폴링부터는 재분석 허용)
+                self._skip_reanalysis_after_cache_hit = False
+            else:
+                logger.info(f"🔄 새 메시지 {total_new}개 수신 - 2초 후 자동 재분석 시작")
+                self._process_new_messages_async(all_messages)
         
         # 상태바에 알림 표시
         emails_count = len([m for m in all_messages if m.get("type") == "email"])
@@ -2130,33 +2146,19 @@ class SmartAssistantGUI(QMainWindow):
     def _build_cache_key(self) -> 'CacheKey':
         """현재 상태로 캐시 키 생성
         
+        시간 범위는 캐시 키에 포함하지 않습니다.
+        시간 범위 필터링은 캐시된 데이터에서 UI 레벨에서 처리됩니다.
+        
         Returns:
             CacheKey: 생성된 캐시 키
         """
         from src.services.persona_todo_cache_service import CacheKey
         
-        # 시간 범위 가져오기
-        time_range_start = None
-        time_range_end = None
-        
-        if hasattr(self, 'time_range_selector') and self.time_range_selector:
-            time_range = self.time_range_selector.get_time_range()
-            if time_range:
-                # time_range는 tuple (start, end) 형태
-                if isinstance(time_range, tuple) and len(time_range) == 2:
-                    time_range_start, time_range_end = time_range
-                elif isinstance(time_range, dict):
-                    time_range_start = time_range.get('start')
-                    time_range_end = time_range.get('end')
-        
-        # ISO 형식으로 변환
-        start_iso = time_range_start.isoformat() if time_range_start else None
-        end_iso = time_range_end.isoformat() if time_range_end else None
-        
+        # 시간 범위는 캐시 키에서 제외 (UI 레벨 필터링으로 처리)
         return CacheKey(
             persona_id=self._current_persona_id or "",
-            time_range_start=start_iso,
-            time_range_end=end_iso,
+            time_range_start=None,  # 시간 범위 제외
+            time_range_end=None,    # 시간 범위 제외
             data_version=self._current_data_version
         )
     
