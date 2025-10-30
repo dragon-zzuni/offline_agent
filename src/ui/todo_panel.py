@@ -1,7 +1,7 @@
 ﻿# ui/todo_panel.py
 from __future__ import annotations
 
-import os, sys, uuid, json, sqlite3, subprocess, re, logging, requests
+import os, sys, uuid, json, subprocess, re, logging, requests
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Callable, Optional, Tuple
 
@@ -29,6 +29,10 @@ from .dialogs import Top3RuleDialog, Top3NaturalRuleDialog
 
 # Top3 서비스 import
 from src.services import Top3Service, TOP3_RULE_DEFAULT
+from .todo import TodoRepository
+from .todo.controller import TodoPanelController
+
+logger = logging.getLogger(__name__)
 
 # VDOS 연동 import (선택적)
 try:
@@ -38,153 +42,6 @@ except ImportError:
     VDOS_AVAILABLE = False
     logger.warning("[VDOS] VDOS 연동 모듈을 찾을 수 없습니다. VDOS 기능이 비활성화됩니다.")
 
-logger = logging.getLogger(__name__)
-
-# TODO_DB_PATH는 MainWindow에서 동적으로 설정됨 (VDOS DB와 같은 위치)
-# 폴백 경로만 정의
-TODO_DB_PATH_FALLBACK = os.path.join("data", "multi_project_8week_ko", "todos_cache.db")
-
-def _create_recipient_type_badge(recipient_type: str) -> Optional[QLabel]:
-    """수신 타입 배지 생성 헬퍼 함수
-    
-    Args:
-        recipient_type: 수신 타입 ("to", "cc", "bcc")
-        
-    Returns:
-        QLabel 배지 위젯 또는 None (직접 수신인 경우)
-    """
-    recipient_type = (recipient_type or "to").lower()
-    
-    if recipient_type == "cc":
-        badge = QLabel("참조(CC)")
-        badge.setStyleSheet(
-            "color:#92400E; background:#FEF3C7; "
-            "padding:2px 6px; border-radius:8px; font-weight:600;"
-        )
-        return badge
-    elif recipient_type == "bcc":
-        badge = QLabel("숨은참조(BCC)")
-        badge.setStyleSheet(
-            "color:#92400E; background:#FEF3C7; "
-            "padding:2px 6px; border-radius:8px; font-weight:600;"
-        )
-        return badge
-    
-    return None  # 직접 수신(TO)인 경우 배지 없음
-
-def _create_source_type_badge(source_type: str) -> QLabel:
-    """소스 타입 배지 생성 헬퍼 함수
-    
-    Args:
-        source_type: 소스 타입 ("메일", "메시지")
-        
-    Returns:
-        QLabel 배지 위젯
-    """
-    source_type = (source_type or "메시지").strip()
-    
-    if source_type == "메일":
-        badge = QLabel("📧 메일")
-        badge.setStyleSheet(
-            "color:#1E40AF; background:#DBEAFE; "
-            "padding:2px 6px; border-radius:8px; font-weight:600; font-size:10px;"
-        )
-    else:  # 메시지 또는 기타
-        badge = QLabel("💬 메시지")
-        badge.setStyleSheet(
-            "color:#065F46; background:#D1FAE5; "
-            "padding:2px 6px; border-radius:8px; font-weight:600; font-size:10px;"
-        )
-    
-    return badge
-
-def _normalize_korean_name(token: str) -> str:
-    base = token.strip()
-    for suffix in _KOREAN_NAME_SUFFIXES:
-        if base.endswith(suffix) and len(base) > len(suffix):
-            base = base[:-len(suffix)]
-            break
-    changed = True
-    while changed and len(base) > 2:
-        changed = False
-        for suffix in _KOREAN_PARTICLES:
-            if base.endswith(suffix) and len(base) > len(suffix):
-                base = base[:-len(suffix)]
-                changed = True
-                break
-    return base.strip()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Top3 관련 전역 함수들은 Top3Service로 이동되었습니다
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 0) DB 헬퍼들과 공용 유틸
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_conn(db_path: str) -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db(conn: sqlite3.Connection) -> None:
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS todos (
-        id TEXT PRIMARY KEY,
-        title TEXT,
-        description TEXT,
-        priority TEXT,
-        deadline TEXT,
-        deadline_ts TEXT,
-        requester TEXT,
-        type TEXT,
-        status TEXT DEFAULT 'pending',
-        source_message TEXT,
-        created_at TEXT,
-        updated_at TEXT,
-        snooze_until TEXT,
-        is_top3 INTEGER DEFAULT 0,
-        draft_subject TEXT,
-        draft_body TEXT,
-        evidence TEXT,
-        project TEXT,
-        deadline_confidence TEXT,
-        recipient_type TEXT DEFAULT 'to',
-        source_type TEXT DEFAULT '메시지'
-    )
-    """)
-    
-    # 기존 테이블에 컬럼 추가 (마이그레이션)
-    try:
-        cur.execute("ALTER TABLE todos ADD COLUMN recipient_type TEXT DEFAULT 'to'")
-        conn.commit()
-    except sqlite3.OperationalError:
-        # 컬럼이 이미 존재하면 무시
-        pass
-    
-    try:
-        cur.execute("ALTER TABLE todos ADD COLUMN source_type TEXT DEFAULT '메시지'")
-        conn.commit()
-    except sqlite3.OperationalError:
-        # 컬럼이 이미 존재하면 무시
-        pass
-    
-    conn.commit()
-
-def check_snoozes_and_deadlines(conn: sqlite3.Connection) -> None:
-    """스누즈 만료시 pending으로 복귀."""
-    now = datetime.now().isoformat()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE todos
-           SET status='pending', updated_at=?
-         WHERE status='snoozed'
-           AND snooze_until IS NOT NULL
-           AND snooze_until <= ?
-    """, (now, now))
-    conn.commit()
 
 def _open_path_cross_platform(path: str) -> None:
     try:
@@ -636,22 +493,16 @@ class TodoPanel(QWidget):
     def __init__(self, db_path=None, parent=None, top3_callback: Optional[Callable[[List[dict]], None]] = None):
         super().__init__(parent)
 
-        # db_path가 None이면 폴백 경로 사용
-        if db_path is None:
-            db_path = TODO_DB_PATH_FALLBACK
-            logger.warning(f"[TodoPanel] db_path가 None, 폴백 경로 사용: {db_path}")
-        
-        logger.info(f"[TodoPanel] DB 경로: {db_path}")
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        self.conn = get_conn(db_path)
-        init_db(self.conn)
+        self._repo = TodoRepository(db_path)
+        self.db_path = str(self._repo.db_path)
+        logger.info(f"[TodoPanel] DB 경로: {self.db_path}")
 
         # Top3 서비스는 MainWindow에서 전달받음 (나중에 설정됨)
         self.top3_service = None
 
         # 애플리케이션 시작 시 오래된 TODO만 정리 (14일 이상)
         logger.info("애플리케이션 시작: 오래된 TODO 데이터 정리")
-        self._cleanup_old_rows(days=14)
+        self._repo.cleanup_old_rows(days=14)
         
         # 기존 TODO 유지 (삭제하지 않음)
         # 사용자가 원하면 수동으로 "모두 삭제" 버튼 사용 가능
@@ -664,8 +515,6 @@ class TodoPanel(QWidget):
         self._item_widgets: Dict[str, Tuple[QListWidgetItem | None, BasicTodoItem | None]] = {}
         self._top3_updated_cb: Optional[Callable[[List[dict]], None]] = top3_callback
         
-        # 프로젝트 태그 관련 초기화
-        self._current_project_filter: Optional[str] = None
         try:
             from src.ui.widgets.project_tag_widget import get_project_service
             from src.services.todo_migration_service import TodoMigrationService
@@ -675,7 +524,7 @@ class TodoPanel(QWidget):
             logger.info(f"[프로젝트 태그] 프로젝트 서비스 초기화 완료: {type(self.project_service)}")
             
             # 데이터베이스 마이그레이션 실행 (project 컬럼 추가)
-            migration_service = TodoMigrationService(db_path)
+            migration_service = TodoMigrationService(self.db_path)
             migration_service.migrate_database()
             
         except Exception as e:
@@ -684,6 +533,13 @@ class TodoPanel(QWidget):
             from src.services.project_tag_service import ProjectTagService
             self.project_service = ProjectTagService()
             logger.info("[프로젝트 태그] 기본 프로젝트 서비스 생성 완료")
+
+        self.controller = TodoPanelController(
+            repository=self._repo,
+            top3_service=self.top3_service,
+            project_service=self.project_service,
+        )
+        self.controller.set_project_service(self.project_service)
 
         self.setup_ui()
         # refresh_todo_list() 호출 제거 - 초기화 상태 유지
@@ -694,33 +550,30 @@ class TodoPanel(QWidget):
         self.snooze_timer.timeout.connect(self.on_snooze_timer)
         self.snooze_timer.start()
 
+    def set_top3_service_instance(self, service: Optional[Top3Service]) -> None:
+        self.top3_service = service
+        self.controller.set_top3_service(service)
+
+    @property
+    def repository(self) -> TodoRepository:
+        """외부 모듈을 위한 TodoRepository 접근자."""
+        return self._repo
+
     def _cleanup_old_rows(self, days: int = 14) -> None:
         try:
-            cur = self.conn.cursor()
-            cur.execute(f"""
-                DELETE FROM todos
-                WHERE created_at IS NOT NULL
-                  AND created_at <> ''
-                  AND datetime(replace(substr(created_at,1,19),'T',' '))
-                        < datetime('now', '-{days} days', 'localtime')
-            """)
-            self.conn.commit()
+            self._repo.cleanup_old_rows(days)
         except Exception as e:
-            print(f"[TodoPanel] auto-cleanup error: {e}")
+            logger.error(f"[TodoPanel] auto-cleanup error: {e}")
 
     def clear_all_todos(self) -> None:
         """모든 TODO 삭제 (UI 새로고침 포함)"""
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM todos")
-        self.conn.commit()
+        self._repo.delete_all()
         self.refresh_todo_list()
     
     def clear_all_todos_silent(self) -> None:
         """모든 TODO 삭제 (UI 새로고침 없음, 초기화용)"""
         try:
-            cur = self.conn.cursor()
-            cur.execute("DELETE FROM todos")
-            self.conn.commit()
+            self._repo.delete_all()
             logger.info("기존 TODO 데이터 삭제 완료")
         except Exception as e:
             logger.error(f"TODO 데이터 삭제 실패: {e}")
@@ -864,197 +717,38 @@ class TodoPanel(QWidget):
             self.top3_nl_btn.setToolTip(summary + "\n\n자연어 규칙을 입력하여 특정 요청자/키워드에 추가 가중치를 부여합니다.")
 
     def on_snooze_timer(self) -> None:
-        check_snoozes_and_deadlines(self.conn)
+        self._repo.release_snoozed()
         self.refresh_todo_list()
 
     def populate_from_items(self, items: List[dict]) -> None:
         logger.info(f"[TodoPanel] populate_from_items 호출: {len(items or [])}개 항목")
         items = items or []
-        now_iso = datetime.now().isoformat()
 
         if not items:
             logger.info("[TodoPanel] 항목이 없어 빈 목록으로 재구성")
             self._rebuild_from_rows([])
             return
 
-        new_rows: List[dict] = []
-        for raw in items:
-            base = {
-                "id": None,
-                "title": "",
-                "description": "",
-                "priority": "low",
-                "deadline": None,
-                "deadline_ts": None,
-                "requester": "",
-                "type": "",
-                "status": "pending",
-                "source_message": {},
-                "created_at": now_iso,
-                "updated_at": now_iso,
-                "snooze_until": None,
-                "is_top3": 0,
-                "draft_subject": "",
-                "draft_body": "",
-                "evidence": "[]",
-                "deadline_confidence": "mid",
-                "recipient_type": "to",  # 기본값: 직접 수신
-            }
-            todo = {**base, **(raw or {})}
-
-            if not todo.get("id"):
-                todo["id"] = uuid.uuid4().hex
-
-            if not todo.get("created_at"):
-                todo["created_at"] = now_iso
-            if not todo.get("updated_at"):
-                todo["updated_at"] = now_iso
-
-            ev_val = todo.get("evidence")
-            if isinstance(ev_val, list):
-                todo["evidence"] = json.dumps(ev_val, ensure_ascii=False)
-            elif ev_val is None:
-                todo["evidence"] = "[]"
-
-            todo["status"] = (todo.get("status") or "pending").lower()
-            new_rows.append(todo)
-
-        # 프로젝트 태그 업데이트 (DB 저장 전에 먼저 수행)
-        self.update_project_tags(new_rows)
-
-        # DB에 저장 (중요!)
-        logger.info(f"[TodoPanel] {len(new_rows)}개 TODO를 DB에 저장")
-        self._save_to_db(new_rows)
-        
-        self._rebuild_from_rows(new_rows)
+        prepared = self.controller.prepare_items(items)
+        self.update_project_tags(prepared)
+        logger.info(f"[TodoPanel] {len(prepared)}개 TODO를 DB에 저장")
+        self.controller.save_items(prepared)
+        self._rebuild_from_rows(prepared)
     
-    def _save_to_db(self, rows: List[dict]) -> None:
-        """TODO를 DB에 저장"""
-        try:
-            logger.info(f"[TodoPanel] {len(rows)}개 TODO를 DB에 저장 (중복 ID 확인 중...)")
-            
-            # ID 중복 확인 (디버깅용)
-            id_counts = {}
-            for row in rows:
-                todo_id = row.get("id")
-                if todo_id:
-                    id_counts[todo_id] = id_counts.get(todo_id, 0) + 1
-            
-            duplicates = {k: v for k, v in id_counts.items() if v > 1}
-            if duplicates:
-                logger.warning(f"[TodoPanel] ⚠️ 중복 ID 발견: {len(duplicates)}개 ID가 중복됨")
-                logger.warning(f"[TodoPanel] 중복 ID 샘플: {list(duplicates.items())[:5]}")
-            
-            # 트랜잭션 시작
-            cur = self.conn.cursor()
-            cur.execute("BEGIN TRANSACTION")
-            
-            try:
-                # 기존 TODO 삭제
-                cur.execute("DELETE FROM todos")
-                
-                # 새 TODO 삽입 (INSERT OR REPLACE 사용)
-                inserted_count = 0
-                for row in rows:
-                    # source_message를 JSON 문자열로 변환
-                    source_msg = row.get("source_message", {})
-                    if isinstance(source_msg, dict):
-                        source_msg_str = json.dumps(source_msg, ensure_ascii=False)
-                    else:
-                        source_msg_str = source_msg or "{}"
-                    
-                    cur.execute("""
-                        INSERT OR REPLACE INTO todos (
-                            id, title, description, priority, deadline, deadline_ts,
-                            requester, type, status, source_message, created_at, updated_at,
-                            snooze_until, is_top3, draft_subject, draft_body, evidence,
-                            deadline_confidence, recipient_type, source_type
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        row.get("id"),
-                        row.get("title", ""),
-                        row.get("description", ""),
-                        row.get("priority", "low"),
-                        row.get("deadline"),
-                        row.get("deadline_ts"),
-                        row.get("requester", ""),
-                        row.get("type", ""),
-                        row.get("status", "pending"),
-                        source_msg_str,
-                        row.get("created_at"),
-                        row.get("updated_at"),
-                        row.get("snooze_until"),
-                        row.get("is_top3", 0),
-                        row.get("draft_subject", ""),
-                        row.get("draft_body", ""),
-                        row.get("evidence", "[]"),
-                        row.get("deadline_confidence", "mid"),
-                        row.get("recipient_type", "to"),
-                        row.get("source_type", "메시지")
-                    ))
-                    inserted_count += 1
-                
-                # 커밋
-                self.conn.commit()
-                
-                # 실제 저장된 개수 확인
-                cur.execute("SELECT COUNT(*) FROM todos")
-                actual_count = cur.fetchone()[0]
-                logger.info(f"[TodoPanel] ✅ TODO DB 저장 완료: {inserted_count}개 삽입 → {actual_count}개 저장됨")
-                
-            except Exception as e:
-                # 롤백
-                self.conn.rollback()
-                logger.error(f"[TodoPanel] ❌ TODO DB 저장 실패 (롤백됨): {e}", exc_info=True)
-                raise
-                
-        except Exception as e:
-            logger.error(f"[TodoPanel] ❌ TODO DB 저장 실패: {e}", exc_info=True)
-
     def refresh_todo_list(self) -> None:
         logger.info(f"[TodoPanel] refresh_todo_list 시작")
-        cur = self.conn.cursor()
-        
-        # 페르소나별 필터링 비활성화 (모든 TODO 표시)
-        # TODO: 나중에 페르소나별 필터링 로직 개선 필요
-        cur.execute("SELECT * FROM todos WHERE status!='done' ORDER BY created_at DESC")
-        logger.info(f"[TodoPanel] 전체 TODO 로드")
-            
-        rows = [dict(r) for r in cur.fetchall()]
+        rows = self.controller.load_active_items()
         logger.info(f"[TodoPanel] DB에서 {len(rows)}개 TODO 로드")
 
         if not rows:
             logger.warning("[TodoPanel] TODO가 없음")
             if self._all_rows:
-                # DB가 비어도 기존 메모리 상태를 유지
                 self._set_render_lists(self._all_rows, self._top3_all or [], self._rest_all or [])
                 return
             self._rebuild_from_rows([])
             return
-        
-        if not self.top3_service:
-            logger.warning("[TodoPanel] Top3Service가 없음")
-            self._rebuild_from_rows(rows)
-            return
 
-        logger.info(f"[TodoPanel] Top3 재계산 시작")
-        top_ids = self.top3_service.pick_top3(rows)
-        logger.info(f"[TodoPanel] Top3 선정: {len(top_ids)}개")
-        updates = []
-        for row in rows:
-            mark = 1 if row.get("id") in top_ids else 0
-            if _is_truthy(row.get("is_top3")) != bool(mark):
-                updates.append((mark, row.get("id")))
-            row["is_top3"] = mark
-
-        if updates:
-            upd = self.conn.cursor()
-            upd.executemany("UPDATE todos SET is_top3=? WHERE id=?", updates)
-            self.conn.commit()
-
-        # 프로젝트 태그 업데이트 (UI 렌더링 전에 먼저 수행)
         self.update_project_tags(rows)
-        
         self._rebuild_from_rows(rows)
     
     def _get_current_persona_email(self) -> Optional[str]:
@@ -1115,21 +809,7 @@ class TodoPanel(QWidget):
             cloned["status"] = (cloned.get("status") or "pending").lower()
             cloned_rows.append(cloned)
 
-        if self.top3_service:
-            top_ids = self.top3_service.pick_top3(cloned_rows)
-        else:
-            top_ids = set()
-            
-        for row in cloned_rows:
-            row_id = row.get("id")
-            row["is_top3"] = 1 if row_id and row_id in top_ids else 0
-
-        # Top3 점수로 정렬
-        for row in cloned_rows:
-            if self.top3_service:
-                row["_top3_score"] = self.top3_service.calculate_score(row)
-            else:
-                row["_top3_score"] = 0.0
+        top_ids = self.controller.calculate_top3(cloned_rows)
         
         top3_items = sorted(
             [row for row in cloned_rows if row.get("id") in top_ids],
@@ -1233,10 +913,8 @@ class TodoPanel(QWidget):
 
     def _match_filters(self, todo: dict) -> bool:
         # 프로젝트 필터 확인
-        if self._current_project_filter:
-            todo_project = todo.get("project", "")
-            if todo_project != self._current_project_filter:
-                return False
+        if not self.controller.match_project(todo):
+            return False
         
         # 우선순위 필터 확인
         priority = self.priority_filter.currentData()
@@ -1395,12 +1073,11 @@ class TodoPanel(QWidget):
     def on_snooze_clicked(self, payload: Dict) -> None:
         until = datetime.now() + timedelta(hours=2)
         try:
-            cur = self.conn.cursor()
-            cur.execute(
-                "UPDATE todos SET status='snoozed', snooze_until=?, updated_at=? WHERE id=?",
-                (until.isoformat(), datetime.now().isoformat(), payload.get("id")),
+            self._repo.snooze_until(
+                payload.get("id"),
+                until.isoformat(),
+                datetime.now().isoformat(),
             )
-            self.conn.commit()
             self.refresh_todo_list()
         except Exception as e:
             QMessageBox.critical(self, "스누즈 실패", str(e))
@@ -1409,15 +1086,8 @@ class TodoPanel(QWidget):
         if not todo_id:
             return
         now_iso = datetime.now().isoformat()
-        db_updated = False
         try:
-            cur = self.conn.cursor()
-            cur.execute(
-                "UPDATE todos SET status='done', updated_at=? WHERE id=?",
-                (now_iso, todo_id),
-            )
-            db_updated = cur.rowcount > 0
-            self.conn.commit()
+            db_updated = self._repo.mark_done(todo_id, now_iso)
         except Exception as e:
             QMessageBox.critical(self, "완료 처리 실패", str(e))
             return
@@ -1442,127 +1112,30 @@ class TodoPanel(QWidget):
     def filter_by_project(self, project_code: Optional[str]) -> None:
         """프로젝트별 TODO 필터링"""
         try:
-            self._current_project_filter = project_code
+            self.controller.set_project_filter(project_code)
             logger.info(f"프로젝트 필터 적용: {project_code or '전체'}")
             self._re_render()
         except Exception as e:
             logger.error(f"프로젝트 필터링 오류: {e}")
     
     def update_project_tags(self, todos: List[dict]) -> None:
-        """TODO 목록의 프로젝트 태그 업데이트"""
+        """프로젝트 태그를 컨트롤러에 위임하고 UI를 갱신한다."""
+        todos = todos or []
+        logger.info(f"[프로젝트 태그] update_project_tags 호출: {len(todos)}개 TODO")
+
+        if not todos:
+            self._update_project_tag_bar_from_todos([])
+            return
+
         try:
-            logger.info(f"[프로젝트 태그] update_project_tags 호출됨: {len(todos)}개 TODO")
-            if not self.project_service:
-                logger.warning("[프로젝트 태그] 프로젝트 서비스가 없습니다")
-                return
-            
-            logger.info(f"[프로젝트 태그] 프로젝트 서비스 확인 완료")
-            
-            logger.info(f"[프로젝트 태그] {len(todos)}개 TODO 프로젝트 태그 업데이트 시작")
-            
-            # 사용 가능한 프로젝트 목록
-            # VDOS 프로젝트만 사용 (프로젝트 서비스에서 가져오기)
-            available_projects = list(self.project_service.project_tags.keys()) if self.project_service else ['CARE', 'HA', 'WD', 'BRIDGE', 'LINK']
-            
-            updated_count = 0
-            cur = self.conn.cursor()
-            
-            for i, todo in enumerate(todos):
-                todo_id = todo.get("id")
-                
-                # 1. 데이터베이스에서 기존 프로젝트 확인 (최우선)
-                cur.execute("SELECT project FROM todos WHERE id = ?", (todo_id,))
-                db_result = cur.fetchone()
-                db_project = db_result[0] if db_result and db_result[0] else None
-                
-                # 2. 기존 프로젝트가 있으면 메모리에 복원하고 건너뛰기 (절대 변경 안함)
-                if db_project:
-                    todo["project"] = db_project
-                    logger.debug(f"[프로젝트 태그] TODO {todo_id}: DB 프로젝트 {db_project} 보존")
-                    continue
-                
-                # 3. 메모리에 프로젝트가 있으면 DB에 저장
-                current_project = todo.get("project")
-                if current_project:
-                    cur.execute("UPDATE todos SET project = ? WHERE id = ?", (current_project, todo_id))
-                    updated_count += 1
-                    logger.debug(f"[프로젝트 태그] TODO {todo_id}: 메모리 프로젝트 {current_project} DB에 저장")
-                    continue
-                
-                # 3. 프로젝트가 없는 경우 새로 할당
-                project = None
-                
-                # source_message에서 프로젝트 추출 시도 (우선순위 높음)
-                source_message = todo.get("source_message", "")
-                if source_message:
-                    try:
-                        import json
-                        message_data = json.loads(source_message) if source_message.startswith('{') else {"content": source_message, "subject": todo.get("title", "")}
-                        
-                        # 제목과 내용을 모두 포함해서 분석
-                        enhanced_message = {
-                            'content': f"{todo.get('title', '')} {message_data.get('content', '')} {message_data.get('subject', '')}",
-                            'subject': message_data.get('subject', todo.get('title', '')),
-                            'sender': message_data.get('sender', '')
-                        }
-                        
-                        project = self.project_service.extract_project_from_message(enhanced_message)
-                        if project:
-                            logger.info(f"[프로젝트 태그] TODO {todo_id}: LLM 분석 결과 {project} 할당")
-                        else:
-                            logger.debug(f"[프로젝트 태그] TODO {todo_id}: LLM 분석 결과 없음")
-                    except Exception as e:
-                        logger.debug(f"프로젝트 추출 실패: {e}")
-                
-                # LLM 실패 시 명시적 패턴 매칭 시도
-                if not project:
-                    # 제목과 설명에서 직접 패턴 매칭
-                    title = todo.get("title", "")
-                    description = todo.get("description", "")
-                    text_to_check = f"{title} {description}".lower()
-                    
-                    if "care connect" in text_to_check:
-                        project = "CARE"
-                        logger.info(f"[프로젝트 태그] TODO {todo_id}: 패턴 매칭으로 {project} 할당")
-                    elif "healthcore" in text_to_check or "health core" in text_to_check:
-                        project = "HA"
-                        logger.info(f"[프로젝트 태그] TODO {todo_id}: 패턴 매칭으로 {project} 할당")
-                    elif "carebridge" in text_to_check or "care bridge" in text_to_check:
-                        project = "BRIDGE"
-                        logger.info(f"[프로젝트 태그] TODO {todo_id}: 패턴 매칭으로 {project} 할당")
-                    elif "welllink" in text_to_check and ("브랜드" in text_to_check or "런칭" in text_to_check):
-                        project = "LINK"
-                        logger.info(f"[프로젝트 태그] TODO {todo_id}: 패턴 매칭으로 {project} 할당")
-                    elif "insight dashboard" in text_to_check or "kpi 대시보드" in text_to_check:
-                        project = "WD"
-                        logger.info(f"[프로젝트 태그] TODO {todo_id}: 패턴 매칭으로 {project} 할당")
-                
-                # 마지막 수단: 순환 할당
-                if not project:
-                    project = available_projects[i % len(available_projects)]
-                    logger.warning(f"[프로젝트 태그] TODO {todo_id}: 최후 수단 순환 할당 {project}")
-                
-                # 프로젝트 할당 및 DB 저장
-                if project:
-                    todo["project"] = project
-                    cur.execute("UPDATE todos SET project = ? WHERE id = ?", (project, todo_id))
-                    updated_count += 1
-                    logger.debug(f"[프로젝트 태그] TODO {todo_id}: {project} 할당")
-            
-            # 항상 커밋하고 프로젝트 태그 바 업데이트
-            self.conn.commit()
-            
-            if updated_count > 0:
-                logger.info(f"✅ {updated_count}개 TODO에 프로젝트 태그 추가")
-            
-            # 프로젝트 태그 바 업데이트 (항상 실행)
+            self.controller.update_project_tags(todos)
+        except Exception as exc:
+            logger.error("[프로젝트 태그] 컨트롤러 동기화 실패: %s", exc, exc_info=True)
+
+        try:
             self._update_project_tag_bar_from_todos(todos)
-            
-            if updated_count == 0:
-                logger.info("[프로젝트 태그] 업데이트할 TODO가 없습니다")
-                    
-        except Exception as e:
-            logger.error(f"프로젝트 태그 업데이트 오류: {e}")
+        except Exception as exc:
+            logger.error("[프로젝트 태그] 태그 바 업데이트 실패: %s", exc, exc_info=True)
     
     def _update_project_tag_bar_from_todos(self, todos: List[dict]) -> None:
         """TODO 목록에서 프로젝트 태그 바 업데이트"""
@@ -1601,20 +1174,6 @@ class TodoPanel(QWidget):
         except Exception as e:
             logger.error(f"프로젝트 태그 바 업데이트 오류: {e}")
     
-    def _update_project_tag_bar_only(self, todos: List[dict]) -> None:
-        """프로젝트 서비스 없이 프로젝트 태그 바만 업데이트"""
-        try:
-            # 기존 프로젝트 코드만 추출
-            active_projects = set()
-            for todo in todos:
-                project = todo.get("project")
-                if project:
-                    active_projects.add(project)
-            
-            self._update_project_tag_bar_with_projects(active_projects)
-            logger.info(f"[프로젝트 태그] 서비스 없이 태그 바 업데이트: {active_projects}")
-            
-        except Exception as e:
             logger.error(f"프로젝트 태그 바 전용 업데이트 오류: {e}")
     
     def _find_main_window(self):

@@ -66,6 +66,11 @@ from .email_panel import EmailPanel  # ✅ EmailPanel 추가
 from .analysis_result_panel import AnalysisResultPanel  # ✅ AnalysisResultPanel 추가
 from .styles import Colors, Fonts, FontSizes, FontWeights, Spacing, BorderRadius
 from utils.datetime_utils import parse_iso_datetime  # ✅ 날짜 파싱 유틸리티
+from .main_window_components import (
+    VirtualOfficeConnectionController,
+    DataRefreshController,
+    AnalysisCacheController,
+)
 
 # 분리된 패널 import
 from .panels import LeftControlPanel, VirtualOfficePanel
@@ -301,6 +306,9 @@ class SmartAssistantGUI(QMainWindow):
         self.sim_monitor: Optional[SimulationMonitor] = None
         self.vo_config: Optional[VirtualOfficeConfig] = None
         self.vo_config_path = self.vdos_service.get_vo_config_path()
+        self.connection_controller = VirtualOfficeConnectionController(self)
+        self.data_controller = DataRefreshController(self)
+        self.analysis_controller = AnalysisCacheController(self)
     
     def _init_cache_system(self):
         """캐시 시스템 초기화"""
@@ -413,7 +421,9 @@ class SmartAssistantGUI(QMainWindow):
         self.left_control_panel.weather_update_requested.connect(self.fetch_weather)
         self.left_control_panel.daily_summary_requested.connect(self.show_daily_summary)
         self.left_control_panel.weekly_summary_requested.connect(self.show_weekly_summary)
-        self.left_control_panel.connect_vo_requested.connect(self.connect_virtualoffice)
+        self.left_control_panel.connect_vo_requested.connect(
+            self.connection_controller.connect_virtualoffice
+        )
         
         # 기존 위젯 참조 유지 (하위 호환성)
         self.status_indicator = self.left_control_panel.status_indicator
@@ -647,7 +657,10 @@ class SmartAssistantGUI(QMainWindow):
         todo_layout = QVBoxLayout(self.todo_tab)
         self.todo_panel = TodoPanel(db_path=TODO_DB_PATH, parent=self)
         # Top3 서비스 전달 (VDOS 연동됨)
-        self.todo_panel.top3_service = self.top3_service
+        if hasattr(self.todo_panel, "set_top3_service_instance"):
+            self.todo_panel.set_top3_service_instance(self.top3_service)
+        else:
+            self.todo_panel.top3_service = self.top3_service
         self.todo_panel.set_top3_callback(self._on_top3_updated)
         todo_layout.addWidget(self.todo_panel)
         self.tab_widget.addTab(self.todo_tab, "📋 TODO 리스트")
@@ -1377,112 +1390,14 @@ class SmartAssistantGUI(QMainWindow):
     
     def start_collection(self):
         """메시지 수집 시작"""
-        if self.worker_thread and self.worker_thread.isRunning():
-            return
-
-        dataset_config = dict(self.dataset_config)
-        collect_options = dict(self.collect_options)
-        # 항상 최신 JSON을 반영하도록 강제 리로드
-        collect_options["force_reload"] = True
-        dataset_config["force_reload"] = dataset_config.get("force_reload", False) or True
-
-        # UI 상태 변경
-        self.connect_collect_button.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(0)
-        
-        # 워커 스레드 시작
-        self.worker_thread = WorkerThread(self.assistant, dataset_config, collect_options)
-        self.worker_thread.progress_updated.connect(self.progress_bar.setValue)
-        self.worker_thread.status_updated.connect(self.status_message.setText)
-        self.worker_thread.result_ready.connect(self.handle_result)
-        self.worker_thread.error_occurred.connect(self.handle_error)
-        self.worker_thread.start()
-
-        # 다음 실행은 필요 시 다시 표시
-        self.dataset_config["force_reload"] = False
-        self.collect_options["force_reload"] = False
+        self.data_controller.start_collection()
     
     def stop_collection(self):
         """수집 중지"""
-        if self.worker_thread and self.worker_thread.isRunning():
-            self.worker_thread.stop()
-            self.worker_thread.wait(3000)
-        
-        self.connect_collect_button.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.status_message.setText("수집 중지됨")
+        self.data_controller.stop_collection()
     
     def handle_result(self, result):
-        self.connect_collect_button.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.status_message.setText("수집 완료")
-
-        if result.get("success"):
-            todo_list = result.get("todo_list") or {}
-            items = todo_list.get("items", [])
-            if items:
-                if hasattr(self, "todo_panel"):
-                    self.todo_panel.populate_from_items(items)
-                try:
-                    _save_todos_to_db(items, db_path=TODO_DB_PATH)
-                except Exception as e:
-                    if hasattr(self, "status_message"):
-                        self.status_message.setText(f"DB 저장 경고: {e}")
-            else:
-                if hasattr(self, "status_message"):
-                    self.status_message.setText("이번 수집에서 새로운 TODO가 없어 이전 목록을 유지합니다.")
-            messages = result.get("messages", [])
-            self.collected_messages = list(messages)
-            
-            # ✅ 데이터 시간 범위 계산 및 TimeRangeSelector에 설정
-            if messages and hasattr(self, "time_range_selector"):
-                dates = []
-                for msg in messages:
-                    date_str = msg.get("date")
-                    if date_str:
-                        try:
-                            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                            dates.append(dt)
-                        except:
-                            pass
-                
-                if dates:
-                    data_start = min(dates)
-                    data_end = max(dates)
-                    self.time_range_selector.set_data_range(data_start, data_end)
-                    logger.info(f"데이터 시간 범위 설정: {data_start.strftime('%Y-%m-%d')} ~ {data_end.strftime('%Y-%m-%d')}")
-            
-            # ✅ 메시지 요약 업데이트 (MessageSummaryPanel 사용)
-            self._update_message_summaries("day")  # 기본값: 일별 요약
-            
-            # 기존 메시지 테이블 업데이트 (호환성 유지)
-            if hasattr(self, "message_table"):
-                self.update_message_table(messages)
-            if hasattr(self, "message_summary_label"):
-                self._update_message_summary(messages)
-            
-            self.update_timeline(messages)
-
-            analysis_results = result.get("analysis_results") or []
-            self.analysis_results = analysis_results
-            
-            # ✅ AnalysisResultPanel 업데이트
-            if hasattr(self, "analysis_result_panel"):
-                self.analysis_result_panel.update_analysis(analysis_results, messages)
-            
-            # ✅ EmailPanel 업데이트 (TODO에 없는 이메일만 표시)
-            if hasattr(self, "email_panel"):
-                self.email_panel.update_emails(messages, items)
-            
-            # ✅ 캐시에 저장
-            self._save_to_cache(items, messages, analysis_results)
-
-            total = len(items)
-            self.status_bar.showMessage(f"수집 완료: {total}개 TODO 생성")
-            self.auto_save_results(result)
-        else:
-            QMessageBox.critical(self, "오류", "수집 중 오류가 발생했습니다.")
+        self.data_controller.handle_result(result)
 
     def _on_top3_updated(self, top3: list[dict]) -> None:
         if not hasattr(self, "todo_panel"):
@@ -1490,16 +1405,11 @@ class SmartAssistantGUI(QMainWindow):
     
     def handle_error(self, error_message):
         """오류 처리"""
-        self.connect_collect_button.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.status_message.setText("오류 발생")
-        
-        QMessageBox.critical(self, "오류", error_message)
+        self.data_controller.handle_error(error_message)
     
     def auto_refresh(self):
         """자동 새로고침 (온라인 모드)"""
-        if self.current_status == "online" and not self.worker_thread:
-            self.start_collection()
+        self.data_controller.auto_refresh()
     
     def offline_cleanup(self):
         """오프라인 정리"""
@@ -1510,12 +1420,7 @@ class SmartAssistantGUI(QMainWindow):
     
     def auto_save_results(self, result):
         """결과 자동 저장"""
-        try:
-            filename = f"gui_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"자동 저장 오류: {e}")
+        self.data_controller.auto_save_results(result)
     
     def save_results(self):
         """결과 저장"""
@@ -1536,185 +1441,16 @@ class SmartAssistantGUI(QMainWindow):
     
 
     def connect_virtualoffice(self):
-        """VirtualOffice 연결 테스트 및 페르소나 조회"""
-        try:
-            self._prepare_connection()
-            self.vo_client = self._create_vo_client()
-            personas = self._fetch_personas()
-            sim_status = self._setup_simulation_monitoring()
-            self._setup_polling_worker()
-            self._finalize_connection(personas, sim_status)
-            
-        except Exception as e:
-            self._handle_connection_error(e)
-        finally:
-            self.connect_collect_button.setEnabled(True)
-    
-    def _prepare_connection(self):
-        """연결 준비"""
-        self.connect_collect_button.setEnabled(False)
-        self.vo_panel.update_connection_status("🔄 연결 중...", 'waiting')
-        QApplication.processEvents()
-    
-    def _create_vo_client(self):
-        """VirtualOffice 클라이언트 생성 및 연결 테스트"""
-        server_urls = self.vo_panel.get_server_urls()
-        if not all(server_urls.values()):
-            raise ValueError("모든 서버 URL을 입력해주세요.")
-        
-        vo_client = VirtualOfficeClient(
-            server_urls['email'], server_urls['chat'], server_urls['sim']
-        )
-        
-        logger.info("VirtualOffice 서버 연결 테스트 중...")
-        connection_status = vo_client.test_connection()
-        
-        if not all(connection_status.values()):
-            failed_servers = [k for k, v in connection_status.items() if not v]
-            raise ConnectionError(f"일부 서버 연결 실패: {', '.join(failed_servers)}")
-        
-        logger.info("✅ 모든 서버 연결 성공")
-        return vo_client
-    
-    def _fetch_personas(self):
-        """페르소나 목록 조회"""
-        logger.info("페르소나 목록 조회 중...")
-        personas = self.vo_client.get_personas()
-        
-        if not personas:
-            raise ValueError("페르소나 목록이 비어있습니다.")
-        
-        logger.info(f"✅ {len(personas)}개 페르소나 조회 완료")
-        self._setup_personas(personas)
-        return personas
-    
-    def _setup_simulation_monitoring(self):
-        """시뮬레이션 모니터링 설정"""
-        sim_status = self.vo_client.get_simulation_status()
-        self._update_sim_status_display(sim_status)
-        
-        logger.info("SimulationMonitor 시작 중...")
-        self.sim_monitor = SimulationMonitor(self.vo_client)
-        self.sim_monitor.status_updated.connect(self.on_sim_status_updated)
-        self.sim_monitor.tick_advanced.connect(self.on_tick_advanced)
-        self.sim_monitor.start_monitoring()
-        logger.info("✅ SimulationMonitor 시작됨")
-        return sim_status
-    
-    def _setup_polling_worker(self):
-        """폴링 워커 설정"""
-        if self.data_source_type == "virtualoffice" and self.selected_persona:
-            logger.info("PollingWorker 시작 중...")
-            data_source = self.assistant.data_source_manager.current_source
-            if data_source:
-                self.polling_worker = PollingWorker(data_source, polling_interval=30)
-                self.polling_worker.new_data_received.connect(self.on_new_data_received)
-                self.polling_worker.error_occurred.connect(self.on_polling_error)
-                self.polling_worker.start()
-                logger.info("✅ PollingWorker 시작됨 (폴링 간격: 30초)")
-    
-    def _finalize_connection(self, personas, sim_status):
-        """연결 완료 처리"""
-        self._update_connection_ui(personas)
-        self._save_vo_config()
-        self._show_connection_success_dialog(personas, sim_status)
-        
-        # 연결 성공 후 1초 뒤 자동으로 분석 시작
-        logger.info("🚀 연결 성공 - 1초 후 자동 분석 시작")
-        QTimer.singleShot(1000, self._auto_start_analysis)
-    
-    def _update_connection_ui(self, personas):
-        """연결 성공 UI 업데이트"""
-        success_text = f"✅ 연결 성공 ({len(personas)}개 페르소나)"
-        success_style = """
-            QLabel {
-                color: #059669; background-color: #D1FAE5; padding: 6px;
-                border-radius: 4px; font-size: 11px; font-weight: 600;
-            }
-        """
-        
-        if hasattr(self, 'vo_connection_status_label'):
-            self.vo_connection_status_label.setText(success_text)
-            self.vo_connection_status_label.setStyleSheet(success_style)
-        
-        if hasattr(self, 'tick_history_btn'):
-            self.tick_history_btn.setEnabled(True)
-        
-        logger.info(f"✅ 연결 상태 레이블 업데이트: {len(personas)}개 페르소나")
-    
-    def _show_connection_success_dialog(self, personas, sim_status):
-        """연결 성공 다이얼로그 표시"""
-        QMessageBox.information(
-            self, "연결 성공", 
-            f"VirtualOffice 서버에 성공적으로 연결되었습니다.\n\n"
-            f"페르소나: {len(personas)}개\n"
-            f"현재 틱: {sim_status.current_tick}\n"
-            f"시뮬레이션 시간: {sim_status.sim_time}"
-        )
-    
-    def _handle_connection_error(self, error):
-        """연결 오류 처리"""
-        logger.error(f"❌ VirtualOffice 연결 실패: {error}", exc_info=True)
-        self.vo_panel.update_connection_status(f"❌ 연결 실패: {str(error)}", 'disconnected')
-        QMessageBox.critical(self, "연결 오류", f"VirtualOffice 서버 연결에 실패했습니다.\n\n오류: {str(error)}")
-    
+        """VirtualOffice 연결 트리거 (컨트롤러 위임)."""
+        self.connection_controller.connect_virtualoffice()
+
     def _setup_personas(self, personas: list):
-        """페르소나 드롭다운 설정 및 PM 자동 선택"""
-        self.persona_combo.clear()
-        self.persona_combo.setEnabled(True)
-        
-        for persona in personas:
-            display_name = f"{persona.name} ({persona.role})"
-            self.persona_combo.addItem(display_name, persona)
-        
-        # PM 페르소나 자동 선택
-        pm_index = -1
-        for i in range(self.persona_combo.count()):
-            persona = self.persona_combo.itemData(i)
-            if persona and ("pm" in persona.name.lower() or "pm" in persona.role.lower()):
-                pm_index = i
-                break
-        
-        if pm_index >= 0:
-            self.persona_combo.setCurrentIndex(pm_index)
-            logger.info(f"✅ PM 페르소나 자동 선택: {self.persona_combo.currentText()}")
-        else:
-            self.persona_combo.setCurrentIndex(0)
-            logger.info(f"⚠️ PM 페르소나를 찾을 수 없어 첫 번째 페르소나 선택: {self.persona_combo.currentText()}")
-    
+        """레거시 호환용 래퍼 (컨트롤러 위임)."""
+        self.connection_controller.setup_personas(personas)
+
     def _update_sim_status_display(self, sim_status):
-        """시뮬레이션 상태 표시 업데이트"""
-        status_text = (
-            f"Tick: {sim_status.current_tick}\n"
-            f"시간: {sim_status.sim_time}\n"
-            f"상태: {'실행 중' if sim_status.is_running else '정지'}\n"
-            f"자동 틱: {'활성화' if sim_status.auto_tick else '비활성화'}"
-        )
-        self.sim_status_display.setText(status_text)
-        
-        # 실행 상태에 따라 색상 변경
-        if sim_status.is_running:
-            self.sim_status_display.setStyleSheet("""
-                QLabel {
-                    color: #059669;
-                    background-color: #D1FAE5;
-                    padding: 8px;
-                    border-radius: 4px;
-                    border: 1px solid #10B981;
-                    font-size: 11px;
-                }
-            """)
-        else:
-            self.sim_status_display.setStyleSheet("""
-                QLabel {
-                    color: #DC2626;
-                    background-color: #FEE2E2;
-                    padding: 8px;
-                    border-radius: 4px;
-                    border: 1px solid #EF4444;
-                    font-size: 11px;
-                }
-            """)
+        """시뮬레이션 상태 표시 업데이트 (컨트롤러 위임)."""
+        self.connection_controller.update_sim_status_display(sim_status)
     
     def on_persona_changed(self, index: int):
         """페르소나 변경 이벤트 핸들러 (개선된 캐시 로직)"""
@@ -1937,211 +1673,25 @@ class SmartAssistantGUI(QMainWindow):
             logger.error(f"❌ 자동 분석 시작 오류: {e}", exc_info=True)
             self.status_message.setText(f"자동 분석 오류: {e}")
     
-    def _process_new_messages_async(self, new_messages: list):
-        """새 메시지에 대한 분석 및 TODO 생성 (백그라운드 처리)
-        
-        Args:
-            new_messages: 새로 수집된 메시지 리스트
-        """
-        try:
-            if not new_messages:
-                return
-            
-            logger.info(f"🔄 새 메시지 분석 시작: {len(new_messages)}개")
-            
-            # 워커 스레드로 분석 실행
-            if hasattr(self, 'assistant') and self.assistant:
-                # 기존 데이터로 분석 실행
-                dataset_config = dict(self.dataset_config) if hasattr(self, 'dataset_config') else {}
-                collect_options = {
-                    "email_limit": None,
-                    "messenger_limit": None,
-                    "overall_limit": None,
-                    "force_reload": False,  # 기존 데이터 사용
-                }
-                
-                # 워커 스레드 시작
-                from .widgets.worker_thread import WorkerThread
-                self.worker_thread = WorkerThread(self.assistant, dataset_config, collect_options)
-                self.worker_thread.result_ready.connect(self._handle_background_analysis_result)
-                self.worker_thread.error_occurred.connect(self._handle_background_analysis_error)
-                self.worker_thread.start()
-                
-                logger.info(f"✅ 백그라운드 분석 워커 스레드 시작됨")
-            else:
-                logger.warning("⚠️ Assistant가 없어 분석을 건너뜀")
-            
-        except Exception as e:
-            logger.error(f"❌ 새 메시지 분석 준비 오류: {e}", exc_info=True)
+    def _process_new_messages_async(self, new_messages: list) -> None:
+        """새 메시지에 대한 분석 및 TODO 생성 (백그라운드 처리)"""
+        self.analysis_controller._process_new_messages_async(new_messages)
     
     def _handle_background_analysis_result(self, result):
         """백그라운드 분석 결과 처리"""
-        try:
-            if result.get("success"):
-                # TODO 업데이트
-                todo_list = result.get("todo_list") or []
-                todos = []
-                
-                # todo_list 구조 디버깅
-                logger.info(f"🔍 TODO 리스트 타입: {type(todo_list)}, 길이: {len(todo_list) if hasattr(todo_list, '__len__') else 'N/A'}")
-                
-                # 현재 수집된 메시지 타입 분석
-                if hasattr(self, 'collected_messages') and self.collected_messages:
-                    email_count = len([m for m in self.collected_messages if m.get("type") == "email"])
-                    message_count = len([m for m in self.collected_messages if m.get("type") == "messenger"])
-                    other_count = len([m for m in self.collected_messages if m.get("type") not in ["email", "messenger"]])
-                    logger.info(f"🔍 수집된 메시지 분석: 이메일 {email_count}개, 메신저 {message_count}개, 기타 {other_count}개")
-                
-                def extract_todos_recursive(data, depth=0):
-                    """재귀적으로 TODO 데이터 추출"""
-                    if depth > 3:  # 무한 재귀 방지
-                        return []
-                    
-                    extracted = []
-                    
-                    if isinstance(data, dict):
-                        # 딕셔너리가 TODO 데이터인지 확인
-                        if any(key in data for key in ['title', 'description', 'priority', 'deadline']):
-                            # TODO 데이터로 판단
-                            if "id" not in data:
-                                import uuid
-                                data["id"] = uuid.uuid4().hex
-                            extracted.append(data)
-                        else:
-                            # 딕셔너리의 값들을 재귀적으로 처리
-                            for key, value in data.items():
-                                extracted.extend(extract_todos_recursive(value, depth + 1))
-                    elif isinstance(data, list):
-                        # 리스트의 각 항목을 재귀적으로 처리
-                        for item in data:
-                            extracted.extend(extract_todos_recursive(item, depth + 1))
-                    
-                    return extracted
-                
-                # 재귀적으로 TODO 추출
-                todos = extract_todos_recursive(todo_list)
-                logger.info(f"🔍 추출된 TODO 개수: {len(todos)}")
-                
-                if todos and hasattr(self, 'todo_panel'):
-                    self.todo_panel.populate_from_items(todos)
-                    logger.info(f"✅ 백그라운드 분석 완료: {len(todos)}개 TODO 생성")
-                    
-                    # 캐시에 TODO 업데이트
-                    self._update_cache_with_analysis_results(todos, [])
-                else:
-                    logger.info("ℹ️ 백그라운드 분석 완료: 생성된 TODO 없음")
-                
-                # 분석 결과 업데이트
-                analysis_results = result.get("analysis_results", [])
-                if analysis_results:
-                    self.analysis_results = analysis_results
-                    if hasattr(self, 'analysis_result_panel'):
-                        self.analysis_result_panel.update_analysis(
-                            analysis_results, 
-                            self.collected_messages
-                        )
-                    logger.info(f"✅ 분석 결과 업데이트: {len(analysis_results)}개")
-                
-            else:
-                error_msg = result.get("error", "알 수 없는 오류")
-                logger.error(f"❌ 백그라운드 분석 실패: {error_msg}")
-                
-        except Exception as e:
-            logger.error(f"❌ 백그라운드 분석 결과 처리 오류: {e}", exc_info=True)
+        self.analysis_controller._handle_background_analysis_result(result)
     
     def _handle_background_analysis_error(self, error_msg):
         """백그라운드 분석 오류 처리"""
-        try:
-            logger.error(f"❌ 백그라운드 분석 오류: {error_msg}")
-        except Exception as e:
-            logger.error(f"❌ 백그라운드 분석 오류 처리 실패: {e}", exc_info=True)
+        self.analysis_controller._handle_background_analysis_error(error_msg)
     
     def _trigger_reanalysis(self):
         """전체 메시지 재분석 트리거"""
-        try:
-            logger.info("🔄 전체 메시지 재분석 시작")
-            self.status_message.setText("새 메시지 분석 중...")
-            
-            # 메시지 수집 없이 분석만 다시 실행
-            if hasattr(self, 'collected_messages') and self.collected_messages:
-                # 워커 스레드로 분석 실행
-                self.connect_collect_button.setEnabled(False)
-                self.progress_bar.setVisible(True)
-                self.progress_bar.setValue(0)
-                
-                # 기존 데이터로 분석만 실행
-                dataset_config = dict(self.dataset_config)
-                collect_options = {
-                    "email_limit": None,
-                    "messenger_limit": None,
-                    "overall_limit": None,
-                    "force_reload": False,  # 기존 데이터 사용
-                }
-                
-                self.worker_thread = WorkerThread(self.assistant, dataset_config, collect_options)
-                self.worker_thread.progress_updated.connect(self.progress_bar.setValue)
-                self.worker_thread.status_updated.connect(self.status_message.setText)
-                self.worker_thread.result_ready.connect(self._handle_reanalysis_result)
-                self.worker_thread.error_occurred.connect(self.handle_error)
-                self.worker_thread.start()
-            else:
-                logger.warning("⚠️ 분석할 메시지가 없음")
-                self.status_message.setText("분석할 메시지가 없습니다")
-        except Exception as e:
-            logger.error(f"❌ 재분석 트리거 오류: {e}", exc_info=True)
-            self.status_message.setText(f"재분석 오류: {e}")
+        self.analysis_controller._trigger_reanalysis()
     
     def _handle_reanalysis_result(self, result):
         """재분석 결과 처리"""
-        try:
-            self.connect_collect_button.setEnabled(True)
-            self.progress_bar.setVisible(False)
-            
-            if result.get("success"):
-                # TODO 업데이트
-                todo_list = result.get("todo_list") or {}
-                items = todo_list.get("items", [])
-                
-                logger.info(f"[MainWindow] TODO 업데이트 체크: items={len(items) if items else 0}, has_todo_panel={hasattr(self, 'todo_panel')}")
-                if items and hasattr(self, "todo_panel"):
-                    logger.info(f"[MainWindow] populate_from_items 호출: {len(items)}개 항목")
-                    self.todo_panel.populate_from_items(items)
-                    logger.info(f"✅ TODO 업데이트 완료: {len(items)}개")
-                else:
-                    logger.warning(f"[MainWindow] TODO 업데이트 건너뜀: items={len(items) if items else 0}, has_panel={hasattr(self, 'todo_panel')}")
-                
-                # 분석 결과 업데이트
-                analysis_results = result.get("analysis_results") or []
-                if analysis_results:
-                    self.analysis_results = analysis_results
-                    if hasattr(self, "analysis_result_panel"):
-                        self.analysis_result_panel.update_analysis(
-                            self.analysis_results, 
-                            self.collected_messages
-                        )
-                    logger.info(f"✅ 분석 결과 업데이트 완료: {len(analysis_results)}개")
-                
-                # 캐시 저장 (새로운 캐시 서비스 사용)
-                self._save_to_cache(items, self.collected_messages, analysis_results)
-                
-                # 레거시 캐시 업데이트 (하위 호환성)
-                self._update_cache_with_analysis_results(items, analysis_results)
-                
-                # 메시지 요약 업데이트
-                if hasattr(self, 'message_summary_panel'):
-                    self._update_message_summaries("day")
-                
-                self.status_message.setText(f"✅ 재분석 완료: TODO {len(items)}개")
-                self.statusBar().showMessage(
-                    f"✅ 재분석 완료: TODO {len(items)}개, 분석 {len(analysis_results)}개",
-                    3000
-                )
-            else:
-                logger.error("❌ 재분석 실패")
-                self.status_message.setText("재분석 실패")
-        except Exception as e:
-            logger.error(f"❌ 재분석 결과 처리 오류: {e}", exc_info=True)
-            self.status_message.setText(f"재분석 결과 처리 오류: {e}")
+        self.analysis_controller._handle_reanalysis_result(result)
     
     def _build_cache_key(self) -> 'CacheKey':
         """현재 상태로 캐시 키 생성
@@ -2152,15 +1702,7 @@ class SmartAssistantGUI(QMainWindow):
         Returns:
             CacheKey: 생성된 캐시 키
         """
-        from src.services.persona_todo_cache_service import CacheKey
-        
-        # 시간 범위는 캐시 키에서 제외 (UI 레벨 필터링으로 처리)
-        return CacheKey(
-            persona_id=self._current_persona_id or "",
-            time_range_start=None,  # 시간 범위 제외
-            time_range_end=None,    # 시간 범위 제외
-            data_version=self._current_data_version
-        )
+        return self.analysis_controller._build_cache_key()
     
     def _display_cached_result(self, cached_result: 'CachedAnalysisResult') -> None:
         """캐시된 분석 결과를 UI에 표시
@@ -2168,41 +1710,7 @@ class SmartAssistantGUI(QMainWindow):
         Args:
             cached_result: 캐시된 분석 결과
         """
-        try:
-            logger.info(f"📂 캐시된 결과 표시 중 (생성 시간: {cached_result.created_at})")
-            
-            # TODO 리스트 업데이트
-            if cached_result.todo_list and hasattr(self, 'todo_panel'):
-                logger.info(f"📋 TODO 업데이트: {len(cached_result.todo_list)}개")
-                self.todo_panel.populate_from_items(cached_result.todo_list)
-            
-            # 메시지 데이터 복원
-            if cached_result.messages:
-                self.collected_messages = cached_result.messages
-                if hasattr(self.assistant, 'collected_messages'):
-                    self.assistant.collected_messages = cached_result.messages
-                logger.info(f"📨 메시지 복원: {len(cached_result.messages)}개")
-            
-            # 분석 결과 복원 (analysis_summary에서 추출)
-            summary = cached_result.analysis_summary
-            if summary and hasattr(self, 'analysis_result_panel'):
-                # 분석 결과가 있으면 표시
-                logger.info(f"📊 분석 결과 표시")
-                # analysis_result_panel 업데이트는 필요시 구현
-            
-            # 상태 메시지 업데이트
-            todo_count = len(cached_result.todo_list)
-            msg_count = len(cached_result.messages)
-            self.statusBar().showMessage(
-                f"✅ 캐시에서 로드 완료: TODO {todo_count}개, 메시지 {msg_count}개 "
-                f"(생성: {cached_result.created_at.strftime('%Y-%m-%d %H:%M:%S')})",
-                5000
-            )
-            
-            logger.info(f"✅ 캐시된 결과 표시 완료")
-            
-        except Exception as e:
-            logger.error(f"❌ 캐시된 결과 표시 오류: {e}", exc_info=True)
+        self.analysis_controller._display_cached_result(cached_result)
     
     def _save_to_cache(
         self,
@@ -2210,54 +1718,8 @@ class SmartAssistantGUI(QMainWindow):
         messages: List[Dict[str, Any]],
         analysis_results: List[Dict[str, Any]]
     ) -> None:
-        """분석 결과를 캐시에 저장
-        
-        Args:
-            todo_list: TODO 리스트
-            messages: 메시지 리스트
-            analysis_results: 분석 결과 리스트
-        """
-        try:
-            if not self._current_persona_id:
-                logger.debug("페르소나 ID가 없어 캐시 저장 건너뜀")
-                return
-            
-            from src.services.persona_todo_cache_service import CachedAnalysisResult
-            
-            # 캐시 키 생성
-            cache_key = self._build_cache_key()
-            
-            # 분석 요약 생성
-            analysis_summary = {
-                "total_messages": len(messages),
-                "email_count": sum(1 for m in messages if m.get("type") == "email" or m.get("platform") == "email"),
-                "chat_count": sum(1 for m in messages if m.get("type") == "messenger" or m.get("platform") == "messenger"),
-                "todo_count": len(todo_list),
-                "high_priority_count": sum(1 for t in todo_list if t.get("priority") == "high"),
-                "medium_priority_count": sum(1 for t in todo_list if t.get("priority") == "medium"),
-                "low_priority_count": sum(1 for t in todo_list if t.get("priority") == "low"),
-            }
-            
-            # CachedAnalysisResult 객체 생성
-            cached_result = CachedAnalysisResult(
-                cache_key=cache_key.to_hash(),
-                persona_id=self._current_persona_id,
-                todo_list=todo_list,
-                messages=messages,
-                analysis_summary=analysis_summary,
-                created_at=datetime.now(),
-                last_accessed_at=datetime.now()
-            )
-            
-            # 캐시에 저장
-            self._cache_service.put(cache_key, cached_result)
-            
-            logger.info(
-                f"💾 캐시 저장 완료: TODO {len(todo_list)}개, 메시지 {len(messages)}개"
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ 캐시 저장 오류: {e}", exc_info=True)
+        """분석 결과를 캐시에 저장"""
+        self.analysis_controller._save_to_cache(todo_list, messages, analysis_results)
     
     def _should_use_cache(self, persona_key: str) -> bool:
         """캐시 사용 여부 결정
@@ -2268,44 +1730,11 @@ class SmartAssistantGUI(QMainWindow):
         Returns:
             bool: 캐시 사용 가능 여부
         """
-        try:
-            # 캐시된 데이터가 없으면 False
-            if persona_key not in self._persona_cache:
-                logger.info(f"📂 캐시 없음: {persona_key}")
-                return False
-            
-            cached_data = self._persona_cache[persona_key]
-            
-            # 메시지가 없으면 False
-            if not cached_data.get('messages'):
-                logger.info(f"📂 캐시된 메시지 없음: {persona_key}")
-                return False
-            
-            # TODO가 없으면 False (분석 미완료)
-            if not cached_data.get('todos'):
-                logger.info(f"📂 TODO 없음: {persona_key}")
-                return False
-            
-            # 캐시 유효 - 시간 기반 만료 제거
-            logger.info(f"✅ 캐시 사용 가능: {persona_key} (메시지: {len(cached_data['messages'])}개, TODO: {len(cached_data['todos'])}개)")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ 캐시 확인 오류: {e}")
-            return False
+        return self.analysis_controller._should_use_cache(persona_key)
     
     def _trigger_immediate_polling(self) -> None:
         """페르소나 변경 시 즉시 폴링 트리거"""
-        try:
-            if self.polling_worker and self.polling_worker.isRunning():
-                # PollingWorker에 즉시 폴링 요청
-                if hasattr(self.polling_worker, 'trigger_immediate_poll'):
-                    self.polling_worker.trigger_immediate_poll()
-                    logger.info("✅ 즉시 폴링 트리거")
-                else:
-                    logger.warning("⚠️ PollingWorker가 즉시 폴링을 지원하지 않음")
-        except Exception as e:
-            logger.error(f"즉시 폴링 트리거 오류: {e}")
+        self.analysis_controller._trigger_immediate_polling()
     
     def _get_simulation_status(self) -> tuple[int, bool]:
         """시뮬레이션 상태 조회
@@ -2313,21 +1742,7 @@ class SmartAssistantGUI(QMainWindow):
         Returns:
             tuple: (current_tick, is_running)
         """
-        try:
-            if hasattr(self, 'sim_monitor') and self.sim_monitor:
-                status = self.sim_monitor.get_status()
-                return status.current_tick, status.is_running
-            
-            # SimulationMonitor가 없으면 API 직접 호출
-            if self.vo_client:
-                status = self.vo_client.get_simulation_status()
-                return status.current_tick, status.is_running
-            
-            return 0, False
-            
-        except Exception as e:
-            logger.debug(f"시뮬레이션 상태 조회 실패: {e}")
-            return 0, False
+        return self.analysis_controller._get_simulation_status()
     
     def _load_from_cache(self, persona_key: str) -> None:
         """캐시에서 데이터 로드
@@ -2335,58 +1750,7 @@ class SmartAssistantGUI(QMainWindow):
         Args:
             persona_key: 페르소나 식별 키
         """
-        try:
-            logger.info(f"📂 캐시 로드 시작: persona_key={persona_key}")
-            logger.info(f"📊 현재 캐시 키 목록: {list(self._persona_cache.keys())}")
-            
-            cached_data = self._persona_cache.get(persona_key, {})
-            
-            if not cached_data:
-                logger.warning(f"⚠️ 캐시에 데이터가 없음: {persona_key}")
-                logger.warning(f"⚠️ 사용 가능한 캐시 키: {list(self._persona_cache.keys())}")
-                return
-            
-            # 메시지 데이터 복원
-            messages = cached_data.get('messages', [])
-            if messages:
-                self.collected_messages = messages
-                if hasattr(self.assistant, 'collected_messages'):
-                    self.assistant.collected_messages = messages
-                logger.info(f"📨 캐시에서 메시지 복원: {len(messages)}개")
-            
-            # 캐시된 TODO 데이터 복원
-            cached_todos = cached_data.get('todos', [])
-            if cached_todos:
-                logger.info(f"📋 캐시된 TODO 발견: {len(cached_todos)}개")
-                # TODO 데이터베이스 초기화 후 복원
-                self._clear_todos_for_persona_change()
-                # 캐시된 TODO를 데이터베이스와 UI에 복원
-                self._restore_todos_from_cache(cached_todos)
-            else:
-                # 캐시된 TODO가 없으면 TODO 초기화 후 새로 분석
-                logger.info(f"📋 캐시된 TODO가 없어 새로 분석 시작")
-                self._clear_todos_for_persona_change()
-                self._trigger_background_analysis(messages)
-            
-            # 분석 결과 복원
-            analysis_results = cached_data.get('analysis_results', [])
-            if analysis_results:
-                self.analysis_results = analysis_results
-                if hasattr(self, 'analysis_result_panel'):
-                    self.analysis_result_panel.update_analysis(
-                        self.analysis_results, 
-                        messages
-                    )
-                logger.info(f"📊 캐시에서 분석 결과 복원: {len(analysis_results)}개")
-            
-            # UI 업데이트 (이메일 패널, 타임라인 등)
-            self._update_ui_from_cache_only(messages)
-            
-            todos_count = len(cached_todos)
-            logger.info(f"✅ 캐시에서 데이터 로드 완료: 메시지 {len(messages)}개, TODO {todos_count}개, 분석 {len(analysis_results)}개")
-            
-        except Exception as e:
-            logger.error(f"❌ 캐시 로드 오류: {e}", exc_info=True)
+        self.analysis_controller._load_from_cache(persona_key)
     
     def _collect_and_cache_data(self, persona_key: str) -> None:
         """데이터 수집 및 캐시 저장
@@ -2394,126 +1758,11 @@ class SmartAssistantGUI(QMainWindow):
         Args:
             persona_key: 페르소나 식별 키
         """
-        try:
-            logger.info(f"📥 데이터 수집 시작: persona_key={persona_key}")
-            
-            # 페르소나 변경 시 TODO 데이터베이스 초기화
-            self._clear_todos_for_persona_change()
-            
-            # 현재 데이터 수집
-            data_source = self.assistant.data_source_manager.current_source
-            if not data_source:
-                logger.warning("⚠️ 데이터 소스가 없음")
-                return
-            
-            # 비동기 데이터 수집
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            try:
-                # 수집 옵션 준비 (시간 범위 포함)
-                collect_options = {"incremental": False}
-                
-                # 시간 필터링이 활성화된 경우 시간 범위 추가
-                if self.time_filter_service.is_enabled:
-                    time_params = self.time_filter_service.get_collection_params()
-                    if time_params.get("time_filter_enabled"):
-                        collect_options["time_range"] = {
-                            "start": self.time_filter_service.current_range[0],
-                            "end": self.time_filter_service.current_range[1]
-                        }
-                        logger.info(f"⏰ 시간 범위로 데이터 수집: {collect_options['time_range']}")
-                
-                messages = loop.run_until_complete(
-                    data_source.collect_messages(collect_options)
-                )
-                
-                logger.info(f"📨 메시지 수집 완료: {len(messages)}개")
-                
-                # 현재 UI에 데이터 적용
-                self.collected_messages = messages
-                if hasattr(self.assistant, 'collected_messages'):
-                    self.assistant.collected_messages = messages
-                
-                # 구 캐시 시스템 (하위 호환성)
-                persona_info = self.selected_persona.__dict__ if self.selected_persona else {}
-                cache_data = {
-                    'messages': messages,
-                    'timestamp': time.time(),
-                    'persona': persona_info,
-                    'todos': [],  # 백그라운드 분석 후 업데이트
-                    'analysis_results': []  # 백그라운드 분석 후 업데이트
-                }
-                self._persona_cache[persona_key] = cache_data
-                self._cache_valid_until[persona_key] = time.time() + 300  # 5분 후 만료
-                
-                logger.info(f"💾 임시 캐시 저장 완료: persona_key={persona_key}, 메시지={len(messages)}개")
-                logger.info(f"📊 현재 캐시 키 목록: {list(self._persona_cache.keys())}")
-                
-                # UI 즉시 업데이트
-                self._update_ui_with_new_data(messages)
-                
-                # 시뮬레이션 상태 업데이트
-                current_tick, is_running = self._get_simulation_status()
-                if current_tick > 0 or self._last_simulation_tick is None:
-                    self._last_simulation_tick = current_tick
-                self._simulation_running = is_running
-                
-                logger.info(f"✅ 데이터 수집 및 캐시 저장 완료: {len(messages)}개 메시지")
-                
-            finally:
-                loop.close()
-                
-        except Exception as e:
-            logger.error(f"❌ 데이터 수집 및 캐시 저장 오류: {e}", exc_info=True)
+        self.analysis_controller._collect_and_cache_data(persona_key)
     
     def _update_cache_with_analysis_results(self, todos: List[Dict], analysis_results: List[Dict]) -> None:
-        """백그라운드 분석 결과로 캐시 업데이트
-        
-        Args:
-            todos: 생성된 TODO 리스트
-            analysis_results: 분석 결과 리스트
-        """
-        try:
-            if not self.selected_persona:
-                return
-                
-            persona_key = f"{self.selected_persona.email_address}_{self.selected_persona.chat_handle}"
-            
-            # 구 캐시 시스템 업데이트 (하위 호환성)
-            if persona_key in self._persona_cache:
-                cache_data = self._persona_cache[persona_key]
-                cache_data['todos'] = todos
-                cache_data['analysis_results'] = analysis_results
-                cache_data['timestamp'] = time.time()
-                self._cache_valid_until[persona_key] = time.time() + 300
-            
-            # 신 캐시 시스템에 저장 (PersonaTodoCacheService)
-            from src.services.persona_todo_cache_service import CachedAnalysisResult
-            from datetime import datetime
-            
-            cache_key = self._build_cache_key()
-            cached_result = CachedAnalysisResult(
-                cache_key=cache_key.to_hash(),
-                persona_id=self._current_persona_id or "",
-                todo_list=todos,
-                messages=self.collected_messages or [],
-                analysis_summary={
-                    "total_messages": len(self.collected_messages) if self.collected_messages else 0,
-                    "todo_count": len(todos),
-                    "analysis_count": len(analysis_results)
-                },
-                created_at=datetime.now(),
-                last_accessed_at=datetime.now()
-            )
-            
-            self._cache_service.put(cache_key, cached_result)
-            logger.info(f"✅ 캐시 업데이트 완료: TODO {len(todos)}개, 분석 결과 {len(analysis_results)}개")
-            logger.info(f"📊 캐시 키: {cache_key.to_hash()}, 페르소나: {self._current_persona_id}")
-            
-        except Exception as e:
-            logger.error(f"캐시 업데이트 오류: {e}", exc_info=True)
+        """백그라운드 분석 결과로 캐시 업데이트"""
+        self.analysis_controller._update_cache_with_analysis_results(todos, analysis_results)
     
     def _update_polling_worker_persona(self, persona) -> None:
         """PollingWorker의 페르소나만 업데이트 (재시작 없이)
@@ -2521,63 +1770,15 @@ class SmartAssistantGUI(QMainWindow):
         Args:
             persona: 새 페르소나 정보
         """
-        try:
-            if self.polling_worker and self.polling_worker.isRunning():
-                # PollingWorker의 데이터 소스 페르소나 업데이트
-                if hasattr(self.polling_worker, 'data_source') and hasattr(self.polling_worker.data_source, 'set_selected_persona'):
-                    persona_dict = {
-                        'name': persona.name,
-                        'email_address': persona.email_address,
-                        'chat_handle': persona.chat_handle,
-                        'role': persona.role,
-                        'id': persona.id
-                    }
-                    self.polling_worker.data_source.set_selected_persona(persona_dict)
-                    logger.info(f"✅ PollingWorker 페르소나 업데이트: {persona.name} ({persona.email_address})")
-                else:
-                    # 재시작이 필요한 경우
-                    logger.warning("⚠️ PollingWorker 데이터 소스가 페르소나 업데이트를 지원하지 않음 → 재시작")
-                    self._restart_polling_worker()
-            else:
-                # PollingWorker가 실행되지 않은 경우 시작
-                logger.info("PollingWorker가 실행되지 않음 → 시작")
-                self._start_polling_worker()
-                
-        except Exception as e:
-            logger.error(f"PollingWorker 페르소나 업데이트 오류: {e}")
-            # 오류 시 재시작 시도
-            self._restart_polling_worker()
+        self.analysis_controller._update_polling_worker_persona(persona)
     
     def _restart_polling_worker(self) -> None:
         """PollingWorker 재시작"""
-        try:
-            if self.polling_worker and self.polling_worker.isRunning():
-                logger.info("PollingWorker 재시작 중...")
-                self.polling_worker.stop()
-                self.polling_worker.wait(2000)
-            
-            self._start_polling_worker()
-            
-        except Exception as e:
-            logger.error(f"PollingWorker 재시작 오류: {e}")
+        self.analysis_controller._restart_polling_worker()
     
     def _start_polling_worker(self) -> None:
         """PollingWorker 시작"""
-        try:
-            data_source = self.assistant.data_source_manager.current_source
-            if data_source:
-                # 시뮬레이션 상태에 따른 폴링 간격 조정
-                current_tick, is_running = self._get_simulation_status()
-                polling_interval = 30 if is_running else 60  # 실행 중: 30초, 정지: 60초
-                
-                self.polling_worker = PollingWorker(data_source, polling_interval=polling_interval)
-                self.polling_worker.new_data_received.connect(self.on_new_data_received)
-                self.polling_worker.error_occurred.connect(self.on_polling_error)
-                self.polling_worker.start()
-                logger.info(f"✅ PollingWorker 시작됨 (폴링 간격: {polling_interval}초)")
-                
-        except Exception as e:
-            logger.error(f"PollingWorker 시작 오류: {e}")
+        self.analysis_controller._start_polling_worker()
     
     def _update_ui_from_cache(self, cached_data: Dict) -> None:
         """캐시 데이터로 UI 업데이트
@@ -2585,13 +1786,7 @@ class SmartAssistantGUI(QMainWindow):
         Args:
             cached_data: 캐시된 데이터
         """
-        try:
-            messages = cached_data.get('messages', [])
-            self._update_ui_with_new_data(messages)
-            logger.debug("UI 캐시 업데이트 완료")
-            
-        except Exception as e:
-            logger.error(f"UI 캐시 업데이트 오류: {e}")
+        self.analysis_controller._update_ui_from_cache(cached_data)
     
     def _update_ui_from_cache_only(self, messages: List[Dict]) -> None:
         """캐시에서 로드한 데이터로 UI만 업데이트 (백그라운드 분석 없음)
@@ -2599,39 +1794,7 @@ class SmartAssistantGUI(QMainWindow):
         Args:
             messages: 메시지 리스트
         """
-        try:
-            logger.info(f"🔄 UI 업데이트 시작: {len(messages)}개 메시지")
-            
-            # 1. 이메일 패널 업데이트
-            if hasattr(self, 'email_panel'):
-                email_messages = [m for m in messages if m.get("type") == "email"]
-                self.email_panel.update_emails(email_messages)
-                logger.debug(f"이메일 패널 업데이트: {len(email_messages)}개")
-            
-            # 2. 메시지 요약 패널 업데이트
-            if hasattr(self, 'message_summary_panel'):
-                self._update_message_summaries("day")
-                logger.debug("메시지 요약 패널 업데이트")
-            
-            # 3. 타임라인 업데이트
-            if hasattr(self, 'timeline_list'):
-                self._update_timeline_with_badges()
-                logger.debug("타임라인 업데이트")
-            
-            # 4. 분석 결과 패널 업데이트 (기존 분석 결과가 있는 경우)
-            if hasattr(self, 'analysis_result_panel') and hasattr(self, 'analysis_results'):
-                self.analysis_result_panel.update_analysis(
-                    self.analysis_results, 
-                    messages
-                )
-                logger.debug("분석 결과 패널 업데이트")
-            
-            # 캐시된 데이터이므로 백그라운드 분석 생략
-            # TODO는 이미 _load_from_cache에서 복원됨
-            logger.info("✅ UI 업데이트 완료")
-            
-        except Exception as e:
-            logger.error(f"UI 업데이트 오류: {e}")
+        self.analysis_controller._update_ui_from_cache_only(messages)
     
     def _update_ui_with_new_data(self, messages: List[Dict]) -> None:
         """새 데이터로 모든 UI 패널 업데이트
@@ -2639,267 +1802,47 @@ class SmartAssistantGUI(QMainWindow):
         Args:
             messages: 메시지 리스트
         """
-        try:
-            logger.info(f"🔄 UI 업데이트 시작: {len(messages)}개 메시지")
-            
-            # 0. TimeRangeSelector에 데이터 범위 설정
-            try:
-                self._update_time_range_selector_data_range(messages)
-            except Exception as e:
-                logger.debug(f"TimeRangeSelector 데이터 범위 설정 오류: {e}")
-            
-            # 1. 이메일 패널 업데이트
-            if hasattr(self, 'email_panel'):
-                email_messages = [m for m in messages if m.get("type") == "email"]
-                self.email_panel.update_emails(email_messages)
-                logger.debug(f"이메일 패널 업데이트: {len(email_messages)}개")
-            
-            # 2. 메시지 요약 패널 업데이트
-            if hasattr(self, 'message_summary_panel'):
-                self._update_message_summaries("day")
-                logger.debug("메시지 요약 패널 업데이트")
-            
-            # 3. 타임라인 업데이트
-            if hasattr(self, 'timeline_list'):
-                self._update_timeline_with_badges()
-                logger.debug("타임라인 업데이트")
-            
-            # 4. 분석 결과 패널 업데이트 (기존 분석 결과가 있는 경우)
-            if hasattr(self, 'analysis_result_panel') and hasattr(self, 'analysis_results'):
-                self.analysis_result_panel.update_analysis(
-                    self.analysis_results, 
-                    messages
-                )
-                logger.debug("분석 결과 패널 업데이트")
-            
-            # 5. TODO 패널은 별도 분석 후 업데이트 (백그라운드에서)
-            # 새로 수집한 메시지에 대해서만 분석 실행
-            if messages:
-                self._trigger_background_analysis(messages)
-            
-            logger.info("✅ UI 업데이트 완료")
-            
-        except Exception as e:
-            logger.error(f"UI 업데이트 오류: {e}")
-    
+        self.analysis_controller._update_ui_with_new_data(messages)
+
     def _trigger_background_analysis(self, messages: List[Dict]) -> None:
         """백그라운드에서 분석 실행 (TODO 생성)
         
         Args:
             messages: 분석할 메시지 리스트
         """
-        try:
-            # 모든 메시지에 대해 즉시 분석 처리 (더 안정적)
-            logger.info(f"⚡ 즉시 분석 시작: {len(messages)}개 메시지")
-            self._quick_analysis(messages)
-                
-        except Exception as e:
-            logger.error(f"백그라운드 분석 트리거 오류: {e}")
-    
+        self.analysis_controller._trigger_background_analysis(messages)
+
     def _quick_analysis(self, messages: List[Dict]) -> None:
         """빠른 분석 (개선된 TODO 생성)
         
         Args:
             messages: 분석할 메시지 리스트
         """
-        try:
-            import uuid
-            from datetime import datetime
-            
-            # 개선된 TODO 생성 로직
-            todos = []
-            
-            # 더 많은 메시지 분석 (최대 50개)
-            analysis_count = min(len(messages), 50)
-            logger.info(f"📋 {analysis_count}개 메시지 분석 시작")
-            
-            for i, msg in enumerate(messages[-analysis_count:]):
-                content = msg.get('content', '') or msg.get('body', '') or msg.get('subject', '')
-                subject = msg.get('subject', '')
-                sender = msg.get('sender', '')
-                
-                if not content and not subject:
-                    continue
-                
-                # 더 다양한 키워드 매칭
-                keywords = [
-                    '회의', '미팅', '검토', '확인', '완료', '제출', '보고', 
-                    '테스트', '피드백', '논의', '진행', '상황', '점검',
-                    '요청', '승인', '수정', '업데이트', '개발', '디자인'
-                ]
-                
-                # 우선순위 결정
-                priority = 'Low'
-                if any(word in content.lower() for word in ['urgent', '긴급', '즉시', '오늘']):
-                    priority = 'High'
-                elif any(word in content.lower() for word in ['중요', '필수', '반드시']):
-                    priority = 'Medium'
-                
-                # TODO 생성 조건 확대
-                should_create_todo = False
-                matched_keyword = None
-                
-                for keyword in keywords:
-                    if keyword in content or keyword in subject:
-                        should_create_todo = True
-                        matched_keyword = keyword
-                        break
-                
-                # 이메일이면 더 적극적으로 TODO 생성
-                if msg.get('type') == 'email' and not should_create_todo:
-                    should_create_todo = True
-                    matched_keyword = '이메일'
-                
-                if should_create_todo:
-                    # 제목 생성
-                    if subject:
-                        title = f"{matched_keyword}: {subject[:60]}"
-                    else:
-                        title = f"{matched_keyword}: {content[:60]}"
-                    
-                    todo = {
-                        'id': f"quick_{msg.get('msg_id', uuid.uuid4().hex)}_{i}",
-                        'title': title,
-                        'description': content[:300] if content else subject[:300],
-                        'priority': priority,
-                        'status': 'pending',
-                        'created_at': datetime.now().isoformat(),
-                        'source_message': json.dumps(msg, ensure_ascii=False) if isinstance(msg, dict) else str(msg),
-                        'requester': sender,
-                        'type': msg.get('type', 'message'),
-                        'quick_analysis': True
-                    }
-                    todos.append(todo)
-            
-            # TODO 패널 업데이트
-            if todos and hasattr(self, 'todo_panel'):
-                self.todo_panel.populate_from_items(todos)
-                logger.info(f"✅ 빠른 분석 완료: {len(todos)}개 TODO 생성")
-                
-                # 캐시에 TODO 업데이트
-                self._update_cache_with_analysis_results(todos, [])
-            else:
-                logger.info(f"ℹ️ 분석 완료: 생성된 TODO 없음 (분석한 메시지: {analysis_count}개)")
-            
-        except Exception as e:
-            logger.error(f"빠른 분석 오류: {e}", exc_info=True)
-    
+        self.analysis_controller._quick_analysis(messages)
+
     def _invalidate_all_cache(self) -> None:
         """모든 캐시 무효화"""
-        try:
-            self._persona_cache.clear()
-            self._cache_valid_until.clear()
-            # 첫 로드 플래그는 유지 (페르소나별 첫 로드 기록 보존)
-            # self._persona_first_load.clear()  # 주석 처리
-            logger.info("🗑️ 모든 캐시 무효화됨 (첫 로드 플래그 보존)")
-            
-        except Exception as e:
-            logger.error(f"캐시 무효화 오류: {e}")
+        self.analysis_controller._invalidate_all_cache()
     
     def _force_update_project_tags(self) -> None:
         """프로젝트 태그 바 강제 업데이트"""
-        try:
-            if not hasattr(self, 'todo_panel') or not self.todo_panel:
-                return
-            
-            # TODO 패널에서 현재 TODO 목록 가져오기
-            cur = self.todo_panel.conn.cursor()
-            cur.execute("""
-                SELECT id, title, description, priority, deadline, deadline_ts, 
-                       requester, type, status, source_message, created_at, 
-                       updated_at, snooze_until, is_top3, draft_subject, 
-                       draft_body, evidence, deadline_confidence, 
-                       recipient_type, source_type, project
-                FROM todos 
-                ORDER BY 
-                    CASE priority 
-                        WHEN 'high' THEN 1 
-                        WHEN 'medium' THEN 2 
-                        ELSE 3 
-                    END,
-                    created_at DESC
-            """)
-            
-            rows = cur.fetchall()
-            todos = []
-            for row in rows:
-                todo = dict(row)
-                todos.append(todo)
-            
-            # 프로젝트 태그 업데이트 호출
-            if todos:
-                self.todo_panel.update_project_tags(todos)
-                logger.info(f"🏷️ 프로젝트 태그 강제 업데이트 완료: {len(todos)}개 TODO")
-            
-        except Exception as e:
-            logger.error(f"프로젝트 태그 강제 업데이트 오류: {e}")
+        self.analysis_controller._force_update_project_tags()
     
     def _clear_todos_for_persona_change(self) -> None:
         """페르소나 변경 시 TODO 데이터베이스 초기화"""
-        try:
-            if hasattr(self, 'todo_panel') and self.todo_panel:
-                # TODO 데이터베이스 초기화
-                cur = self.todo_panel.conn.cursor()
-                cur.execute("DELETE FROM todos")
-                self.todo_panel.conn.commit()
-                
-                # TODO 패널 UI 초기화
-                self.todo_panel.todo_list.clear()
-                
-                logger.info("🗑️ 페르소나 변경으로 TODO 데이터베이스 초기화 완료")
-            
-        except Exception as e:
-            logger.error(f"TODO 초기화 오류: {e}")
+        self.analysis_controller._clear_todos_for_persona_change()
     
     def _restore_todos_from_cache(self, cached_todos: List[Dict]) -> None:
         """캐시된 TODO를 데이터베이스와 UI에 복원"""
-        try:
-            if not hasattr(self, 'todo_panel') or not self.todo_panel:
-                return
-            
-            if not cached_todos:
-                logger.info("ℹ️ 복원할 캐시된 TODO가 없음")
-                return
-            
-            logger.info(f"🔄 TODO 복원 시작: {len(cached_todos)}개")
-            
-            # 1. TODO 데이터베이스에 저장
-            from src.ui.main_window import _save_todos_to_db
-            _save_todos_to_db(cached_todos, self.todo_panel.db_path)
-            logger.info(f"💾 TODO DB 저장 완료: {len(cached_todos)}개")
-            
-            # 2. UI에 표시 (populate_from_items 사용)
-            self.todo_panel.populate_from_items(cached_todos)
-            logger.info(f"🖥️ TODO UI 표시 완료: {len(cached_todos)}개")
-            
-            # 3. 프로젝트 태그 강제 업데이트
-            self._force_update_project_tags()
-            
-            logger.info(f"✅ 캐시된 TODO 복원 완료: {len(cached_todos)}개")
-            
-        except Exception as e:
-            logger.error(f"❌ 캐시된 TODO 복원 오류: {e}", exc_info=True)
+        self.analysis_controller._restore_todos_from_cache(cached_todos)
     
     def _show_visual_notification(self):
         """시각적 알림 효과 표시
         
         중앙 위젯에 플래시 효과를 표시합니다.
         """
-        try:
-            # 중앙 위젯에 플래시 알림 표시
-            central_widget = self.centralWidget()
-            if central_widget:
-                self.notification_manager.register_widget(
-                    central_widget,
-                    "flash"
-                )
-                self.notification_manager.show_notification(
-                    central_widget,
-                    interval_ms=250
-                )
-        except Exception as e:
-            logger.error(f"시각적 알림 표시 오류: {e}")
-    
+        self.analysis_controller._show_visual_notification()
+
     def _show_progress_bar(self, message: str = "처리 중..."):
         """프로그레스 바 표시 (UI 반응성 개선)
         
@@ -2911,63 +1854,7 @@ class SmartAssistantGUI(QMainWindow):
         Example:
             >>> self._show_progress_bar("데이터 수집 중...")
         """
-        try:
-            from PyQt6.QtWidgets import QProgressBar
-            from PyQt6.QtCore import Qt
-            
-            # 이미 표시 중이면 무시
-            if self._progress_bar and self._progress_bar.isVisible():
-                return
-            
-            # 프로그레스 바 생성
-            if not self._progress_bar:
-                self._progress_bar = QProgressBar()
-                self._progress_bar.setRange(0, 100)
-                self._progress_bar.setTextVisible(True)
-                self._progress_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                self._progress_bar.setStyleSheet("""
-                    QProgressBar {
-                        border: 2px solid #3498db;
-                        border-radius: 5px;
-                        text-align: center;
-                        background-color: #ecf0f1;
-                        height: 25px;
-                    }
-                    QProgressBar::chunk {
-                        background-color: #3498db;
-                        border-radius: 3px;
-                    }
-                """)
-            
-            # 레이블 생성
-            if not self._progress_label:
-                self._progress_label = QLabel()
-                self._progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                self._progress_label.setStyleSheet("""
-                    QLabel {
-                        color: #2c3e50;
-                        font-weight: bold;
-                        padding: 5px;
-                    }
-                """)
-            
-            # 메시지 설정
-            self._progress_label.setText(message)
-            
-            # 상태바에 추가
-            self.statusBar().addWidget(self._progress_label, 1)
-            self.statusBar().addWidget(self._progress_bar, 2)
-            
-            # 초기값 설정
-            self._progress_bar.setValue(0)
-            
-            # 화면 갱신
-            QApplication.processEvents()
-            
-            logger.debug(f"프로그레스 바 표시: {message}")
-            
-        except Exception as e:
-            logger.error(f"프로그레스 바 표시 오류: {e}")
+        self.analysis_controller._show_progress_bar(message)
     
     def _update_progress_bar(self, value: int):
         """프로그레스 바 업데이트
@@ -2978,13 +1865,7 @@ class SmartAssistantGUI(QMainWindow):
         Example:
             >>> self._update_progress_bar(50)
         """
-        try:
-            if self._progress_bar and self._progress_bar.isVisible():
-                self._progress_bar.setValue(value)
-                QApplication.processEvents()
-                logger.debug(f"프로그레스 바 업데이트: {value}%")
-        except Exception as e:
-            logger.error(f"프로그레스 바 업데이트 오류: {e}")
+        self.analysis_controller._update_progress_bar(value)
     
     def _hide_progress_bar(self):
         """프로그레스 바 숨기기
@@ -2992,38 +1873,14 @@ class SmartAssistantGUI(QMainWindow):
         Example:
             >>> self._hide_progress_bar()
         """
-        try:
-            if self._progress_bar:
-                self.statusBar().removeWidget(self._progress_bar)
-                self._progress_bar.hide()
-            
-            if self._progress_label:
-                self.statusBar().removeWidget(self._progress_label)
-                self._progress_label.hide()
-            
-            logger.debug("프로그레스 바 숨김")
-            
-        except Exception as e:
-            logger.error(f"프로그레스 바 숨기기 오류: {e}")
+        self.analysis_controller._hide_progress_bar()
     
     def _update_timeline_with_badges(self):
         """타임라인 업데이트 (NEW 배지 포함)
         
         타임라인 목록을 업데이트하고 새 메시지에 NEW 배지를 표시합니다.
         """
-        try:
-            if not hasattr(self, 'timeline_list'):
-                return
-            
-            # 기존 타임라인 업데이트
-            self.update_timeline(self.collected_messages)
-            
-            # NEW 배지는 3초 후 자동으로 사라지므로
-            # 새 메시지 ID는 3초 후 제거
-            QTimer.singleShot(3000, self._clear_new_message_ids)
-            
-        except Exception as e:
-            logger.error(f"타임라인 업데이트 오류: {e}")
+        self.analysis_controller._update_timeline_with_badges()
     
 
     def on_polling_error(self, error_msg: str):
@@ -3590,7 +2447,7 @@ class SmartAssistantGUI(QMainWindow):
             self.worker_thread.progress_updated.connect(self.progress_bar.setValue)
             self.worker_thread.status_updated.connect(self.status_message.setText)
             self.worker_thread.result_ready.connect(self._handle_reanalysis_result)
-            self.worker_thread.error_occurred.connect(self.handle_error)
+            self.worker_thread.error_occurred.connect(self.data_controller.handle_error)
             
             # UI 상태 업데이트
             self.progress_bar.setVisible(True)
