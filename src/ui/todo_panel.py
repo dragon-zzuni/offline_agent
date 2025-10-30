@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QComboBox, QFormLayout, QDoubleSpinBox, QCheckBox
 )
 from PyQt6.QtCore import QTimer, pyqtSignal, Qt
+from PyQt6 import sip
 
 from config.settings import LLM_CONFIG, CONFIG_STORE_PATH
 
@@ -148,6 +149,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         draft_subject TEXT,
         draft_body TEXT,
         evidence TEXT,
+        project TEXT,
         deadline_confidence TEXT,
         recipient_type TEXT DEFAULT 'to',
         source_type TEXT DEFAULT '메시지'
@@ -421,6 +423,25 @@ class BasicTodoItem(QWidget):
         status.setStyleSheet("background:#E0E7FF; color:#3730A3; padding:2px 8px; border-radius:999px; font-weight:600;")
         top.addWidget(status, 0)
         
+        # 프로젝트 태그 추가
+        project_code = todo.get("project")
+        logger.debug(f"[프로젝트 태그] TODO {todo.get('id', 'unknown')}: project_code={project_code}")
+        if project_code:
+            try:
+                from src.ui.widgets.project_tag_widget import create_project_tag_label
+                project_tag = create_project_tag_label(project_code)
+                if project_tag:
+                    top.addWidget(project_tag, 0)
+                    logger.debug(f"[프로젝트 태그] ✅ {project_code} 태그 추가 완료")
+                else:
+                    logger.warning(f"[프로젝트 태그] ❌ {project_code} 태그 생성 실패")
+            except ImportError as e:
+                logger.warning(f"프로젝트 태그 위젯 로드 실패: {e}")
+            except Exception as e:
+                logger.error(f"프로젝트 태그 생성 오류: {e}")
+        else:
+            logger.debug(f"[프로젝트 태그] TODO {todo.get('id', 'unknown')}: 프로젝트 없음")
+        
         # 수신 타입 배지 추가 (상단에는 중요한 정보만)
         recipient_badge = _create_recipient_type_badge(todo.get("recipient_type"))
         if recipient_badge:
@@ -550,22 +571,43 @@ class BasicTodoItem(QWidget):
         return first_sentence
 
     def set_unread(self, unread: bool) -> None:
+        """읽음/안읽음 상태 설정
+        
+        Args:
+            unread: True면 안읽음, False면 읽음
+        """
+        # 위젯이 이미 삭제되었는지 확인
+        try:
+            if not self.new_badge or not self.new_badge.isVisible() and not unread:
+                return
+        except RuntimeError:
+            # 위젯이 이미 삭제됨
+            return
+        
         self._unread = unread
         if unread:
-            self.new_badge.show()
-            self.setStyleSheet(self._unread_style)
+            try:
+                self.new_badge.show()
+                self.setStyleSheet(self._unread_style)
+            except RuntimeError:
+                # 위젯이 삭제됨
+                return
             
             # 10초 후 자동으로 읽음 처리 (알람 효과 자동 해제)
             if not hasattr(self, '_auto_read_timer'):
                 from PyQt6.QtCore import QTimer
-                self._auto_read_timer = QTimer()
+                self._auto_read_timer = QTimer(self)  # parent 설정으로 자동 정리
                 self._auto_read_timer.setSingleShot(True)
-                self._auto_read_timer.timeout.connect(lambda: self.set_unread(False))
+                self._auto_read_timer.timeout.connect(self._safe_set_read)
             
             self._auto_read_timer.start(10000)  # 10초
         else:
-            self.new_badge.hide()
-            self.setStyleSheet(self._read_style)
+            try:
+                self.new_badge.hide()
+                self.setStyleSheet(self._read_style)
+            except RuntimeError:
+                # 위젯이 삭제됨
+                return
             
             # 타이머 정리
             if hasattr(self, '_auto_read_timer'):
@@ -576,6 +618,15 @@ class BasicTodoItem(QWidget):
                     self.todo["_viewed"] = True
             except Exception:
                 pass
+    
+    def _safe_set_read(self) -> None:
+        """안전하게 읽음 상태로 변경 (타이머 콜백용)"""
+        try:
+            if self.new_badge and not sip.isdeleted(self):
+                self.set_unread(False)
+        except (RuntimeError, AttributeError):
+            # 위젯이 이미 삭제됨
+            pass
 
     def _emit_mark_done(self) -> None:
         self.mark_done_clicked.emit(self.todo)
@@ -612,6 +663,27 @@ class TodoPanel(QWidget):
         self._viewed_ids: set[str] = set()
         self._item_widgets: Dict[str, Tuple[QListWidgetItem | None, BasicTodoItem | None]] = {}
         self._top3_updated_cb: Optional[Callable[[List[dict]], None]] = top3_callback
+        
+        # 프로젝트 태그 관련 초기화
+        self._current_project_filter: Optional[str] = None
+        try:
+            from src.ui.widgets.project_tag_widget import get_project_service
+            from src.services.todo_migration_service import TodoMigrationService
+            
+            # 프로젝트 서비스 초기화
+            self.project_service = get_project_service()
+            logger.info(f"[프로젝트 태그] 프로젝트 서비스 초기화 완료: {type(self.project_service)}")
+            
+            # 데이터베이스 마이그레이션 실행 (project 컬럼 추가)
+            migration_service = TodoMigrationService(db_path)
+            migration_service.migrate_database()
+            
+        except Exception as e:
+            logger.error(f"프로젝트 태그 서비스 로드 실패: {e}")
+            # 기본 프로젝트 서비스 생성
+            from src.services.project_tag_service import ProjectTagService
+            self.project_service = ProjectTagService()
+            logger.info("[프로젝트 태그] 기본 프로젝트 서비스 생성 완료")
 
         self.setup_ui()
         # refresh_todo_list() 호출 제거 - 초기화 상태 유지
@@ -667,7 +739,55 @@ class TodoPanel(QWidget):
         top_header.addWidget(self.top3_rule_btn)
         top_header.addWidget(self.top3_nl_btn)
         top_header.addStretch(1)
+        
+        # 캐시 상태 표시 위젯 추가
+        self.cache_status_badge = QLabel()
+        self.cache_status_badge.setStyleSheet("""
+            QLabel {
+                color: #059669;
+                background: #D1FAE5;
+                padding: 4px 10px;
+                border-radius: 12px;
+                font-weight: 600;
+                font-size: 11px;
+            }
+        """)
+        self.cache_status_badge.setVisible(False)
+        top_header.addWidget(self.cache_status_badge)
+        
+        # 수동 새로고침 버튼 추가
+        self.refresh_btn = QPushButton("🔄 새로고침")
+        self.refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: #3B82F6;
+                color: white;
+                padding: 6px 12px;
+                border-radius: 6px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #2563EB;
+            }
+            QPushButton:pressed {
+                background: #1D4ED8;
+            }
+        """)
+        self.refresh_btn.setToolTip("현재 페르소나의 캐시를 무효화하고 재분석합니다")
+        self.refresh_btn.clicked.connect(self._on_manual_refresh)
+        top_header.addWidget(self.refresh_btn)
 
+
+        # 프로젝트 필터 바 추가
+        if self.project_service:
+            try:
+                from src.ui.widgets.project_tag_widget import ProjectTagBar
+                self.project_tag_bar = ProjectTagBar()
+                self.project_tag_bar.tag_clicked.connect(self._on_project_filter_changed)
+            except ImportError as e:
+                logger.warning(f"프로젝트 태그 바 로드 실패: {e}")
+                self.project_tag_bar = None
+        else:
+            self.project_tag_bar = None
 
         filter_row = QHBoxLayout()
         self.search_input = QLineEdit()
@@ -686,6 +806,9 @@ class TodoPanel(QWidget):
         self.todo_list.itemClicked.connect(self._on_item_clicked)
 
         root.addLayout(top_header)
+        # 프로젝트 태그 바 추가
+        if self.project_tag_bar:
+            root.addWidget(self.project_tag_bar)
         root.addLayout(filter_row)
         root.addSpacing(6)
         root.addWidget(self.todo_label)
@@ -745,10 +868,12 @@ class TodoPanel(QWidget):
         self.refresh_todo_list()
 
     def populate_from_items(self, items: List[dict]) -> None:
+        logger.info(f"[TodoPanel] populate_from_items 호출: {len(items or [])}개 항목")
         items = items or []
         now_iso = datetime.now().isoformat()
 
         if not items:
+            logger.info("[TodoPanel] 항목이 없어 빈 목록으로 재구성")
             self._rebuild_from_rows([])
             return
 
@@ -793,6 +918,9 @@ class TodoPanel(QWidget):
 
             todo["status"] = (todo.get("status") or "pending").lower()
             new_rows.append(todo)
+
+        # 프로젝트 태그 업데이트 (DB 저장 전에 먼저 수행)
+        self.update_project_tags(new_rows)
 
         # DB에 저장 (중요!)
         logger.info(f"[TodoPanel] {len(new_rows)}개 TODO를 DB에 저장")
@@ -886,7 +1014,12 @@ class TodoPanel(QWidget):
     def refresh_todo_list(self) -> None:
         logger.info(f"[TodoPanel] refresh_todo_list 시작")
         cur = self.conn.cursor()
+        
+        # 페르소나별 필터링 비활성화 (모든 TODO 표시)
+        # TODO: 나중에 페르소나별 필터링 로직 개선 필요
         cur.execute("SELECT * FROM todos WHERE status!='done' ORDER BY created_at DESC")
+        logger.info(f"[TodoPanel] 전체 TODO 로드")
+            
         rows = [dict(r) for r in cur.fetchall()]
         logger.info(f"[TodoPanel] DB에서 {len(rows)}개 TODO 로드")
 
@@ -919,7 +1052,29 @@ class TodoPanel(QWidget):
             upd.executemany("UPDATE todos SET is_top3=? WHERE id=?", updates)
             self.conn.commit()
 
+        # 프로젝트 태그 업데이트 (UI 렌더링 전에 먼저 수행)
+        self.update_project_tags(rows)
+        
         self._rebuild_from_rows(rows)
+    
+    def _get_current_persona_email(self) -> Optional[str]:
+        """현재 선택된 페르소나의 이메일 주소 가져오기"""
+        try:
+            # 부모 윈도우에서 선택된 페르소나 정보 가져오기
+            parent_window = self.parent()
+            while parent_window and not hasattr(parent_window, 'selected_persona'):
+                parent_window = parent_window.parent()
+            
+            if parent_window and hasattr(parent_window, 'selected_persona') and parent_window.selected_persona:
+                email = parent_window.selected_persona.email_address
+                logger.debug(f"[TodoPanel] 현재 페르소나 이메일: {email}")
+                return email
+            else:
+                logger.debug("[TodoPanel] 페르소나 정보를 찾을 수 없음")
+                return None
+        except Exception as e:
+            logger.error(f"[TodoPanel] 페르소나 이메일 가져오기 오류: {e}")
+            return None
 
     def set_top3_callback(self, callback: Optional[Callable[[List[dict]], None]]) -> None:
         self._top3_updated_cb = callback
@@ -1077,13 +1232,22 @@ class TodoPanel(QWidget):
             self.todo_label.setVisible(True)
 
     def _match_filters(self, todo: dict) -> bool:
-        search = self.search_input.text().strip().lower()
+        # 프로젝트 필터 확인
+        if self._current_project_filter:
+            todo_project = todo.get("project", "")
+            if todo_project != self._current_project_filter:
+                return False
+        
+        # 우선순위 필터 확인
         priority = self.priority_filter.currentData()
         if priority is None:
             priority = "all"
         todo_priority = (todo.get("priority") or "low").lower()
         if priority != "all" and todo_priority != priority:
             return False
+        
+        # 검색어 필터 확인
+        search = self.search_input.text().strip().lower()
         if not search:
             return True
         haystack = " ".join([
@@ -1091,6 +1255,7 @@ class TodoPanel(QWidget):
             todo.get("description", ""),
             todo.get("requester", ""),
             todo.get("type", ""),
+            todo.get("project", ""),  # 프로젝트도 검색 대상에 포함
         ]).lower()
         return search in haystack
 
@@ -1268,6 +1433,299 @@ class TodoPanel(QWidget):
 
         if db_updated:
             self.refresh_todo_list()
+    
+    def _on_project_filter_changed(self, project_code: str) -> None:
+        """프로젝트 필터 변경 이벤트 핸들러"""
+        filter_code = project_code if project_code else None
+        self.filter_by_project(filter_code)
+    
+    def filter_by_project(self, project_code: Optional[str]) -> None:
+        """프로젝트별 TODO 필터링"""
+        try:
+            self._current_project_filter = project_code
+            logger.info(f"프로젝트 필터 적용: {project_code or '전체'}")
+            self._re_render()
+        except Exception as e:
+            logger.error(f"프로젝트 필터링 오류: {e}")
+    
+    def update_project_tags(self, todos: List[dict]) -> None:
+        """TODO 목록의 프로젝트 태그 업데이트"""
+        try:
+            logger.info(f"[프로젝트 태그] update_project_tags 호출됨: {len(todos)}개 TODO")
+            if not self.project_service:
+                logger.warning("[프로젝트 태그] 프로젝트 서비스가 없습니다")
+                return
+            
+            logger.info(f"[프로젝트 태그] 프로젝트 서비스 확인 완료")
+            
+            logger.info(f"[프로젝트 태그] {len(todos)}개 TODO 프로젝트 태그 업데이트 시작")
+            
+            # 사용 가능한 프로젝트 목록
+            # VDOS 프로젝트만 사용 (프로젝트 서비스에서 가져오기)
+            available_projects = list(self.project_service.project_tags.keys()) if self.project_service else ['CARE', 'HA', 'WD', 'BRIDGE', 'LINK']
+            
+            updated_count = 0
+            cur = self.conn.cursor()
+            
+            for i, todo in enumerate(todos):
+                todo_id = todo.get("id")
+                
+                # 1. 데이터베이스에서 기존 프로젝트 확인 (최우선)
+                cur.execute("SELECT project FROM todos WHERE id = ?", (todo_id,))
+                db_result = cur.fetchone()
+                db_project = db_result[0] if db_result and db_result[0] else None
+                
+                # 2. 기존 프로젝트가 있으면 메모리에 복원하고 건너뛰기 (절대 변경 안함)
+                if db_project:
+                    todo["project"] = db_project
+                    logger.debug(f"[프로젝트 태그] TODO {todo_id}: DB 프로젝트 {db_project} 보존")
+                    continue
+                
+                # 3. 메모리에 프로젝트가 있으면 DB에 저장
+                current_project = todo.get("project")
+                if current_project:
+                    cur.execute("UPDATE todos SET project = ? WHERE id = ?", (current_project, todo_id))
+                    updated_count += 1
+                    logger.debug(f"[프로젝트 태그] TODO {todo_id}: 메모리 프로젝트 {current_project} DB에 저장")
+                    continue
+                
+                # 3. 프로젝트가 없는 경우 새로 할당
+                project = None
+                
+                # source_message에서 프로젝트 추출 시도 (우선순위 높음)
+                source_message = todo.get("source_message", "")
+                if source_message:
+                    try:
+                        import json
+                        message_data = json.loads(source_message) if source_message.startswith('{') else {"content": source_message, "subject": todo.get("title", "")}
+                        
+                        # 제목과 내용을 모두 포함해서 분석
+                        enhanced_message = {
+                            'content': f"{todo.get('title', '')} {message_data.get('content', '')} {message_data.get('subject', '')}",
+                            'subject': message_data.get('subject', todo.get('title', '')),
+                            'sender': message_data.get('sender', '')
+                        }
+                        
+                        project = self.project_service.extract_project_from_message(enhanced_message)
+                        if project:
+                            logger.info(f"[프로젝트 태그] TODO {todo_id}: LLM 분석 결과 {project} 할당")
+                        else:
+                            logger.debug(f"[프로젝트 태그] TODO {todo_id}: LLM 분석 결과 없음")
+                    except Exception as e:
+                        logger.debug(f"프로젝트 추출 실패: {e}")
+                
+                # LLM 실패 시 명시적 패턴 매칭 시도
+                if not project:
+                    # 제목과 설명에서 직접 패턴 매칭
+                    title = todo.get("title", "")
+                    description = todo.get("description", "")
+                    text_to_check = f"{title} {description}".lower()
+                    
+                    if "care connect" in text_to_check:
+                        project = "CARE"
+                        logger.info(f"[프로젝트 태그] TODO {todo_id}: 패턴 매칭으로 {project} 할당")
+                    elif "healthcore" in text_to_check or "health core" in text_to_check:
+                        project = "HA"
+                        logger.info(f"[프로젝트 태그] TODO {todo_id}: 패턴 매칭으로 {project} 할당")
+                    elif "carebridge" in text_to_check or "care bridge" in text_to_check:
+                        project = "BRIDGE"
+                        logger.info(f"[프로젝트 태그] TODO {todo_id}: 패턴 매칭으로 {project} 할당")
+                    elif "welllink" in text_to_check and ("브랜드" in text_to_check or "런칭" in text_to_check):
+                        project = "LINK"
+                        logger.info(f"[프로젝트 태그] TODO {todo_id}: 패턴 매칭으로 {project} 할당")
+                    elif "insight dashboard" in text_to_check or "kpi 대시보드" in text_to_check:
+                        project = "WD"
+                        logger.info(f"[프로젝트 태그] TODO {todo_id}: 패턴 매칭으로 {project} 할당")
+                
+                # 마지막 수단: 순환 할당
+                if not project:
+                    project = available_projects[i % len(available_projects)]
+                    logger.warning(f"[프로젝트 태그] TODO {todo_id}: 최후 수단 순환 할당 {project}")
+                
+                # 프로젝트 할당 및 DB 저장
+                if project:
+                    todo["project"] = project
+                    cur.execute("UPDATE todos SET project = ? WHERE id = ?", (project, todo_id))
+                    updated_count += 1
+                    logger.debug(f"[프로젝트 태그] TODO {todo_id}: {project} 할당")
+            
+            # 항상 커밋하고 프로젝트 태그 바 업데이트
+            self.conn.commit()
+            
+            if updated_count > 0:
+                logger.info(f"✅ {updated_count}개 TODO에 프로젝트 태그 추가")
+            
+            # 프로젝트 태그 바 업데이트 (항상 실행)
+            self._update_project_tag_bar_from_todos(todos)
+            
+            if updated_count == 0:
+                logger.info("[프로젝트 태그] 업데이트할 TODO가 없습니다")
+                    
+        except Exception as e:
+            logger.error(f"프로젝트 태그 업데이트 오류: {e}")
+    
+    def _update_project_tag_bar_from_todos(self, todos: List[dict]) -> None:
+        """TODO 목록에서 프로젝트 태그 바 업데이트"""
+        try:
+            # 현재 TODO들에서 실제 사용 중인 프로젝트 추출
+            active_projects = set()
+            for todo in todos:
+                project = todo.get("project")
+                if project:
+                    active_projects.add(project)
+            
+            self._update_project_tag_bar_with_projects(active_projects)
+            
+        except Exception as e:
+            logger.error(f"프로젝트 태그 바 업데이트 오류: {e}")
+    
+    def _update_project_tag_bar_with_projects(self, active_projects: set) -> None:
+        """프로젝트 세트로 프로젝트 태그 바 업데이트"""
+        try:
+            # 프로젝트 태그 바 업데이트
+            if hasattr(self, 'project_tag_bar') and self.project_tag_bar:
+                self.project_tag_bar.update_active_projects(active_projects)
+                logger.info(f"[프로젝트 태그] 활성 프로젝트 업데이트: {active_projects}")
+            elif hasattr(self.parent(), 'project_tag_bar') and self.parent().project_tag_bar:
+                self.parent().project_tag_bar.update_active_projects(active_projects)
+                logger.info(f"[프로젝트 태그] 부모 활성 프로젝트 업데이트: {active_projects}")
+            else:
+                # MainWindow에서 프로젝트 태그 바 찾기
+                main_window = self._find_main_window()
+                if main_window and hasattr(main_window, 'project_tag_bar') and main_window.project_tag_bar:
+                    main_window.project_tag_bar.update_active_projects(active_projects)
+                    logger.info(f"[프로젝트 태그] 메인윈도우 활성 프로젝트 업데이트: {active_projects}")
+                else:
+                    logger.warning("[프로젝트 태그] 프로젝트 태그 바를 찾을 수 없음")
+                    
+        except Exception as e:
+            logger.error(f"프로젝트 태그 바 업데이트 오류: {e}")
+    
+    def _update_project_tag_bar_only(self, todos: List[dict]) -> None:
+        """프로젝트 서비스 없이 프로젝트 태그 바만 업데이트"""
+        try:
+            # 기존 프로젝트 코드만 추출
+            active_projects = set()
+            for todo in todos:
+                project = todo.get("project")
+                if project:
+                    active_projects.add(project)
+            
+            self._update_project_tag_bar_with_projects(active_projects)
+            logger.info(f"[프로젝트 태그] 서비스 없이 태그 바 업데이트: {active_projects}")
+            
+        except Exception as e:
+            logger.error(f"프로젝트 태그 바 전용 업데이트 오류: {e}")
+    
+    def _find_main_window(self):
+        """MainWindow 인스턴스 찾기"""
+        try:
+            parent = self.parent()
+            while parent:
+                if hasattr(parent, 'project_tag_bar'):
+                    return parent
+                parent = parent.parent()
+            return None
+        except Exception:
+            return None
+    
+    def update_cache_status(self, is_cached: bool, cache_time: Optional[datetime] = None) -> None:
+        """캐시 상태 표시 업데이트
+        
+        Args:
+            is_cached: 캐시에서 로드되었는지 여부
+            cache_time: 캐시 생성 시간 (캐시된 경우)
+        """
+        try:
+            if not hasattr(self, 'cache_status_badge'):
+                return
+            
+            if is_cached and cache_time:
+                # 캐시 생성 시간 포맷팅
+                from datetime import timezone, timedelta
+                kst = timezone(timedelta(hours=9))
+                cache_time_kst = cache_time.astimezone(kst)
+                time_str = cache_time_kst.strftime("%H:%M:%S")
+                
+                # 경과 시간 계산
+                now = datetime.now(timezone.utc)
+                elapsed = now - cache_time
+                elapsed_seconds = int(elapsed.total_seconds())
+                
+                if elapsed_seconds < 60:
+                    elapsed_str = f"{elapsed_seconds}초 전"
+                elif elapsed_seconds < 3600:
+                    elapsed_str = f"{elapsed_seconds // 60}분 전"
+                else:
+                    elapsed_str = f"{elapsed_seconds // 3600}시간 전"
+                
+                # 캐시 배지 표시
+                self.cache_status_badge.setText(f"💾 캐시됨 ({elapsed_str})")
+                self.cache_status_badge.setToolTip(f"캐시 생성 시간: {time_str}\n경과 시간: {elapsed_str}")
+                self.cache_status_badge.setStyleSheet("""
+                    QLabel {
+                        color: #059669;
+                        background: #D1FAE5;
+                        padding: 4px 10px;
+                        border-radius: 12px;
+                        font-weight: 600;
+                        font-size: 11px;
+                    }
+                """)
+                self.cache_status_badge.setVisible(True)
+                logger.info(f"[TodoPanel] 캐시 상태 표시: 캐시됨 ({elapsed_str})")
+            else:
+                # 새로 분석된 데이터
+                now = datetime.now(timezone.utc)
+                kst = timezone(timedelta(hours=9))
+                now_kst = now.astimezone(kst)
+                time_str = now_kst.strftime("%H:%M:%S")
+                
+                self.cache_status_badge.setText(f"✨ 새로 분석됨 ({time_str})")
+                self.cache_status_badge.setToolTip(f"분석 완료 시간: {time_str}")
+                self.cache_status_badge.setStyleSheet("""
+                    QLabel {
+                        color: #1D4ED8;
+                        background: #DBEAFE;
+                        padding: 4px 10px;
+                        border-radius: 12px;
+                        font-weight: 600;
+                        font-size: 11px;
+                    }
+                """)
+                self.cache_status_badge.setVisible(True)
+                logger.info(f"[TodoPanel] 캐시 상태 표시: 새로 분석됨 ({time_str})")
+        except Exception as e:
+            logger.error(f"[TodoPanel] 캐시 상태 업데이트 오류: {e}")
+    
+    def hide_cache_status(self) -> None:
+        """캐시 상태 배지 숨기기"""
+        try:
+            if hasattr(self, 'cache_status_badge'):
+                self.cache_status_badge.setVisible(False)
+        except Exception:
+            pass
+    
+    def _on_manual_refresh(self) -> None:
+        """수동 새로고침 버튼 클릭 핸들러
+        
+        현재 페르소나의 캐시를 무효화하고 재분석을 트리거합니다.
+        """
+        try:
+            logger.info("[TodoPanel] 수동 새로고침 요청")
+            
+            # MainWindow에 새로고침 요청 전달
+            main_window = self._find_main_window()
+            if main_window and hasattr(main_window, 'request_manual_refresh'):
+                main_window.request_manual_refresh()
+                logger.info("[TodoPanel] MainWindow에 새로고침 요청 전달 완료")
+            else:
+                # MainWindow를 찾을 수 없으면 직접 refresh_todo_list 호출
+                logger.warning("[TodoPanel] MainWindow를 찾을 수 없어 직접 새로고침")
+                self.refresh_todo_list()
+        except Exception as e:
+            logger.error(f"[TodoPanel] 수동 새로고침 오류: {e}")
+            QMessageBox.warning(self, "새로고침 오류", f"새로고침 중 오류가 발생했습니다:\n{str(e)}")
 
 class TodoDetailDialog(QDialog):
     """TODO 상세 다이얼로그 - 상하 분할 레이아웃"""
@@ -1356,14 +1814,12 @@ class TodoDetailDialog(QDialog):
         # 요약 표시 영역
         self.summary_text = QTextEdit()
         self.summary_text.setReadOnly(True)
-        self.summary_text.setPlaceholderText("요약이 생성되지 않았습니다. '요약 생성' 버튼을 클릭하세요.")
+        self.summary_text.setPlaceholderText("원본 메시지가 없습니다.")
         self.summary_text.setStyleSheet("background:#F9FAFB; border:1px solid #E5E7EB; border-radius:6px; padding:8px;")
         self.summary_text.setMinimumHeight(120)
         
-        # 기존 요약이 있으면 표시
-        existing_summary = self._get_existing_summary()
-        if existing_summary:
-            self.summary_text.setPlainText(existing_summary)
+        # 처음에 원본 메시지 내용 표시
+        self._display_original_content()
         
         main_layout.addWidget(self.summary_text)
         
@@ -1666,4 +2122,51 @@ class TodoDetailDialog(QDialog):
         
         logger.info(f"[TodoDetail][LLM] 생성 완료 (길이: {len(content)}자)")
         return content.strip()
+    
+    def _display_original_content(self):
+        """원본 메시지 내용을 요약 영역에 표시"""
+        try:
+            # 원본 메시지 내용 가져오기
+            src = _source_message_dict(self.todo)
+            
+            if not src:
+                self.summary_text.setPlainText("원본 메시지가 없습니다.")
+                return
+            
+            # 원본 메시지 구조화하여 표시
+            content_parts = []
+            
+            # 발신자 정보
+            sender = src.get("sender", "")
+            if sender:
+                content_parts.append(f"📧 발신자: {sender}")
+            
+            # 플랫폼 정보
+            platform = src.get("platform", "")
+            if platform:
+                content_parts.append(f"📱 플랫폼: {platform}")
+            
+            # 제목 정보
+            subject = src.get("subject", "")
+            if subject:
+                content_parts.append(f"📋 제목: {subject}")
+            
+            # 구분선
+            if content_parts:
+                content_parts.append("─" * 50)
+            
+            # 메시지 내용 (source_message의 content 또는 description 필드 사용)
+            message_content = src.get("content", "") or self.todo.get("description", "")
+            if message_content:
+                content_parts.append(f"📄 메시지 내용:\n{message_content}")
+            else:
+                content_parts.append("📄 메시지 내용: (내용 없음)")
+            
+            # 최종 텍스트 조합
+            display_text = "\n".join(content_parts)
+            self.summary_text.setPlainText(display_text)
+            
+        except Exception as e:
+            logger.error(f"원본 메시지 표시 오류: {e}")
+            self.summary_text.setPlainText(f"원본 메시지 표시 중 오류가 발생했습니다: {e}")
 

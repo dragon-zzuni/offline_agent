@@ -97,6 +97,9 @@ class VirtualOfficeDataSource(DataSource):
             logger.error("선택된 페르소나에 email_address 또는 chat_handle이 없습니다")
             return []
         
+        # 핸들을 소문자로 변환 (VDOS 데이터베이스 대소문자 불일치 해결)
+        handle = handle.lower()
+        
         logger.info(
             f"메시지 수집 시작 (증분={incremental}, 병렬={parallel}): "
             f"mailbox={mailbox}, handle={handle}"

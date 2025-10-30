@@ -115,8 +115,8 @@ class VDOSConnector:
                 
                 cursor.execute("""
                 SELECT e.id, e.sender, e.subject, e.body, e.thread_id, e.sent_at,
-                       GROUP_CONCAT(er.recipient) as recipients,
-                       GROUP_CONCAT(er.recipient_type) as recipient_types
+                       GROUP_CONCAT(er.address) as recipients,
+                       GROUP_CONCAT(er.kind) as recipient_types
                 FROM emails e
                 LEFT JOIN email_recipients er ON e.id = er.email_id
                 GROUP BY e.id

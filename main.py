@@ -22,6 +22,7 @@ from utils.datetime_utils import parse_iso_datetime, is_in_time_range, ensure_ut
 from data_sources.manager import DataSourceManager
 from data_sources.json_source import JSONDataSource
 from data_sources.virtualoffice_source import VirtualOfficeDataSource
+from services.analysis_pipeline_service import AnalysisPipelineService
 # 로컬 JSON 파일은 더 이상 사용하지 않음 (VDOS DB 사용)
 # DEFAULT_DATASET_ROOT = project_root / "data" / "multi_project_8week_ko"
 DEFAULT_DATASET_ROOT = None  # VirtualOffice 전용
@@ -209,7 +210,11 @@ async def build_overall_analysis_text(self, analysis_results: list, max_chars_to
 
 
 class SmartAssistant:
-    """스마트 어시스턴트 메인 클래스"""
+    """스마트 어시스턴트 메인 클래스
+    
+    레거시 호환성을 위해 유지되는 클래스입니다.
+    내부적으로 AnalysisPipelineService를 사용하여 분석을 수행합니다.
+    """
     
     def __init__(self, dataset_root: Optional[Path | str] = None):
         # 로컬 JSON 파일은 더 이상 사용하지 않음 (VDOS 전용)
@@ -240,12 +245,19 @@ class SmartAssistant:
         # DataSourceManager 추가 (VirtualOffice 전용)
         self.data_source_manager = DataSourceManager()
         # JSON 소스는 설정하지 않음 (VirtualOffice만 사용)
+        
+        # AnalysisPipelineService는 lazy initialization (순환 참조 방지)
+        self._pipeline_service = None
 
     def _setup_default_json_source(self) -> None:
-        """기본 JSON 데이터 소스 설정 (더 이상 사용하지 않음)"""
-        # 로컬 JSON 파일은 더 이상 사용하지 않음
-        # VirtualOffice 연동 시 set_virtualoffice_source()를 호출하여 설정
-        pass
+        """기본 JSON 데이터 소스 설정"""
+        # JSON 데이터 소스 생성
+        json_source = JSONDataSource(self.dataset_root)
+        
+        # 데이터 소스 매니저에 등록
+        self.data_source_manager.set_source(json_source, "json")
+        
+        # 페르소나 정보 설정
         self.persona_by_handle = json_source.persona_by_handle
         self.user_profile = json_source.user_profile
         
@@ -262,6 +274,18 @@ class SmartAssistant:
         """JSON 파일 데이터 소스로 전환"""
         self._setup_default_json_source()
         logger.info("✅ JSON 파일 데이터 소스로 전환 완료")
+    
+    def _ensure_pipeline_service(self):
+        """AnalysisPipelineService lazy initialization (순환 참조 방지)"""
+        if self._pipeline_service is None:
+            self._pipeline_service = AnalysisPipelineService(
+                data_source_manager=self.data_source_manager,
+                priority_ranker=self.priority_ranker,
+                summarizer=self.summarizer,
+                action_extractor=self.action_extractor,
+                user_profile=self.user_profile
+            )
+        return self._pipeline_service
     
     def set_virtualoffice_source(self, client, persona: Dict[str, Any]) -> None:
         """VirtualOffice 데이터 소스로 전환
@@ -293,6 +317,10 @@ class SmartAssistant:
         self.persona_by_email = vo_source.persona_by_email
         self.persona_by_handle = vo_source.persona_by_handle
         self.user_profile = persona_dict  # 선택된 페르소나를 user_profile로 설정
+        
+        # AnalysisPipelineService에도 user_profile 업데이트 (lazy initialization)
+        pipeline = self._ensure_pipeline_service()
+        pipeline.set_user_profile(persona_dict)
         
         logger.info(f"✅ VirtualOffice 데이터 소스로 전환 완료 (페르소나: {persona_dict.get('name', 'Unknown')})")
 
@@ -531,9 +559,20 @@ class SmartAssistant:
         return self.collected_messages
 
     async def analyze_messages(self):
+        """메시지 분석 (레거시 호환성 유지)
+        
+        내부적으로 AnalysisPipelineService를 사용하여 분석을 수행합니다.
+        기존 API를 유지하면서 서비스로 위임합니다.
+        """
         if not self.collected_messages:
             logger.warning("분석할 메시지가 없습니다.")
             return []
+
+        # 수집된 메시지 타입 분석
+        email_count = len([m for m in self.collected_messages if m.get("type") == "email" or m.get("platform") == "email"])
+        message_count = len([m for m in self.collected_messages if m.get("type") == "messenger" or m.get("platform") == "messenger"])
+        other_count = len(self.collected_messages) - email_count - message_count
+        logger.info(f"🔍 분석 대상 메시지: 이메일 {email_count}개, 메신저 {message_count}개, 기타 {other_count}개 (총 {len(self.collected_messages)}개)")
 
         logger.info("🔍 메시지 분석 시작...")
 
@@ -541,9 +580,9 @@ class SmartAssistant:
         logger.info("🎯 우선순위 분류 중...")
         self.ranked_messages = await self.priority_ranker.rank_messages(self.collected_messages)
 
-        # 성능 개선: 상위 20개만 요약 (TODO 생성에 필요한 핵심 메시지만)
-        # 참고: 전체 메시지는 수집되었으며, 우선순위가 높은 상위 20개만 상세 분석합니다
-        TOP_N = 20
+        # 성능 개선: 상위 50개만 요약 (TODO 생성에 필요한 핵심 메시지만)
+        # 참고: 전체 메시지는 수집되었으며, 우선순위가 높은 상위 50개만 상세 분석합니다
+        TOP_N = 50
         top_msgs = [m for (m, _) in self.ranked_messages][:TOP_N]
 
         # 2) 상위 N개 요약
