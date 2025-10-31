@@ -26,7 +26,8 @@ class AnalysisPipelineService:
         priority_ranker,
         summarizer,
         action_extractor,
-        user_profile: Optional[Dict[str, Any]] = None
+        user_profile: Optional[Dict[str, Any]] = None,
+        top3_service=None
     ):
         """
         Args:
@@ -35,14 +36,19 @@ class AnalysisPipelineService:
             summarizer: MessageSummarizer 인스턴스
             action_extractor: ActionExtractor 인스턴스
             user_profile: 사용자 프로필 정보 (email_address 등)
+            top3_service: Top3Service 인스턴스 (선택사항, LLM 자동 선정용)
         """
         self._data_source_manager = data_source_manager
         self._priority_ranker = priority_ranker
         self._summarizer = summarizer
         self._action_extractor = action_extractor
         self._user_profile = user_profile or {}
+        self._top3_service = top3_service
         
-        logger.info("✅ AnalysisPipelineService 초기화 완료")
+        if top3_service:
+            logger.info("✅ AnalysisPipelineService 초기화 완료 (Top3 자동 선정 활성화)")
+        else:
+            logger.info("✅ AnalysisPipelineService 초기화 완료")
     
     def set_user_profile(self, user_profile: Dict[str, Any]) -> None:
         """사용자 프로필 설정"""
@@ -148,6 +154,30 @@ class AnalysisPipelineService:
         )
         
         logger.info(f"✅ 분석 파이프라인 완료 (메시지: {len(messages)}개, TODO: {len(todo_list)}개)")
+        
+        # 10. 자연어 규칙이 있으면 자동으로 LLM Top3 선정 (선택적)
+        # Top3Service가 주입되어 있고, 자연어 규칙이 설정되어 있으면 실행
+        if hasattr(self, '_top3_service') and self._top3_service:
+            try:
+                last_instruction = self._top3_service.get_last_instruction()
+                if last_instruction and last_instruction.strip():
+                    logger.info(f"[Pipeline] 자연어 규칙 감지, LLM Top3 자동 선정 시작")
+                    logger.debug(f"[Pipeline] 규칙: {last_instruction[:100]}")
+                    
+                    # LLM으로 Top3 선정
+                    top3_ids = self._top3_service.pick_top3(todo_list)
+                    
+                    if top3_ids:
+                        logger.info(f"[Pipeline] ✅ LLM Top3 자동 선정 완료: {len(top3_ids)}개")
+                        # TODO 리스트에 is_top3 플래그 추가
+                        for todo in todo_list:
+                            todo["is_top3"] = todo.get("id") in top3_ids
+                    else:
+                        logger.warning("[Pipeline] LLM Top3 선정 결과가 비어있습니다")
+            except Exception as e:
+                logger.error(f"[Pipeline] LLM Top3 자동 선정 실패: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
         
         return {
             "todo_list": todo_list,

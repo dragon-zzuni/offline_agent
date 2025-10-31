@@ -268,6 +268,92 @@ python run_gui.py
 # VPN 사용 시 비활성화 시도
 ```
 
+### LLM 기반 Top3 선정 문제 ✨ NEW (v1.4.0)
+
+**증상**: 자연어 규칙을 입력했지만 Top3가 선정되지 않음
+
+**원인**:
+- LLM API 키 미설정 또는 잘못된 설정
+- LLM 서비스 장애 또는 네트워크 문제
+- 연속 3회 실패로 LLM 자동 비활성화
+- 규칙에 맞는 TODO가 없음
+
+**해결 방법**:
+
+```bash
+# 1. API 키 확인
+# .env 파일에서 다음 중 하나 설정 확인:
+# OPENAI_API_KEY=sk-...
+# AZURE_OPENAI_KEY=...
+# OPENROUTER_API_KEY=sk-or-...
+
+# 2. LLM 제공자 설정 확인
+# LLM_PROVIDER=openai  # 또는 azure, openrouter
+
+# 3. 로그 확인
+set LOG_LEVEL=DEBUG
+python run_gui.py
+# [Top3Service] 로그 메시지 확인
+
+# 4. LLM 수동 재활성화
+# GUI에서 "LLM 모드 활성화" 버튼 클릭 (있는 경우)
+```
+
+**로그 예시 (정상):**
+```
+[Top3Service] 🤖 LLM 모드: 자연어 규칙 기반 Top3 선정 시도
+[Top3Service] ✅ LLM 선정 성공: 3개 선정
+```
+
+**로그 예시 (오류):**
+```
+[Top3Service] ❌ LLM 선정 실패 (1/3): API key not found
+[Top3Service] 📊 폴백: 점수 기반 선정으로 전환
+```
+
+**증상**: "규칙에 맞는 TODO가 없음" 메시지 표시
+
+**원인**:
+- 입력한 규칙이 현재 TODO와 매칭되지 않음
+- 요청자 이름이 정확하지 않음
+- 프로젝트 태그가 존재하지 않음
+
+**해결 방법**:
+
+```bash
+# 1. 규칙 확인
+# 실제 TODO의 요청자 이름과 일치하는지 확인
+# 예: "유준영" vs "yujunyoung@example.com"
+
+# 2. 프로젝트 태그 확인
+# TODO에 실제로 할당된 프로젝트 태그 확인
+
+# 3. 더 넓은 규칙 사용
+# "유준영 최우선" → "유준영 또는 김세린 우선"
+# "CARE 프로젝트만" → "CARE 또는 HEAL 프로젝트 우선"
+```
+
+**증상**: LLM 응답이 너무 느림 (30초 이상)
+
+**원인**:
+- LLM 서비스 과부하
+- 네트워크 지연
+- 타임아웃 설정이 너무 김
+
+**해결 방법**:
+
+```bash
+# 1. 타임아웃 조정
+# .env 파일에 추가:
+TOP3_LLM_TIMEOUT=15  # 기본값 30초 → 15초로 단축
+
+# 2. 다른 LLM 제공자 시도
+# OpenAI → Azure OpenAI 또는 OpenRouter로 전환
+
+# 3. 점수 기반 모드 사용
+# 자연어 규칙을 제거하고 기존 점수 기반 시스템 사용
+```
+
 ---
 
 ## GUI 문제

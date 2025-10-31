@@ -61,38 +61,28 @@ class TodoMigrationService:
             logger.error(f"❌ project 컬럼 추가 실패: {e}")
     
     def _update_existing_todos_with_projects(self, cursor: sqlite3.Cursor):
-        """기존 TODO 데이터에 프로젝트 정보 추가"""
+        """기존 TODO 데이터에 프로젝트 정보 추가
+        
+        ⚠️ 이 메서드는 GUI 초기화를 블로킹하므로 비활성화됨
+        프로젝트 태그는 AsyncProjectTagService에서 백그라운드로 처리됨
+        """
         try:
-            # project가 NULL인 TODO들 조회
+            # project가 NULL인 TODO 개수만 확인
             cursor.execute("""
-                SELECT id, title, description, source_message 
+                SELECT COUNT(*) 
                 FROM todos 
                 WHERE project IS NULL OR project = ''
             """)
             
-            todos_to_update = cursor.fetchall()
-            updated_count = 0
+            count = cursor.fetchone()[0]
             
-            for todo_id, title, description, source_message in todos_to_update:
-                # 프로젝트 추출 시도
-                project_code = self._extract_project_from_todo_data(
-                    title, description, source_message
-                )
-                
-                if project_code:
-                    cursor.execute(
-                        "UPDATE todos SET project = ? WHERE id = ?",
-                        (project_code, todo_id)
-                    )
-                    updated_count += 1
-            
-            if updated_count > 0:
-                logger.info(f"✅ {updated_count}개 TODO에 프로젝트 정보 추가")
+            if count > 0:
+                logger.info(f"ℹ️ {count}개 TODO의 프로젝트 태그는 백그라운드에서 분석됩니다")
             else:
                 logger.info("ℹ️ 프로젝트 정보를 추가할 TODO가 없음")
                 
         except Exception as e:
-            logger.error(f"❌ 기존 TODO 프로젝트 정보 업데이트 실패: {e}")
+            logger.error(f"❌ 기존 TODO 프로젝트 정보 확인 실패: {e}")
     
     def _extract_project_from_todo_data(
         self, 

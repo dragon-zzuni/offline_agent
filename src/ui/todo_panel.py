@@ -1,11 +1,9 @@
 ﻿# ui/todo_panel.py
 from __future__ import annotations
 
-import os, sys, uuid, json, subprocess, re, logging, requests
+import os, sys, uuid, json, subprocess, logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Callable, Optional, Tuple
-
-from copy import deepcopy
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QListWidget, QListWidgetItem,
@@ -14,8 +12,6 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QTimer, pyqtSignal, Qt
 from PyQt6 import sip
-
-from config.settings import LLM_CONFIG, CONFIG_STORE_PATH
 
 # 분리된 헬퍼 및 위젯 import
 from .todo_helpers import (
@@ -27,20 +23,12 @@ from .todo_helpers import (
 from .widgets import End2EndCard
 from .dialogs import Top3RuleDialog, Top3NaturalRuleDialog
 
-# Top3 서비스 import
-from src.services import Top3Service, TOP3_RULE_DEFAULT
+# 서비스 import
+from src.services import Top3Service, TOP3_RULE_DEFAULT, LLMClient
 from .todo import TodoRepository
 from .todo.controller import TodoPanelController
 
 logger = logging.getLogger(__name__)
-
-# VDOS 연동 import (선택적)
-try:
-    from utils.vdos_connector import get_vdos_connector, is_vdos_available
-    VDOS_AVAILABLE = True
-except ImportError:
-    VDOS_AVAILABLE = False
-    logger.warning("[VDOS] VDOS 연동 모듈을 찾을 수 없습니다. VDOS 기능이 비활성화됩니다.")
 
 
 def _open_path_cross_platform(path: str) -> None:
@@ -156,88 +144,9 @@ def _is_unread(todo: dict) -> bool:
     # 소스 메시지의 is_read 상태 확인 (기본값: True = 읽음)
     return not src.get("is_read", True)
 
+    
 # ─────────────────────────────────────────────────────────────────────────────
-# 1) End2EndCard: Top-3 전용 카드
-# ─────────────────────────────────────────────────────────────────────────────
-class End2EndCard(QWidget):
-    send_clicked = pyqtSignal(dict)
-    hold_clicked = pyqtSignal(dict)
-    snooze_clicked = pyqtSignal(dict)
-
-    def __init__(self, todo: dict, parent=None, unread: bool = False):
-        super().__init__(parent)
-        self.todo = todo
-        root = QVBoxLayout(self)
-
-        title = QLabel(f"🔴 {todo.get('title','(제목없음)')}")
-        title.setStyleSheet("font-weight: 700;")
-        root.addWidget(title)
-
-        chips = QHBoxLayout()
-        try:
-            reasons = json.loads(todo.get("evidence", "[]"))[:3] if todo.get("evidence") else []
-        except Exception:
-            reasons = []
-        for chip in reasons:
-            lbl = QLabel(f"〔{chip}〕")
-            lbl.setStyleSheet("color:#374151; background:#F3F4F6; padding:2px 6px; border-radius:8px;")
-            chips.addWidget(lbl)
-        dl_badge = _deadline_badge(todo)
-        if dl_badge:
-            text, fg, bg = dl_badge
-            dlabel = QLabel(f"〔{text}〕")
-            dlabel.setStyleSheet(f"color:{fg}; background:{bg}; padding:2px 6px; border-radius:8px;")
-            chips.addWidget(dlabel)
-        ev_count = _evidence_count(todo)
-        if ev_count:
-            elabel = QLabel(f"〔근거:{ev_count}〕")
-            elabel.setStyleSheet("color:#0F172A; background:#E2E8F0; padding:2px 6px; border-radius:8px;")
-            chips.addWidget(elabel)
-        chips.addStretch(1)
-        root.addLayout(chips)
-
-        self.subject = QTextEdit(todo.get("draft_subject", ""))
-        self.subject.setFixedHeight(32)
-        self.body = QTextEdit(todo.get("draft_body", ""))
-        self.body.setFixedHeight(120)
-        root.addWidget(self.subject)
-        root.addWidget(self.body)
-
-        if unread:
-            title.setText("🟢 " + (todo.get('title','(제목없음)')))
-            self.setStyleSheet("""
-                QWidget { border: 1px solid #FB923C; border-radius: 10px; background: #FFF7ED; }
-                QWidget:hover { border-color: #F97316; background: #FFE7D3; }
-            """)
-        else:
-            self.setStyleSheet("""
-                QWidget { border: 1px solid #E5E7EB; border-radius: 10px; background: #FFFFFF; }
-                QWidget:hover { border-color: #60A5FA; background: #F8FAFC; }
-            """)
-
-        btns = QHBoxLayout()
-        b_send = QPushButton("보내기")
-        b_hold = QPushButton("캘린더 홀드(15분)")
-        b_snooz = QPushButton("스누즈")
-        for b in (b_send, b_hold, b_snooz):
-            b.setStyleSheet("padding:6px 10px; border-radius:6px; font-weight:600;")
-        btns.addWidget(b_send)
-        btns.addWidget(b_hold)
-        btns.addWidget(b_snooz)
-        root.addLayout(btns)
-
-        b_send.clicked.connect(lambda: self.send_clicked.emit(self._payload()))
-        b_hold.clicked.connect(lambda: self.hold_clicked.emit(self._payload()))
-        b_snooz.clicked.connect(lambda: self.snooze_clicked.emit(self._payload()))
-
-    def _payload(self) -> dict:
-        payload = dict(self.todo)
-        payload["draft_subject"] = self.subject.toPlainText().strip()
-        payload["draft_body"] = self.body.toPlainText().strip()
-        return payload
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2) Top3RuleDialog: 가중치 조정
+# 1) BasicTodoItem: 일반 TODO 항목 위젯
 # ─────────────────────────────────────────────────────────────────────────────
 
 class BasicTodoItem(QWidget):
@@ -487,7 +396,7 @@ class BasicTodoItem(QWidget):
 
     def _emit_mark_done(self) -> None:
         self.mark_done_clicked.emit(self.todo)
-# 4) TodoPanel 본체
+# 2) TodoPanel 본체
 # ─────────────────────────────────────────────────────────────────────────────
 class TodoPanel(QWidget):
     def __init__(self, db_path=None, parent=None, top3_callback: Optional[Callable[[List[dict]], None]] = None):
@@ -497,12 +406,15 @@ class TodoPanel(QWidget):
         self.db_path = str(self._repo.db_path)
         logger.info(f"[TodoPanel] DB 경로: {self.db_path}")
 
-        # Top3 서비스는 MainWindow에서 전달받음 (나중에 설정됨)
-        self.top3_service = None
+        # Top3/프로젝트 서비스는 후속 단계에서 주입
+        self.top3_service: Optional[Top3Service] = None
+
+        self.controller = TodoPanelController(repository=self._repo)
+        self.llm_client: LLMClient = LLMClient()
 
         # 애플리케이션 시작 시 오래된 TODO만 정리 (14일 이상)
         logger.info("애플리케이션 시작: 오래된 TODO 데이터 정리")
-        self._repo.cleanup_old_rows(days=14)
+        self.controller.cleanup_old_rows(days=14)
         
         # 기존 TODO 유지 (삭제하지 않음)
         # 사용자가 원하면 수동으로 "모두 삭제" 버튼 사용 가능
@@ -515,13 +427,14 @@ class TodoPanel(QWidget):
         self._item_widgets: Dict[str, Tuple[QListWidgetItem | None, BasicTodoItem | None]] = {}
         self._top3_updated_cb: Optional[Callable[[List[dict]], None]] = top3_callback
         
+        project_service: Optional[object] = None
         try:
             from src.ui.widgets.project_tag_widget import get_project_service
             from src.services.todo_migration_service import TodoMigrationService
             
             # 프로젝트 서비스 초기화
-            self.project_service = get_project_service()
-            logger.info(f"[프로젝트 태그] 프로젝트 서비스 초기화 완료: {type(self.project_service)}")
+            project_service = get_project_service()
+            logger.info(f"[프로젝트 태그] 프로젝트 서비스 초기화 완료: {type(project_service)}")
             
             # 데이터베이스 마이그레이션 실행 (project 컬럼 추가)
             migration_service = TodoMigrationService(self.db_path)
@@ -531,15 +444,19 @@ class TodoPanel(QWidget):
             logger.error(f"프로젝트 태그 서비스 로드 실패: {e}")
             # 기본 프로젝트 서비스 생성
             from src.services.project_tag_service import ProjectTagService
-            self.project_service = ProjectTagService()
-            logger.info("[프로젝트 태그] 기본 프로젝트 서비스 생성 완료")
+            
+            # 프로젝트 태그 캐시 DB 경로 설정 (todos_cache.db와 같은 경로)
+            import os
+            cache_db_path = os.path.join(os.path.dirname(self.db_path), 'project_tags_cache.db')
+            
+            project_service = ProjectTagService(cache_db_path=cache_db_path)
+            logger.info(f"[프로젝트 태그] 기본 프로젝트 서비스 생성 완료 (캐시: {cache_db_path})")
 
-        self.controller = TodoPanelController(
-            repository=self._repo,
-            top3_service=self.top3_service,
-            project_service=self.project_service,
-        )
-        self.controller.set_project_service(self.project_service)
+        self.controller.set_project_service(project_service)
+        self.controller.set_top3_service(self.top3_service)
+        
+        # 비동기 프로젝트 태그 서비스 초기화
+        self._init_async_project_tag_service(project_service)
 
         self.setup_ui()
         # refresh_todo_list() 호출 제거 - 초기화 상태 유지
@@ -549,6 +466,12 @@ class TodoPanel(QWidget):
         self.snooze_timer.setInterval(60 * 1000)
         self.snooze_timer.timeout.connect(self.on_snooze_timer)
         self.snooze_timer.start()
+
+        # 프로젝트 태그 업데이트 타이머 (10초마다)
+        self.project_update_timer = QTimer(self)
+        self.project_update_timer.setInterval(10 * 1000)
+        self.project_update_timer.timeout.connect(self.on_project_update_timer)
+        self.project_update_timer.start()
 
     def set_top3_service_instance(self, service: Optional[Top3Service]) -> None:
         self.top3_service = service
@@ -561,19 +484,19 @@ class TodoPanel(QWidget):
 
     def _cleanup_old_rows(self, days: int = 14) -> None:
         try:
-            self._repo.cleanup_old_rows(days)
+            self.controller.cleanup_old_rows(days)
         except Exception as e:
             logger.error(f"[TodoPanel] auto-cleanup error: {e}")
 
     def clear_all_todos(self) -> None:
         """모든 TODO 삭제 (UI 새로고침 포함)"""
-        self._repo.delete_all()
+        self.controller.delete_all()
         self.refresh_todo_list()
     
     def clear_all_todos_silent(self) -> None:
         """모든 TODO 삭제 (UI 새로고침 없음, 초기화용)"""
         try:
-            self._repo.delete_all()
+            self.controller.delete_all()
             logger.info("기존 TODO 데이터 삭제 완료")
         except Exception as e:
             logger.error(f"TODO 데이터 삭제 실패: {e}")
@@ -631,7 +554,8 @@ class TodoPanel(QWidget):
 
 
         # 프로젝트 필터 바 추가
-        if self.project_service:
+        project_service = self.controller.project_service
+        if project_service:
             try:
                 from src.ui.widgets.project_tag_widget import ProjectTagBar
                 self.project_tag_bar = ProjectTagBar()
@@ -717,8 +641,33 @@ class TodoPanel(QWidget):
             self.top3_nl_btn.setToolTip(summary + "\n\n자연어 규칙을 입력하여 특정 요청자/키워드에 추가 가중치를 부여합니다.")
 
     def on_snooze_timer(self) -> None:
-        self._repo.release_snoozed()
+        self.controller.release_snoozed()
         self.refresh_todo_list()
+
+    def on_project_update_timer(self) -> None:
+        """프로젝트 태그 업데이트 타이머 콜백: 새로 분석된 프로젝트 태그를 UI에 반영"""
+        try:
+            # TODO 리스트를 다시 로드해서 프로젝트 태그 업데이트
+            rows = self.controller.load_active_items()
+            if rows:
+                logger.debug(f"[프로젝트 업데이트] {len(rows)}개 TODO 프로젝트 태그 업데이트")
+                # 프로젝트 태그 바만 업데이트 (전체 새로고침 없이)
+                self._update_project_tag_bar_from_todos(rows)
+                # 각 TODO 위젯의 프로젝트 태그도 업데이트
+                for i in range(self.todo_list.count()):
+                    item = self.todo_list.item(i)
+                    widget = self.todo_list.itemWidget(item)
+                    if widget and hasattr(widget, 'todo_data'):
+                        todo_id = widget.todo_data.get('id')
+                        # DB에서 최신 프로젝트 태그 가져오기
+                        for row in rows:
+                            if row.get('id') == todo_id:
+                                widget.todo_data['project'] = row.get('project')
+                                if hasattr(widget, 'update_project_tag'):
+                                    widget.update_project_tag(row.get('project'))
+                                break
+        except Exception as e:
+            logger.error(f"프로젝트 업데이트 타이머 오류: {e}")
 
     def populate_from_items(self, items: List[dict]) -> None:
         logger.info(f"[TodoPanel] populate_from_items 호출: {len(items or [])}개 항목")
@@ -730,7 +679,13 @@ class TodoPanel(QWidget):
             return
 
         prepared = self.controller.prepare_items(items)
+        
+        # 새로운 TODO들을 비동기 프로젝트 태그 분석 큐에 추가
+        self.queue_new_todos_for_async_analysis(prepared)
+        
+        # 기존 캐시된 프로젝트 태그만 즉시 적용 (LLM 분석은 비동기로)
         self.update_project_tags(prepared)
+        
         logger.info(f"[TodoPanel] {len(prepared)}개 TODO를 DB에 저장")
         self.controller.save_items(prepared)
         self._rebuild_from_rows(prepared)
@@ -987,7 +942,7 @@ class TodoPanel(QWidget):
                 break
 
     def _show_detail_dialog(self, todo: dict) -> None:
-        dlg = TodoDetailDialog(todo, self)
+        dlg = TodoDetailDialog(todo, self, llm_client=self.llm_client)
         dlg.exec()
 
     def show_top3_dialog(self) -> None:
@@ -1073,7 +1028,7 @@ class TodoPanel(QWidget):
     def on_snooze_clicked(self, payload: Dict) -> None:
         until = datetime.now() + timedelta(hours=2)
         try:
-            self._repo.snooze_until(
+            self.controller.snooze_until(
                 payload.get("id"),
                 until.isoformat(),
                 datetime.now().isoformat(),
@@ -1087,7 +1042,7 @@ class TodoPanel(QWidget):
             return
         now_iso = datetime.now().isoformat()
         try:
-            db_updated = self._repo.mark_done(todo_id, now_iso)
+            db_updated = self.controller.mark_done(todo_id, now_iso)
         except Exception as e:
             QMessageBox.critical(self, "완료 처리 실패", str(e))
             return
@@ -1118,13 +1073,26 @@ class TodoPanel(QWidget):
         except Exception as e:
             logger.error(f"프로젝트 필터링 오류: {e}")
     
-    def update_project_tags(self, todos: List[dict]) -> None:
+    def update_project_tags(self, todos: List[dict], force_immediate: bool = False) -> None:
         """프로젝트 태그를 컨트롤러에 위임하고 UI를 갱신한다."""
         todos = todos or []
-        logger.info(f"[프로젝트 태그] update_project_tags 호출: {len(todos)}개 TODO")
+        logger.info(f"[프로젝트 태그] update_project_tags 호출: {len(todos)}개 TODO (즉시실행: {force_immediate})")
 
         if not todos:
             self._update_project_tag_bar_from_todos([])
+            return
+
+        # 프로젝트 태그가 없는 TODO들을 비동기 분석 큐에 추가
+        todos_without_project = [t for t in todos if not t.get('project')]
+        if todos_without_project:
+            logger.info(f"[프로젝트 태그] {len(todos_without_project)}개 TODO를 비동기 분석 큐에 추가")
+            self.queue_new_todos_for_async_analysis(todos_without_project)
+
+        # 백그라운드 분석이 완료되지 않았고 강제 실행이 아니면 지연
+        if not force_immediate and not self._is_background_analysis_complete():
+            logger.info(f"[프로젝트 태그] 백그라운드 분석 미완료 - 프로젝트 태그 분석 지연")
+            self._pending_project_tag_todos = todos
+            self._update_project_tag_bar_from_todos([])  # 빈 태그 바 표시
             return
 
         try:
@@ -1137,6 +1105,87 @@ class TodoPanel(QWidget):
         except Exception as exc:
             logger.error("[프로젝트 태그] 태그 바 업데이트 실패: %s", exc, exc_info=True)
     
+    def _is_background_analysis_complete(self) -> bool:
+        """백그라운드 분석 완료 여부 확인"""
+        # 메인 윈도우에서 분석 상태 확인
+        try:
+            main_window = self.parent()
+            while main_window and not hasattr(main_window, 'assistant'):
+                main_window = main_window.parent()
+            
+            if main_window and hasattr(main_window, 'assistant'):
+                # 분석이 진행 중이면 False
+                return not getattr(main_window.assistant, '_analysis_in_progress', True)
+            
+            # 메인 윈도우를 찾을 수 없으면 True (안전한 기본값)
+            return True
+            
+        except Exception as e:
+            logger.debug(f"백그라운드 분석 상태 확인 오류: {e}")
+            return True
+    
+    def trigger_delayed_project_tag_analysis(self) -> None:
+        """지연된 프로젝트 태그 분석 실행"""
+        if hasattr(self, '_pending_project_tag_todos') and self._pending_project_tag_todos:
+            logger.info(f"[프로젝트 태그] 지연된 프로젝트 태그 분석 실행: {len(self._pending_project_tag_todos)}개")
+            self.update_project_tags(self._pending_project_tag_todos, force_immediate=True)
+            self._pending_project_tag_todos = None
+    
+    def _init_async_project_tag_service(self, project_service):
+        """비동기 프로젝트 태그 서비스 초기화"""
+        try:
+            from src.services.async_project_tag_service import get_async_project_tag_service
+            
+            self.async_project_service = get_async_project_tag_service(
+                project_service, 
+                self.controller.repository
+            )
+            
+            if self.async_project_service:
+                self.async_project_service.start()
+                logger.info("🚀 비동기 프로젝트 태그 서비스 초기화 완료")
+            
+        except Exception as e:
+            logger.warning(f"비동기 프로젝트 태그 서비스 초기화 실패: {e}")
+            self.async_project_service = None
+    
+    def queue_new_todos_for_async_analysis(self, new_todos: List[dict]):
+        """새로운 TODO들을 비동기 분석 큐에 추가"""
+        if not self.async_project_service or not new_todos:
+            return
+        
+        # 프로젝트 태그가 없는 TODO만 필터링
+        todos_needing_analysis = [
+            todo for todo in new_todos 
+            if not todo.get("project") and todo.get("id")
+        ]
+        
+        if todos_needing_analysis:
+            logger.info(f"🔄 {len(todos_needing_analysis)}개 새 TODO 비동기 프로젝트 태그 분석 큐에 추가")
+            
+            def on_project_analyzed(todo_id: str, project: str):
+                """프로젝트 태그 분석 완료 콜백"""
+                logger.debug(f"[AsyncProjectTag] 분석 완료: {todo_id} → {project}")
+                # UI 업데이트는 주기적으로 일괄 처리 (성능 최적화)
+                # 개별 TODO마다 refresh하면 성능 저하 발생
+            
+            self.async_project_service.queue_multiple_todos(
+                todos_needing_analysis, 
+                on_project_analyzed
+            )
+    
+    def get_async_project_tag_stats(self) -> dict:
+        """비동기 프로젝트 태그 서비스 통계 반환"""
+        if self.async_project_service:
+            return self.async_project_service.get_stats()
+        return {"error": "서비스 없음"}
+    
+    def cleanup_async_services(self):
+        """비동기 서비스 정리"""
+        if hasattr(self, 'async_project_service') and self.async_project_service:
+            self.async_project_service.stop()
+            logger.info("🛑 비동기 프로젝트 태그 서비스 정리 완료")
+    
     def _update_project_tag_bar_from_todos(self, todos: List[dict]) -> None:
         """TODO 목록에서 프로젝트 태그 바 업데이트"""
         try:
@@ -1144,8 +1193,26 @@ class TodoPanel(QWidget):
             active_projects = set()
             for todo in todos:
                 project = todo.get("project")
-                if project:
-                    active_projects.add(project)
+                if project and project.strip():
+                    active_projects.add(project.strip())
+            
+            # DB에서도 프로젝트 태그 조회 (메모리에 없는 경우 대비)
+            try:
+                import sqlite3
+                db_path = self.repository.db_path if hasattr(self.repository, 'db_path') else None
+                if db_path:
+                    conn = sqlite3.connect(db_path)
+                    cur = conn.cursor()
+                    cur.execute("SELECT DISTINCT project FROM todos WHERE project IS NOT NULL AND project != ''")
+                    results = cur.fetchall()
+                    conn.close()
+                    for (project,) in results:
+                        if project and project.strip():
+                            active_projects.add(project.strip())
+                    if active_projects:
+                        logger.debug(f"[프로젝트 태그] DB에서 {len(active_projects)}개 프로젝트 조회")
+            except Exception as e:
+                logger.debug(f"DB에서 프로젝트 조회 오류: {e}")
             
             self._update_project_tag_bar_with_projects(active_projects)
             
@@ -1286,12 +1353,16 @@ class TodoPanel(QWidget):
             logger.error(f"[TodoPanel] 수동 새로고침 오류: {e}")
             QMessageBox.warning(self, "새로고침 오류", f"새로고침 중 오류가 발생했습니다:\n{str(e)}")
 
+# 3) TodoDetailDialog: 상세 조회 다이얼로그
+# ─────────────────────────────────────────────────────────────────────────────
+
 class TodoDetailDialog(QDialog):
     """TODO 상세 다이얼로그 - 상하 분할 레이아웃"""
     
-    def __init__(self, todo: dict, parent=None):
+    def __init__(self, todo: dict, parent=None, llm_client: Optional[LLMClient] = None):
         super().__init__(parent)
         self.todo = todo
+        self._llm_client: LLMClient = llm_client or LLMClient()
         self.setWindowTitle(todo.get("title") or "TODO 상세")
         self.setMinimumSize(600, 700)
 
@@ -1465,8 +1536,64 @@ class TodoDetailDialog(QDialog):
             return
         
         try:
-            # LLM 호출
-            summary = self._call_llm_for_summary(content)
+            # Azure OpenAI를 사용하여 요약 생성
+            from openai import AzureOpenAI
+            import os
+            
+            client = AzureOpenAI(
+                api_key=os.getenv("AZURE_OPENAI_KEY"),
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+            )
+            
+            prompt = f"""다음 TODO 항목의 내용을 분석하여 JSON 형식으로 요약해주세요.
+
+제목: {self.todo.get("title", "")}
+요청자: {self.todo.get("requester", "")}
+내용:
+{content}
+
+다음 JSON 형식으로 응답해주세요:
+{{
+  "summary": "전체 요약 (1-2문장)",
+  "key_points": ["핵심 포인트 1", "핵심 포인트 2", "핵심 포인트 3"]
+}}"""
+            
+            response = client.chat.completions.create(
+                model=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
+                messages=[
+                    {"role": "system", "content": "당신은 업무 내용을 명확하고 간결하게 요약하는 전문가입니다. 반드시 JSON 형식으로만 응답하세요."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=400,
+                temperature=0.5,
+                response_format={"type": "json_object"}
+            )
+            
+            result_text = response.choices[0].message.content
+            
+            # JSON 파싱
+            try:
+                import json
+                result = json.loads(result_text)
+                summary_parts = []
+                
+                # 전체 요약
+                if result.get("summary"):
+                    summary_parts.append(result["summary"])
+                    summary_parts.append("")  # 빈 줄
+                
+                # 핵심 포인트
+                if result.get("key_points"):
+                    summary_parts.append("📌 핵심 포인트:")
+                    for point in result["key_points"]:
+                        summary_parts.append(f"  - {point}")
+                
+                summary = "\n".join(summary_parts)
+            except:
+                # JSON 파싱 실패 시 원본 텍스트 사용
+                summary = result_text
+            
             self.summary_text.setPlainText(summary)
         except Exception as e:
             logger.error(f"요약 생성 실패: {e}")
@@ -1500,8 +1627,35 @@ class TodoDetailDialog(QDialog):
             return
         
         try:
-            # LLM 호출
-            reply = self._call_llm_for_reply(content, sender)
+            # Azure OpenAI를 사용하여 회신 초안 생성
+            from openai import AzureOpenAI
+            import os
+            
+            client = AzureOpenAI(
+                api_key=os.getenv("AZURE_OPENAI_KEY"),
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+            )
+            
+            prompt = f"""다음 메시지에 대한 전문적이고 정중한 회신 초안을 작성해주세요.
+
+원본 메시지:
+발신자: {sender}
+내용: {content}
+
+회신 초안을 작성해주세요 (한국어로):"""
+            
+            response = client.chat.completions.create(
+                model=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
+                messages=[
+                    {"role": "system", "content": "당신은 전문적인 비즈니스 이메일 작성 도우미입니다."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=500,
+                temperature=0.7
+            )
+            
+            reply = response.choices[0].message.content
             self.reply_text.setPlainText(reply)
         except Exception as e:
             logger.error(f"회신 초안 생성 실패: {e}")
@@ -1509,178 +1663,6 @@ class TodoDetailDialog(QDialog):
         finally:
             self.generate_reply_btn.setEnabled(True)
             self.generate_reply_btn.setText("✉️ 회신 초안 작성")
-    
-    def _call_llm_for_summary(self, content: str) -> str:
-        """LLM을 호출하여 요약 생성
-        
-        원본 메시지를 3-5개의 불릿 포인트로 간결하게 요약합니다.
-        
-        Args:
-            content: 요약할 메시지 내용 (최대 2000자)
-            
-        Returns:
-            생성된 요약 텍스트
-            
-        Raises:
-            ValueError: LLM 설정이 완료되지 않은 경우
-            requests.RequestException: API 호출 실패 시
-        """
-        provider = (LLM_CONFIG.get("provider") or "azure").lower()
-        
-        system_prompt = "당신은 업무 메시지를 간결하게 요약하는 전문가입니다. 핵심 내용만 3-5개의 불릿 포인트로 요약하세요."
-        user_prompt = f"다음 메시지를 간결하게 요약해주세요:\n\n{content[:2000]}"
-        
-        response_text = self._call_llm(system_prompt, user_prompt, provider)
-        return response_text
-    
-    def _call_llm_for_reply(self, content: str, sender: str) -> str:
-        """LLM을 호출하여 회신 초안 생성
-        
-        원본 메시지를 분석하여 정중하고 명확한 회신 초안을 작성합니다.
-        
-        Args:
-            content: 원본 메시지 내용 (최대 2000자)
-            sender: 발신자 이름
-            
-        Returns:
-            생성된 회신 초안 텍스트
-            
-        Raises:
-            ValueError: LLM 설정이 완료되지 않은 경우
-            requests.RequestException: API 호출 실패 시
-        """
-        provider = (LLM_CONFIG.get("provider") or "azure").lower()
-        
-        system_prompt = "당신은 업무 이메일 회신을 작성하는 전문가입니다. 정중하고 명확한 회신을 작성하세요."
-        user_prompt = f"다음 메시지에 대한 회신 초안을 작성해주세요:\n\n발신자: {sender}\n\n내용:\n{content[:2000]}"
-        
-        response_text = self._call_llm(system_prompt, user_prompt, provider)
-        return response_text
-    
-    def _call_llm(self, system_prompt: str, user_prompt: str, provider: str) -> str:
-        """LLM API 호출 (공통)
-        
-        공급자별로 최적화된 파라미터를 사용하여 LLM API를 호출합니다.
-        
-        Args:
-            system_prompt: 시스템 프롬프트
-            user_prompt: 사용자 프롬프트
-            provider: LLM 공급자 ("azure", "openai", "openrouter")
-            
-        Returns:
-            LLM 응답 텍스트
-            
-        Raises:
-            ValueError: 설정이 완료되지 않았거나 지원되지 않는 공급자인 경우
-            requests.HTTPError: API 호출 실패 시
-            
-        Note:
-            Azure OpenAI는 max_completion_tokens를 사용하고 temperature는 deployment 설정을 따릅니다.
-            OpenAI와 OpenRouter는 max_tokens와 temperature를 명시적으로 설정합니다.
-        """
-        model = LLM_CONFIG.get("model") or "gpt-4"
-        headers: Dict[str, str] = {}
-        url: Optional[str] = None
-        payload_model: Optional[str] = model
-        
-        # 공급자별 API 설정
-        if provider == "azure":
-            api_key = LLM_CONFIG.get("azure_api_key") or os.getenv("AZURE_OPENAI_KEY")
-            endpoint = (LLM_CONFIG.get("azure_endpoint") or os.getenv("AZURE_OPENAI_ENDPOINT") or "").rstrip("/")
-            deployment = LLM_CONFIG.get("azure_deployment") or os.getenv("AZURE_OPENAI_DEPLOYMENT")
-            # 안정적인 API 버전 사용 (2024-08-01-preview 권장)
-            api_version = LLM_CONFIG.get("azure_api_version") or os.getenv("AZURE_OPENAI_API_VERSION") or "2024-08-01-preview"
-            
-            if not api_key or not endpoint or not deployment:
-                raise ValueError("Azure OpenAI 설정이 완료되지 않았습니다. (api_key, endpoint, deployment 필요)")
-            
-            url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
-            headers = {"api-key": api_key, "Content-Type": "application/json"}
-            payload_model = None  # Azure는 deployment에서 모델 지정
-        
-        elif provider == "openai":
-            api_key = LLM_CONFIG.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
-            if not api_key:
-                raise ValueError("OpenAI API 키가 설정되지 않았습니다.")
-            
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        
-        elif provider == "openrouter":
-            api_key = LLM_CONFIG.get("openrouter_api_key") or os.getenv("OPENROUTER_API_KEY")
-            if not api_key:
-                raise ValueError("OpenRouter API 키가 설정되지 않았습니다.")
-            
-            base_url = LLM_CONFIG.get("openrouter_base_url") or "https://openrouter.ai/api/v1"
-            url = f"{base_url}/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
-        else:
-            raise ValueError(f"지원되지 않는 LLM 공급자: {provider}")
-        
-        # 기본 페이로드 구성
-        payload: Dict[str, object] = {
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-        
-        # 공급자별 파라미터 설정
-        # Azure: max_completion_tokens 사용, temperature는 deployment 설정 사용
-        # OpenAI/OpenRouter: max_tokens, temperature 명시적 설정
-        if provider == "azure":
-            payload["max_completion_tokens"] = 500
-        else:
-            payload["temperature"] = 0.7
-            payload["max_tokens"] = 500
-        
-        # 모델 지정 (Azure는 deployment에서 지정하므로 제외)
-        if payload_model:
-            payload["model"] = payload_model
-        
-        # API 호출
-        logger.info(f"[TodoDetail][LLM] provider={provider} URL={url[:80]}... 요약/회신 생성 중...")
-        logger.debug(f"[TodoDetail][LLM] payload={json.dumps(payload, ensure_ascii=False)[:300]}")
-        
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            logger.info(f"[TodoDetail][LLM] 응답 수신 (status={response.status_code})")
-            response.raise_for_status()
-        except requests.exceptions.Timeout:
-            logger.error("[TodoDetail][LLM] 타임아웃 (60초 초과)")
-            raise ValueError("LLM 응답 시간이 초과되었습니다 (60초). 잠시 후 다시 시도해주세요.")
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"[TodoDetail][LLM] HTTP 오류: {e.response.status_code} - {e.response.text[:500]}")
-            raise ValueError(f"LLM API 오류 ({e.response.status_code}): {e.response.text[:200]}")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"[TodoDetail][LLM] API 호출 실패: {type(e).__name__} - {str(e)}")
-            raise ValueError(f"LLM API 호출 실패: {str(e)}")
-        
-        # 응답 파싱
-        try:
-            resp_json = response.json()
-            logger.debug(f"[TodoDetail][LLM] 응답 JSON: {json.dumps(resp_json, ensure_ascii=False)[:500]}")
-        except json.JSONDecodeError as e:
-            logger.error(f"[TodoDetail][LLM] JSON 파싱 실패: {e}")
-            raise ValueError(f"LLM 응답 파싱 실패: {str(e)}")
-        
-        choices = resp_json.get("choices") or []
-        if not choices:
-            logger.error("[TodoDetail][LLM] choices가 비어있음")
-            raise ValueError("LLM 응답이 비어있습니다.")
-        
-        message = choices[0].get("message") or {}
-        content = message.get("content") or ""
-        
-        if not content:
-            logger.error("[TodoDetail][LLM] content가 비어있음")
-            raise ValueError("LLM 응답 내용이 비어있습니다.")
-        
-        logger.info(f"[TodoDetail][LLM] 생성 완료 (길이: {len(content)}자)")
-        return content.strip()
     
     def _display_original_content(self):
         """원본 메시지 내용을 요약 영역에 표시"""

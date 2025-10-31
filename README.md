@@ -7,7 +7,17 @@
 
 ## 🚀 주요 기능
 
-### 최신 업데이트 (v1.3.0 - VirtualOffice 연동)
+### 최신 업데이트 (v1.4.0 - LLM 기반 Top3 RAG 선정) ✨ NEW
+- **🤖 자연어 규칙 기반 Top3 선정**: LLM을 활용한 지능형 TODO 우선순위 결정
+  - **자연어 규칙 입력**: "유준영이 요청자일 경우 우선순위 높게", "버그 관련 TODO 우선 처리" 등
+  - **다중 조건 지원**: 프로젝트 태그, 요청자, 키워드, 마감일, 시간 범위 등 복합 조건
+  - **LLM 제공자 지원**: OpenAI GPT-4o, Azure OpenAI, OpenRouter 완전 지원
+  - **스마트 폴백**: LLM 실패 시 기존 점수 기반 시스템으로 자동 전환
+  - **성능 최적화**: 캐시 시스템 (TTL 5분), 50개 이상 시 사전 필터링
+  - **실시간 연동**: 백그라운드 분석 완료 시 자동 Top3 재선정
+  - **연속 실패 보호**: 3회 연속 LLM 실패 시 자동으로 점수 기반 모드로 전환
+
+### 이전 업데이트 (v1.3.0 - VirtualOffice 연동)
 - **🌐 VirtualOffice 실시간 연동**: virtualoffice 시뮬레이션과 실시간 통합 ✨ NEW
   - REST API 기반 실시간 데이터 수집
   - 페르소나 선택 및 전환 기능
@@ -179,6 +189,7 @@ smart_assistant/
 │   ├── MESSAGE_SUMMARY_PANEL.md  # 메시지 요약 패널 가이드
 │   ├── TIME_RANGE_SELECTOR.md    # 시간 범위 선택기 가이드
 │   ├── MESSAGE_GROUPING.md # 메시지 그룹화 가이드
+│   ├── TOP3_RAG_GUIDE.md   # Top3 RAG 선정 시스템 가이드 ✨ NEW (v1.4.0)
 │   ├── VIRTUALOFFICE_TESTING.md  # VirtualOffice 연동 테스트 가이드 ✨ NEW (v1.3.0)
 │   └── DEVELOPMENT.md      # 개발 가이드
 ├── logs/                   # 실행 로그
@@ -295,7 +306,7 @@ FileNotFoundError: [Errno 2] No such file or directory: '...'
 `.env` 파일을 생성하여 다음 설정을 추가하세요:
 
 ```bash
-# LLM 설정 (택일)
+# LLM 설정 (Top3 RAG 선정용 - 택일)
 OPENAI_API_KEY=your_key
 AZURE_OPENAI_KEY=your_key
 AZURE_OPENAI_ENDPOINT=your_endpoint
@@ -303,8 +314,13 @@ AZURE_OPENAI_DEPLOYMENT=your_deployment
 AZURE_OPENAI_API_VERSION=2024-08-01-preview  # Azure API 버전 (권장)
 OPENROUTER_API_KEY=your_key
 
-# 공급자 선택
+# 공급자 선택 (자연어 규칙 기반 Top3 선정용)
 LLM_PROVIDER=azure  # openai | azure | openrouter
+
+# Top3 LLM 설정 (선택사항 - 고급 설정)
+TOP3_LLM_TIMEOUT=30        # LLM 호출 타임아웃 (초, 기본값: 30)
+TOP3_CACHE_TTL=300         # 캐시 TTL (초, 기본값: 300 = 5분)
+TOP3_MAX_CANDIDATES=50     # 사전 필터링 임계값 (기본값: 50)
 
 # 날씨 API (선택사항)
 KMA_API_KEY=your_kma_key  # 기상청 API 키
@@ -333,6 +349,64 @@ run_gui.bat
 ```
 
 ### 주요 기능 사용법
+
+#### 0. LLM 기반 Top3 자연어 규칙 ✨ NEW (v1.4.0)
+
+Smart Assistant는 자연어로 복잡한 TODO 선정 규칙을 설정할 수 있습니다.
+
+##### 환경 변수 설정
+
+```bash
+# OpenAI 사용
+set OPENAI_API_KEY=your_openai_api_key
+set LLM_PROVIDER=openai
+
+# Azure OpenAI 사용
+set AZURE_OPENAI_KEY=your_azure_key
+set AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+set AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
+set LLM_PROVIDER=azure
+
+# OpenRouter 사용
+set OPENROUTER_API_KEY=your_openrouter_key
+set LLM_PROVIDER=openrouter
+```
+
+##### 자연어 규칙 예시
+
+**프로젝트 기반 선정:**
+```
+Care Connect 프로젝트에서 유준영이 요청한 TODO를 최우선으로
+```
+
+**복합 조건:**
+```
+Care Connect 또는 WellLink 프로젝트에서 마감일이 3일 이내인 TODO 중 우선순위가 높은 것
+```
+
+**요청자 우선순위:**
+```
+임호규가 요청한 TODO는 무조건 최우선, 그 다음은 유준영 요청 순서로
+```
+
+**키워드 기반:**
+```
+버그수정이나 긴급 관련 TODO를 우선적으로, 특히 API 관련 작업
+```
+
+**프로젝트 태그 매핑:**
+- `CARE` → Care Connect (환자 연결 플랫폼)
+- `BRIDGE` → CareBridge (의료 브릿지 시스템)  
+- `LINK` → WellLink (웰니스 링크)
+- `HA` → HealthCore API (헬스코어 API)
+- `WD` → WellData (웰 데이터 분석)
+
+##### 사용 방법
+
+1. **GUI에서 규칙 설정**: TODO 패널의 "자연어 규칙" 입력창에 규칙 입력
+2. **자동 적용**: 백그라운드 분석 완료 시 자동으로 LLM Top3 선정
+3. **폴백 시스템**: LLM 실패 시 기존 점수 기반 시스템으로 자동 전환
+4. **캐시 최적화**: 동일 조건 재조회 시 캐시 사용 (5분 TTL)
 
 #### 1. 메시지 수집 및 분석
 - 좌측 패널에서 현재 데이터셋 경로와 상태를 확인합니다.
@@ -497,7 +571,65 @@ set VDOS_SIM_URL=http://127.0.0.1:8015
 - [실시간 기능 테스트 가이드](docs/REALTIME_TESTING.md)
 - [VirtualOffice 설정 관리](docs/VIRTUALOFFICE_CONFIG.md) ✨ NEW
 
-#### 8. 오프라인 정리
+#### 8. 자연어 규칙 기반 Top3 선정 ✨ NEW (v1.4.0)
+
+**기본 사용법:**
+1. 좌측 패널의 "Top3 규칙" 섹션에서 자연어로 규칙 입력
+2. 예시: "유준영이 요청자일 경우 우선순위 높게"
+3. `적용` 버튼 클릭하여 규칙 저장
+4. 백그라운드 분석 완료 시 자동으로 LLM 기반 Top3 선정
+
+**자연어 규칙 예시:**
+
+**요청자 기반 규칙:**
+```
+유준영이 요청자일 경우 우선순위 높게
+김세린 최우선
+전형우님 요청 먼저 처리
+```
+
+**프로젝트 태그 기반 규칙:**
+```
+CARE 프로젝트 관련 TODO 우선 처리
+HealthApp 프로젝트 최우선
+WC 프로젝트는 낮은 우선순위
+```
+
+**키워드 기반 규칙:**
+```
+버그 관련 TODO 긴급 처리
+미팅 관련 항목 우선
+긴급 키워드 포함 시 최우선
+```
+
+**시간 범위 규칙:**
+```
+오늘 생성된 TODO 우선
+이번주 마감 항목 먼저
+최근 3일 내 TODO 높은 우선순위
+```
+
+**복합 조건 규칙:**
+```
+유준영이 요청하고 버그 관련이면 최우선
+CARE 프로젝트이면서 오늘 생성된 TODO 우선
+김세린 요청이고 미팅 관련이면 높은 우선순위
+```
+
+**LLM 모드 vs 점수 기반 모드:**
+- **LLM 모드**: 자연어 규칙이 있고 LLM이 활성화된 경우
+  - 복잡한 조건과 문맥을 이해하여 지능적으로 선정
+  - 실패 시 자동으로 점수 기반 모드로 폴백
+- **점수 기반 모드**: 자연어 규칙이 없거나 LLM이 비활성화된 경우
+  - 우선순위, 마감일, 근거 수 등을 수치로 계산하여 선정
+  - 안정적이고 예측 가능한 결과 제공
+
+**성능 최적화:**
+- TODO가 50개 이상인 경우 규칙에 맞는 항목을 먼저 필터링
+- 캐시 시스템으로 동일한 규칙 재사용 시 즉시 응답
+- 연속 3회 LLM 실패 시 자동으로 점수 기반 모드로 전환
+
+#### 9. 오프라인 정리
 - `오프라인 정리` 버튼을 클릭하여 오프라인 기간 동안의 데이터를 정리할 수 있습니다.
 
 ### 코드에서 사용
@@ -977,6 +1109,12 @@ logging.getLogger().setLevel(logging.DEBUG)
 - 날씨 API 응답이 느린 경우 타임아웃이 발생할 수 있습니다 (환경변수로 조정 가능).
 - 대량의 메시지 처리 시 메모리 사용량이 증가할 수 있습니다.
 - 시간 범위 필터링 시 "수집할 메시지가 없습니다" 오류가 발생할 수 있습니다. → [문제 해결 가이드](TROUBLESHOOTING.md) 참조
+- **LLM 기반 Top3 선정 관련** (v1.4.0):
+  - LLM API 키 미설정 시 자동으로 점수 기반 모드로 전환됩니다.
+  - 연속 3회 LLM 실패 시 자동으로 비활성화됩니다 (수동 재활성화 가능).
+  - 복잡한 자연어 규칙의 경우 LLM 해석이 부정확할 수 있습니다.
+  - 네트워크 지연 시 LLM 응답이 30초까지 소요될 수 있습니다.
+  - → [Top3 RAG 가이드](docs/TOP3_RAG_GUIDE.md) 및 [문제 해결 가이드](TROUBLESHOOTING.md) 참조
 
 ## 📝 라이선스 & 기여
 - MIT License
@@ -1077,3 +1215,82 @@ Anaconda/Miniconda를 사용하는 경우 (가장 확실함):
 
 방법 1: 자동 감지 스크립트 (일반)
 --------------------------------------
+
+## 🤖 LLM Top3 선정 트러블슈팅 (v1.4.0)
+
+### API 키 설정 문제
+
+**증상**: "LLM 사용 불가 (API 키 확인 필요)" 메시지
+
+**해결 방법**:
+```bash
+# Windows CMD
+set OPENAI_API_KEY=sk-your-key-here
+set LLM_PROVIDER=openai
+
+# Windows PowerShell  
+$env:OPENAI_API_KEY="sk-your-key-here"
+$env:LLM_PROVIDER="openai"
+
+# Azure OpenAI 사용 시
+set AZURE_OPENAI_KEY=your-azure-key
+set AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+set AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
+set LLM_PROVIDER=azure
+```
+
+### LLM 호출 실패 문제
+
+**증상**: "LLM 3회 연속 실패, 점수 기반 모드로 전환" 메시지
+
+**원인 및 해결**:
+1. **API 키 오류**: 키 유효성 재확인
+2. **네트워크 문제**: 인터넷 연결 확인
+3. **요청 한도 초과**: API 사용량 확인
+4. **타임아웃**: 10초 이상 소요 시 자동 실패
+
+**복구 방법**: GUI에서 "규칙 초기화" 버튼 클릭하여 LLM 재활성화
+
+### 자연어 규칙 작성 가이드
+
+**효과적인 규칙 예시**:
+```
+✅ "Care Connect 프로젝트에서 유준영이 요청한 TODO를 최우선으로"
+✅ "마감일이 3일 이내인 버그수정 TODO 우선"
+✅ "임호규 요청은 무조건 최우선, 그 다음은 유준영 순서로"
+
+❌ "중요한 것"
+❌ "급한 일"
+❌ "좋은 TODO"
+```
+
+**지원하는 조건**:
+- **프로젝트**: Care Connect, WellLink, HealthCore API, CareBridge, WellData
+- **요청자**: 정확한 이름 (유준영, 김세린, 정지원, 임호규)
+- **우선순위**: 높음, 중간, 낮음
+- **마감일**: "3일 이내", "이번 주", "내일까지"
+- **키워드**: 버그수정, 신규개발, 기능개선, API, 긴급
+
+### 성능 최적화
+
+**TODO 50개 이상 시**: 자동 사전 필터링 적용
+- 우선순위와 마감일 기준으로 상위 50개 선별
+- 로그에서 "사전 필터링 적용" 메시지 확인
+
+**캐시 시스템**: 
+- 동일 조건 재조회 시 캐시 사용 (TTL 5분)
+- 캐시 통계는 GUI 하단에서 확인 가능
+
+### 로그 확인 방법
+
+**DEBUG 로깅 활성화**:
+```bash
+set LOG_LEVEL=DEBUG
+python run_gui.py
+```
+
+**주요 로그 메시지**:
+- `[LLMClient] 호출 시작`: LLM API 호출 시작
+- `[Top3LLM] 선정 완료`: LLM 선정 성공
+- `[Top3Service] LLM 선정 시도`: 자연어 규칙 적용
+- `[Pipeline] LLM Top3 자동 선정`: 백그라운드 분석 후 자동 선정

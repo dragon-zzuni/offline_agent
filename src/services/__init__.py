@@ -4,6 +4,7 @@
 """
 from .weather_service import WeatherService
 from .top3_service import Top3Service, TOP3_RULE_DEFAULT, ENTITY_RULES_DEFAULT
+from .llm_client import LLMClient
 from .persona_todo_cache_service import (
     PersonaTodoCacheService,
     CacheKey,
@@ -17,5 +18,6 @@ __all__ = [
     'ENTITY_RULES_DEFAULT',
     'PersonaTodoCacheService',
     'CacheKey',
-    'CachedAnalysisResult'
+    'CachedAnalysisResult',
+    'LLMClient'
 ]

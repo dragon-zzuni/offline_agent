@@ -2162,6 +2162,10 @@ class SmartAssistantGUI(QMainWindow):
             self.sim_monitor.stop_monitoring()
             logger.info("✅ SimulationMonitor 중지됨")
         
+        # 비동기 프로젝트 태그 서비스 정리
+        if hasattr(self, 'todo_panel') and self.todo_panel:
+            self.todo_panel.cleanup_async_services()
+        
         event.accept()
     
     def _update_connection_status(self):

@@ -24,11 +24,21 @@ class ProjectTag:
 class ProjectTagService:
     """프로젝트 태그 서비스"""
     
-    def __init__(self, vdos_connector=None):
+    def __init__(self, vdos_connector=None, cache_db_path: str = None):
         self.vdos_connector = vdos_connector
         self.project_tags = {}
         self.person_project_mapping = {}  # 사람별 프로젝트 매핑
         self.vdos_db_path = None  # VDOS 데이터베이스 경로
+        
+        # 프로젝트 태그 영구 캐시 초기화
+        if cache_db_path:
+            from services.project_tag_cache_service import ProjectTagCacheService
+            self.tag_cache = ProjectTagCacheService(cache_db_path)
+            logger.info(f"✅ 프로젝트 태그 캐시 활성화: {cache_db_path}")
+        else:
+            self.tag_cache = None
+            logger.warning("⚠️ 프로젝트 태그 캐시 비활성화")
+        
         self._load_projects_from_vdos()
     
     def _load_projects_from_vdos(self):
@@ -213,33 +223,68 @@ class ProjectTagService:
         logger.debug("_ensure_all_projects_loaded() 호출됨 (비활성화됨)")
         return 0
     
-    def extract_project_from_message(self, message: Dict) -> Optional[str]:
-        """메시지에서 프로젝트 코드 추출 (LLM 기반 지능 분류)
+    def extract_project_from_message(self, message: Dict, use_cache: bool = True) -> Optional[str]:
+        """메시지에서 프로젝트 코드 추출 (캐시 우선, LLM 기반 지능 분류)
+        
+        분석 우선순위:
+        1. 캐시 조회 (이미 분석된 TODO)
+        2. 명시적 프로젝트명 (대괄호 패턴 등)
+        3. LLM 기반 내용 분석 (메시지 내용 우선)
+        4. 발신자 정보 참고 (폴백, 여러 프로젝트 가능하므로 참고용)
         
         Args:
             message: 메시지 데이터
+            use_cache: 캐시 사용 여부
             
         Returns:
-            프로젝트 코드 (예: "CARE", "BRIDGE") 또는 None
+            프로젝트 코드 (예: "WELL", "WI", "CC") 또는 None
         """
         try:
-            # 1. 명시적 프로젝트명 확인
+            todo_id = message.get('id')
+            
+            # 0. 캐시 조회 (가장 우선)
+            if use_cache and todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
+                cached = self.tag_cache.get_cached_tag(todo_id)
+                if cached:
+                    logger.debug(f"[프로젝트 태그] 캐시 히트: {todo_id} → {cached['project_tag']}")
+                    return cached['project_tag']
+            
+            # 1. 명시적 프로젝트명 확인 (대괄호 패턴 등 명확한 경우만)
             explicit_project = self._extract_explicit_project(message)
             if explicit_project:
-                logger.info(f"[프로젝트 태그] 명시적 프로젝트 발견: {explicit_project}")
-                return explicit_project
+                # 명시적 패턴이 발견되면 LLM으로 검증
+                llm_verification = self._extract_project_by_llm(message)
+                if llm_verification and llm_verification != 'UNKNOWN':
+                    logger.info(f"[프로젝트 태그] LLM 검증 결과: {llm_verification} (명시적: {explicit_project})")
+                    result = llm_verification
+                else:
+                    logger.info(f"[프로젝트 태그] 명시적 프로젝트 사용: {explicit_project}")
+                    result = explicit_project
+                
+                # 캐시 저장
+                if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
+                    self.tag_cache.save_tag(todo_id, result, 'explicit', 'pattern_match')
+                return result
             
-            # 2. 발신자 기반 프로젝트 매핑 확인
+            # 2. LLM 기반 지능 분류 (메시지 내용 우선 분석)
+            llm_project = self._extract_project_by_llm(message)
+            if llm_project and llm_project != 'UNKNOWN':
+                logger.info(f"[프로젝트 태그] LLM 내용 분석 결과: {llm_project}")
+                
+                # 캐시 저장
+                if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
+                    self.tag_cache.save_tag(todo_id, llm_project, 'llm', 'content_analysis')
+                return llm_project
+            
+            # 3. 발신자 정보 참고 (폴백 - 여러 프로젝트 가능하므로 참고용)
             sender_project = self._extract_project_by_sender(message)
             if sender_project:
-                logger.info(f"[프로젝트 태그] 발신자 기반 프로젝트: {sender_project}")
+                logger.info(f"[프로젝트 태그] 발신자 참고 (폴백): {sender_project}")
+                
+                # 캐시 저장
+                if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
+                    self.tag_cache.save_tag(todo_id, sender_project, 'sender', 'sender_fallback')
                 return sender_project
-            
-            # 3. LLM 기반 지능 분류
-            llm_project = self._extract_project_by_llm(message)
-            if llm_project:
-                logger.info(f"[프로젝트 태그] LLM 분류 결과: {llm_project}")
-                return llm_project
             
             logger.debug("[프로젝트 태그] 프로젝트를 식별할 수 없음")
             return None
@@ -254,30 +299,83 @@ class ProjectTagService:
         subject = message.get("subject", "")
         text = f"{subject} {content}".lower()
         
+        # 매칭 결과를 점수와 함께 저장
+        matches = []
+        
         # 현재 로드된 모든 프로젝트에 대해 패턴 매칭
         for project_code, project_tag in self.project_tags.items():
-            # 프로젝트 이름의 다양한 변형 생성
             project_name_lower = project_tag.name.lower()
             
-            # 기본 패턴들
-            patterns = [
-                project_name_lower,  # 전체 이름
-                project_code.lower(),  # 코드
-                f"[{project_name_lower}]",  # 대괄호 포함
-                project_name_lower.replace(" ", ""),  # 공백 제거
+            # 패턴별 우선순위 점수 (높을수록 우선)
+            patterns_with_scores = [
+                (f"[{project_name_lower}]", 100),  # 대괄호 포함 (가장 명시적)
+                (project_name_lower, 90),  # 전체 이름
+                (project_name_lower.replace(" ", ""), 80),  # 공백 제거
             ]
             
-            # 숫자 버전 패턴 추가 (예: "Project 2.0", "Project 2")
-            if any(char.isdigit() for char in project_name_lower):
-                patterns.append(project_name_lower.split()[0])  # 첫 단어만
+            # 특별 키워드 추가 (중간 우선순위)
+            special_keywords = self._get_project_keywords(project_code, project_tag.name)
+            for keyword in special_keywords:
+                if keyword:
+                    patterns_with_scores.append((keyword, 70))
             
-            # 패턴 매칭
-            for pattern in patterns:
+            # 프로젝트 코드 (낮은 우선순위)
+            patterns_with_scores.append((project_code.lower(), 50))
+            
+            # 숫자 버전 패턴 추가 (낮은 우선순위)
+            if any(char.isdigit() for char in project_name_lower):
+                first_word = project_name_lower.split()[0]
+                patterns_with_scores.append((first_word, 40))
+            
+            # 패턴 매칭 및 점수 계산
+            for pattern, score in patterns_with_scores:
                 if pattern and pattern in text:
-                    logger.info(f"[프로젝트 태그] 명시적 패턴 매칭: '{pattern}' → {project_code}")
-                    return project_code
+                    # 패턴 길이도 고려 (더 긴 패턴이 더 구체적)
+                    final_score = score + len(pattern)
+                    matches.append((project_code, pattern, final_score))
+                    break  # 첫 번째 매칭만 사용
+        
+        # 가장 높은 점수의 매칭 반환
+        if matches:
+            matches.sort(key=lambda x: x[2], reverse=True)  # 점수 내림차순 정렬
+            best_match = matches[0]
+            project_code, pattern, score = best_match
+            logger.info(f"[프로젝트 태그] 명시적 패턴 매칭: '{pattern}' → {project_code} (점수: {score})")
+            return project_code
         
         return None
+    
+    def _get_project_keywords(self, project_code: str, project_name: str) -> List[str]:
+        """프로젝트별 동적 키워드 생성 (VDOS DB 기반)"""
+        keywords = []
+        project_name_lower = project_name.lower()
+        
+        # 프로젝트 이름에서 자동으로 키워드 추출
+        import re
+        
+        # 영어 단어들 추출
+        english_words = re.findall(r'[A-Za-z]+', project_name)
+        for word in english_words:
+            if len(word) > 2:  # 3글자 이상만
+                keywords.append(word.lower())
+        
+        # 한글 단어들 추출
+        korean_words = re.findall(r'[가-힣]+', project_name)
+        for word in korean_words:
+            if len(word) > 1:  # 2글자 이상만
+                keywords.append(word.lower())
+        
+        # 복합 키워드 생성
+        if len(english_words) >= 2:
+            # 첫 두 단어 조합
+            keywords.append(f"{english_words[0].lower()} {english_words[1].lower()}")
+            keywords.append(f"{english_words[0].lower()}{english_words[1].lower()}")
+        
+        # 대괄호 패턴 추가
+        for keyword in keywords[:]:  # 복사본으로 순회
+            keywords.append(f"[{keyword}")
+            
+        return keywords
     
     def _extract_project_by_sender(self, message: Dict) -> Optional[str]:
         """발신자 정보로 프로젝트 추출"""
@@ -322,24 +420,204 @@ class ProjectTagService:
             return None
     
     def _call_existing_llm_service(self, message: Dict) -> Optional[str]:
-        """기존 LLM 서비스를 사용하여 프로젝트 분류"""
+        """VDOS DB 정보를 활용한 LLM 기반 프로젝트 분류"""
         try:
-            # Top3Service와 동일한 LLM 호출 방식 사용
-            from src.services.top3_service import Top3Service
-            
-            # 프로젝트 정보 준비
-            project_info = []
-            for code, tag in self.project_tags.items():
-                project_info.append(f"- {code}: {tag.name} ({tag.description})")
-            
-            projects_text = "\n".join(project_info)
+            # VDOS DB에서 프로젝트 및 사람 정보 가져오기
+            project_context = self._build_project_context()
             
             # 메시지 내용 준비
             content = message.get("content", "")
             subject = message.get("subject", "")
             sender = message.get("sender", "")
             
-            # LLM 프롬프트 구성
+            logger.debug(f"[프로젝트 태그] LLM 분석 시작:")
+            logger.debug(f"  - 제목: {subject}")
+            logger.debug(f"  - 내용: {content[:100]}")
+            logger.debug(f"  - 발신자: {sender}")
+            logger.debug(f"  - 프로젝트 수: {len(self.project_tags)}")
+            
+            # LLM 프롬프트 구성 (VDOS DB 정보 포함)
+            system_prompt = f"""당신은 업무 메시지를 분석하여 관련 프로젝트를 분류하는 전문가입니다.
+
+다음은 현재 진행 중인 프로젝트들과 관련 정보입니다:
+
+{project_context}
+
+메시지 내용을 분석하여 가장 관련성이 높은 프로젝트 코드를 선택하세요.
+
+규칙:
+1. 메시지 제목이나 내용에 프로젝트명이 명시되어 있으면 해당 프로젝트를 우선 선택
+2. 발신자가 특정 프로젝트에만 참여하고 있다면 해당 프로젝트 고려
+3. 메시지 내용의 키워드와 프로젝트 설명을 매칭하여 판단
+4. 확실하지 않으면 'UNKNOWN' 반환
+
+응답은 반드시 프로젝트 코드만 반환하세요 (예: CC, HA, WELL, WI, CI 또는 UNKNOWN)."""
+
+            user_prompt = f"""다음 메시지를 분석하여 관련 프로젝트를 분류해주세요:
+
+발신자: {sender}
+제목: {subject}
+내용: {content[:1000]}
+
+프로젝트 코드만 반환하세요."""
+
+            # LLM API 호출
+            response = self._call_llm_api(system_prompt, user_prompt)
+            
+            if response and response.strip():
+                result = response.strip().upper()
+                logger.info(f"[프로젝트 태그] LLM 분류 결과: {result}")
+                return result
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"LLM 프로젝트 분류 오류: {e}")
+            return None
+    
+    def _build_project_context(self) -> str:
+        """VDOS DB 정보를 활용한 프로젝트 컨텍스트 구축"""
+        context_lines = []
+        
+        for code, tag in self.project_tags.items():
+            context_lines.append(f"## {code}: {tag.name}")
+            context_lines.append(f"설명: {tag.description}")
+            
+            # 프로젝트 참여자 정보 추가
+            participants = []
+            for person, projects in self.person_project_mapping.items():
+                if code in projects:
+                    participants.append(person)
+            
+            if participants:
+                context_lines.append(f"참여자: {', '.join(participants[:5])}")  # 최대 5명만
+                if len(participants) > 5:
+                    context_lines.append(f"(총 {len(participants)}명)")
+            
+            context_lines.append("")  # 빈 줄
+        
+        return "\n".join(context_lines)
+    
+    def _call_llm_api(self, system_prompt: str, user_prompt: str) -> Optional[str]:
+        """LLM API 호출 (환경 설정 기반)"""
+        try:
+            import os
+            import requests
+            import json
+            from dotenv import load_dotenv
+            
+            # VDOS .env 파일 로드
+            vdos_env_path = os.path.join(os.path.dirname(__file__), '../../../virtualoffice/.env')
+            if os.path.exists(vdos_env_path):
+                load_dotenv(vdos_env_path)
+            
+            # 환경 변수에서 설정 읽기
+            use_openrouter = os.getenv('VDOS_USE_OPENROUTER', 'false').lower() == 'true'
+            
+            if use_openrouter:
+                # OpenRouter 사용
+                api_key = os.getenv('OPENROUTER_API_KEY')
+                if not api_key:
+                    logger.warning("OpenRouter API 키가 설정되지 않음")
+                    return None
+                
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                
+                payload = {
+                    "model": "openai/gpt-4o",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "max_tokens": 50,
+                    "temperature": 0.1
+                }
+                
+            else:
+                # Azure OpenAI 사용
+                api_key = os.getenv('AZURE_OPENAI_API_KEY')
+                endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
+                
+                if not api_key or not endpoint:
+                    # OpenAI 폴백
+                    return self._call_openai_api(system_prompt, user_prompt)
+                
+                url = f"{endpoint}/openai/deployments/gpt-4o/chat/completions?api-version=2024-02-15-preview"
+                headers = {
+                    "api-key": api_key,
+                    "Content-Type": "application/json"
+                }
+                
+                payload = {
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "max_tokens": 50,
+                    "temperature": 0.1
+                }
+            
+            # API 호출
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result['choices'][0]['message']['content'].strip()
+            
+            return content
+            
+        except Exception as e:
+            logger.error(f"LLM API 호출 오류: {e}")
+            return None
+    
+    def _call_openai_api(self, system_prompt: str, user_prompt: str) -> Optional[str]:
+        """OpenAI API 폴백 호출"""
+        try:
+            import os
+            import requests
+            from dotenv import load_dotenv
+            
+            # VDOS .env 파일 로드
+            vdos_env_path = os.path.join(os.path.dirname(__file__), '../../../virtualoffice/.env')
+            if os.path.exists(vdos_env_path):
+                load_dotenv(vdos_env_path)
+            
+            api_key = os.getenv('OPENAI_API_KEY')
+            if not api_key:
+                logger.warning("OpenAI API 키가 설정되지 않음")
+                return None
+            
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": "gpt-4o",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "max_tokens": 50,
+                "temperature": 0.1
+            }
+            
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result['choices'][0]['message']['content'].strip()
+            
+            return content
+            
+        except Exception as e:
+            logger.error(f"OpenAI API 폴백 호출 오류: {e}")
+            return None
             system_prompt = f"""당신은 업무 메시지를 분석하여 관련 프로젝트를 분류하는 전문가입니다.
 
 다음 프로젝트들 중에서 메시지 내용과 가장 관련있는 프로젝트를 선택하세요:

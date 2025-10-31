@@ -248,6 +248,10 @@ class SmartAssistant:
         
         # AnalysisPipelineService는 lazy initialization (순환 참조 방지)
         self._pipeline_service = None
+        
+        # Top3Service 초기화
+        self.top3_service = None
+        self._init_top3_service()
 
     def _setup_default_json_source(self) -> None:
         """기본 JSON 데이터 소스 설정"""
@@ -275,6 +279,27 @@ class SmartAssistant:
         self._setup_default_json_source()
         logger.info("✅ JSON 파일 데이터 소스로 전환 완료")
     
+    def _init_top3_service(self):
+        """Top3Service 초기화"""
+        try:
+            from services.top3_service import Top3Service
+            
+            # people 데이터 로드 (이메일 → 이름 매핑용)
+            people_data = []
+            if hasattr(self, 'personas') and self.personas:
+                people_data = self.personas
+            
+            # Top3Service 초기화
+            self.top3_service = Top3Service(
+                people_data=people_data
+            )
+            
+            logger.info("✅ Top3Service 초기화 완료")
+            
+        except Exception as e:
+            logger.error(f"❌ Top3Service 초기화 실패: {e}")
+            self.top3_service = None
+    
     def _ensure_pipeline_service(self):
         """AnalysisPipelineService lazy initialization (순환 참조 방지)"""
         if self._pipeline_service is None:
@@ -283,7 +308,8 @@ class SmartAssistant:
                 priority_ranker=self.priority_ranker,
                 summarizer=self.summarizer,
                 action_extractor=self.action_extractor,
-                user_profile=self.user_profile
+                user_profile=self.user_profile,
+                top3_service=self.top3_service  # Top3Service 주입
             )
         return self._pipeline_service
     

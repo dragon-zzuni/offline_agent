@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Top3 TODO 선정 및 규칙 관리 서비스
+Top3 TODO 선정 및 규칙 관리 서비스 (오케스트레이터)
 
 TODO 항목의 우선순위를 계산하고 Top3를 자동으로 선정합니다.
-자연어 규칙 해석 및 LLM 기반 규칙 파싱을 지원합니다.
+자연어 규칙 해석 및 LLM 기반 Top3 선정을 지원합니다.
+
+이 클래스는 다음 컴포넌트들을 조율합니다:
+- Top3LLMSelector: LLM 기반 Top3 선정
+- Top3ScoreCalculator: 점수 기반 Top3 선정 (폴백)
+- Top3CacheManager: 선정 결과 캐싱
 """
 import os
 import json
@@ -35,14 +40,21 @@ ENTITY_RULES_DEFAULT = {
 
 
 class Top3Service:
-    """Top3 TODO 선정 및 규칙 관리 서비스"""
+    """Top3 TODO 선정 및 규칙 관리 서비스 (오케스트레이터)"""
     
-    def __init__(self, config_path: Optional[str] = None, people_data: Optional[List[Dict]] = None, vdos_connector=None):
+    def __init__(
+        self, 
+        config_path: Optional[str] = None, 
+        people_data: Optional[List[Dict]] = None, 
+        vdos_connector=None,
+        persona_cache_service=None
+    ):
         """
         Args:
             config_path: 규칙 저장 경로 (선택사항)
             people_data: 사람 정보 리스트 (이메일→이름 매핑용)
             vdos_connector: VDOSConnector 인스턴스 (실시간 people 데이터용)
+            persona_cache_service: PersonaTodoCacheService 인스턴스 (TODO 캐시용)
         """
         # VDOS DB 위치에 설정 파일 저장
         if config_path is None:
@@ -59,6 +71,7 @@ class Top3Service:
         self._entity_rules = deepcopy(ENTITY_RULES_DEFAULT)
         self._last_instruction = ""
         self._vdos_connector = vdos_connector
+        self._persona_cache_service = persona_cache_service
         
         # 이메일 → 이름 매핑 구축
         self._email_to_name = {}
@@ -81,8 +94,58 @@ class Top3Service:
         
         logger.info(f"[Top3Service] 초기화 완료: {len(self._email_to_name)}개 이메일 매핑")
         
+        # 컴포넌트 초기화 (lazy loading)
+        self._llm_selector = None
+        self._score_calculator = None
+        self._cache_manager = None
+        self._llm_enabled = True  # LLM 사용 여부
+        self._llm_failure_count = 0  # 연속 실패 횟수
+        self._max_llm_failures = 3  # 최대 연속 실패 횟수
+        
         # 저장된 규칙 로드
         self._load_rules()
+    
+    def _get_llm_selector(self):
+        """LLM Selector lazy initialization"""
+        if self._llm_selector is None:
+            from .top3_llm_selector import Top3LLMSelector
+            from .llm_client import LLMClient
+            
+            llm_client = LLMClient()
+            cache_manager = self._get_cache_manager()
+            
+            self._llm_selector = Top3LLMSelector(
+                llm_client=llm_client,
+                cache_manager=cache_manager,
+                email_to_name=self._email_to_name
+            )
+            logger.debug("[Top3Service] LLM Selector 초기화 완료")
+        
+        return self._llm_selector
+    
+    def _get_score_calculator(self):
+        """Score Calculator lazy initialization"""
+        if self._score_calculator is None:
+            from .top3_score_calculator import Top3ScoreCalculator
+            
+            self._score_calculator = Top3ScoreCalculator(
+                rules=self._rules,
+                entity_rules=self._entity_rules,
+                email_to_name=self._email_to_name
+            )
+            logger.debug("[Top3Service] Score Calculator 초기화 완료")
+        
+        return self._score_calculator
+    
+    def _get_cache_manager(self):
+        """Cache Manager lazy initialization"""
+        if self._cache_manager is None:
+            from .top3_cache_manager import Top3CacheManager
+            
+            self._cache_manager = Top3CacheManager(ttl_seconds=300)  # 5분 TTL
+            logger.debug("[Top3Service] Cache Manager 초기화 완료")
+        
+        return self._cache_manager
     
     def _load_people_data(self) -> List[Dict]:
         """people 데이터 자동 로드"""
@@ -177,6 +240,10 @@ class Top3Service:
                     value = 1.0
             
             self._rules[key] = value
+        
+        # ScoreCalculator 업데이트
+        if self._score_calculator is not None:
+            self._score_calculator.update_rules(self._rules)
     
     def update_entity_rules(self, new_rules: Optional[Dict[str, Dict[str, float]]], reset: bool = False) -> None:
         """엔티티 규칙 업데이트"""
@@ -222,287 +289,128 @@ class Top3Service:
                             dest[variation] = value
                         else:
                             dest[variation] = max(dest.get(variation, 0.0), value)
+        
+        # ScoreCalculator 업데이트
+        if self._score_calculator is not None:
+            self._score_calculator.update_entity_rules(self._entity_rules)
     
     def calculate_score(self, todo: Dict) -> float:
-        """TODO 항목의 점수 계산"""
-        # 우선순위 가중치
-        priority = (todo.get("priority") or "low").lower()
-        w_priority = self._rules.get(f"priority_{priority}", self._rules["priority_low"])
-        
-        # 데드라인 임박 가중치
-        now = datetime.now(timezone.utc)
-        deadline = todo.get("deadline_ts") or todo.get("deadline")
-        
-        if deadline:
-            try:
-                dl = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
-            except Exception:
-                try:
-                    dl = datetime.fromisoformat(deadline)
-                except Exception:
-                    dl = None
-        else:
-            dl = None
-        
-        if dl:
-            if dl.tzinfo is None:
-                dl = dl.replace(tzinfo=timezone.utc)
-            hours_left = max(0.0, (dl - now).total_seconds() / 3600.0)
-            emphasis = self._rules.get("deadline_emphasis", 24.0)
-            base = self._rules.get("deadline_base", 1.0)
-            w_deadline = base + (emphasis / (emphasis + hours_left))
-        else:
-            w_deadline = 1.0
-        
-        # 근거 가중치
-        evidence = todo.get("evidence")
-        if not isinstance(evidence, list):
-            try:
-                evidence = json.loads(evidence or "[]")
-            except Exception:
-                evidence = []
-        
-        per_item = self._rules.get("evidence_per_item", 0.1)
-        max_bonus = self._rules.get("evidence_max_bonus", 0.5)
-        w_evidence = 1.0 + min(max_bonus, per_item * len(evidence))
-        
-        # 엔티티 규칙 적용 (자연어 규칙)
-        rule_multiplier = 1.0
-        priority_bonus = 0.0
-        
-        # 요청자 보너스 (더 강력하게 적용)
-        requester = (todo.get("requester") or "").lower()
-        if requester:
-            for match, bonus in self._entity_rules.get("requester", {}).items():
-                if match and match in requester:
-                    priority_bonus += bonus
-                    rule_multiplier += bonus * 0.25
-            
-            # 임호규 특별 매칭 (이메일 주소 포함)
-            hongyu_patterns = ["임호규", "hongyu", "imhokyu", "lim", "ho", "gyu"]
-            if any(pattern in requester for pattern in hongyu_patterns):
-                for pattern in hongyu_patterns:
-                    if pattern in self._entity_rules.get("requester", {}):
-                        bonus = self._entity_rules["requester"][pattern]
-                        priority_bonus += bonus
-                        rule_multiplier += bonus * 0.25
-                        break
-        
-        # 키워드 보너스 (제목, 설명, 타입에서 검색)
-        text_fields = " ".join([
-            todo.get("title", ""),
-            todo.get("description", ""),
-            todo.get("type", ""),
-        ]).lower()
-        
-        for match, bonus in self._entity_rules.get("keyword", {}).items():
-            if match and match in text_fields:
-                priority_bonus += bonus * 0.5
-                rule_multiplier += bonus * 0.25
-        
-        # 타입 보너스
-        todo_type = (todo.get("type") or "").lower()
-        for match, bonus in self._entity_rules.get("type", {}).items():
-            if match and match in todo_type:
-                priority_bonus += bonus * 0.5
-                rule_multiplier += bonus * 0.25
-        
-        # rule_multiplier 범위 제한
-        rule_multiplier = max(0.5, min(rule_multiplier, 6.0))
-        
-        # priority_term 계산 (엔티티 보너스 적용)
-        if priority_bonus > 0:
-            priority_floor = max(self._rules.get("priority_high", 3.0) + priority_bonus, 3.5)
-        else:
-            priority_floor = 0.0
-        
-        priority_term = max(0.1, w_priority + priority_bonus, priority_floor)
-        
-        # 수신 타입 페널티 (CC/BCC)
-        recipient_type = (todo.get("recipient_type") or "to").lower()
-        cc_penalty = 1.0
-        if recipient_type == "cc":
-            cc_penalty = self._rules.get("recipient_type_cc_penalty", 0.7)
-        elif recipient_type == "bcc":
-            cc_penalty = self._rules.get("recipient_type_cc_penalty", 0.7) * 0.9
-        
-        # 최종 점수 (엔티티 규칙이 강력하게 적용됨)
-        score = (priority_term * rule_multiplier) * w_deadline * w_evidence * cc_penalty
-        return score
+        """TODO 항목의 점수 계산 (ScoreCalculator로 위임)"""
+        score_calculator = self._get_score_calculator()
+        return score_calculator.calculate_score(todo)
     
-    def _normalize_name(self, name: str) -> str:
-        """이름 정규화 (공백, 대소문자, 특수문자 제거, 이메일 주소 처리)
+
+    
+    def pick_top3(self, items: List[Dict], use_llm: bool = True) -> Set[str]:
+        """Top3 TODO 선정 (LLM 또는 점수 기반)
         
         Args:
-            name: 정규화할 이름
-            
+            items: TODO 항목 리스트
+            use_llm: LLM 사용 여부 (기본값: True)
+        
         Returns:
-            정규화된 이름 (소문자, 공백/특수문자 제거)
-        """
-        if not name:
-            return ""
+            Set[str]: Top3 TODO ID 집합
         
-        # 소문자 변환
-        normalized = name.lower().strip()
-        
-        # 이메일 주소에서 이름 부분만 추출
-        if "@" in normalized:
-            normalized = normalized.split("@")[0]
-        
-        # 공백 제거
-        normalized = normalized.replace(" ", "").replace("\t", "")
-        
-        # 특수문자 제거 (한글, 영문, 숫자만 유지)
-        normalized = re.sub(r"[^a-z0-9가-힣]", "", normalized)
-        
-        return normalized
-    
-    def _match_requester(self, requester: str, rules: Dict[str, float]) -> bool:
-        """요청자가 규칙에 매칭되는지 확인 (완전 일치 및 부분 일치, 이메일→이름 변환)
-        
-        Args:
-            requester: TODO의 요청자 (이메일 또는 이름)
-            rules: 요청자 규칙 딕셔너리 {이름: 보너스}
-            
-        Returns:
-            매칭 여부
-        """
-        if not requester or not rules:
-            return False
-        
-        # 이메일 주소인 경우 이름으로 변환
-        requester_name = requester
-        if "@" in requester:
-            requester_name = self._email_to_name.get(requester.lower(), requester)
-            logger.debug(f"[Top3Service] 이메일→이름 변환: {requester} → {requester_name}")
-        
-        # 정규화
-        normalized_requester = self._normalize_name(requester_name)
-        
-        for rule_name in rules.keys():
-            normalized_rule = self._normalize_name(rule_name)
-            
-            # 완전 일치
-            if normalized_requester == normalized_rule:
-                logger.debug(f"[Top3Service] ✓ 완전 일치: requester={requester_name}, rule={rule_name}")
-                return True
-            
-            # 부분 일치 (한국어 이름은 엄격하게)
-            # 규칙이 요청자에 포함되는 경우만 허용 (역방향 제외)
-            # 예: 규칙="김철수", 요청자="김철수님" → OK
-            # 예: 규칙="김철수님", 요청자="김철수" → NO (너무 느슨함)
-            if normalized_rule and len(normalized_rule) >= 2:
-                if normalized_rule in normalized_requester and len(normalized_requester) - len(normalized_rule) <= 2:
-                    # 길이 차이가 2 이하일 때만 부분 일치 허용 (호칭 정도만)
-                    logger.debug(f"[Top3Service] ✓ 부분 일치 (규칙→요청자): requester={requester_name}, rule={rule_name}")
-                    return True
-        
-        logger.debug(f"[Top3Service] ✗ 매칭 실패: requester={requester_name} (원본={requester})")
-        return False
-    
-    def _filter_by_rules(self, candidates: List[Dict]) -> List[Dict]:
-        """규칙에 매칭되는 TODO 필터링
-        
-        Args:
-            candidates: 후보 TODO 리스트
-            
-        Returns:
-            규칙에 매칭되는 TODO 리스트
-        """
-        requester_rules = self._entity_rules.get("requester", {})
-        
-        if not requester_rules:
-            logger.debug("[Top3Service] 요청자 규칙 없음, 필터링 스킵")
-            return []
-        
-        logger.info(f"[Top3Service] 규칙 적용 시작: {len(requester_rules)}개 요청자 규칙, {len(candidates)}개 후보 TODO")
-        logger.debug(f"[Top3Service] 규칙 목록: {list(requester_rules.keys())}")
-        
-        matched = []
-        unmatched_requesters = set()
-        
-        for item in candidates:
-            requester = item.get("requester", "")
-            if not requester:
-                continue
-            
-            # 규칙과 매칭 확인
-            if self._match_requester(requester, requester_rules):
-                matched.append(item)
-                logger.debug(f"[Top3Service] 규칙 매칭 성공: TODO={item.get('title', '')[:30]}, 요청자={requester}")
-            else:
-                unmatched_requesters.add(requester)
-        
-        if unmatched_requesters:
-            logger.debug(f"[Top3Service] 규칙 미매칭 요청자: {list(unmatched_requesters)[:5]}")
-        
-        logger.info(f"[Top3Service] 규칙 매칭 완료: {len(matched)}개 TODO 매칭, {len(unmatched_requesters)}개 요청자 미매칭")
-        return matched
-    
-    def pick_top3(self, items: List[Dict]) -> Set[str]:
-        """Top3 TODO 선정 (규칙 강제 적용)
-        
-        자연어 규칙이 있으면 무조건 규칙에 맞는 TODO만 Top3에 표시
-        규칙이 없으면 일반 점수 기반 선정
+        선정 방식:
+        1. 자연어 규칙이 있고 LLM이 활성화되어 있으면 LLM 선정 시도
+        2. LLM 실패 시 점수 기반 선정으로 폴백
+        3. 자연어 규칙이 없으면 점수 기반 선정
         """
         # 1. status가 done이 아닌 것만 후보
         candidates = [x for x in items if (x.get("status") or "pending") not in ("done",)]
         
+        if not candidates:
+            logger.info("[Top3Service] 후보 TODO가 없습니다")
+            return set()
+        
         # 2. 자연어 규칙 확인
-        has_natural_rules = bool(self._entity_rules.get("requester") or 
-                                 self._entity_rules.get("keyword") or 
-                                 self._entity_rules.get("type"))
+        has_natural_rules = bool(
+            self._entity_rules.get("requester") or 
+            self._entity_rules.get("keyword") or 
+            self._entity_rules.get("type")
+        )
         
+        # 3. LLM 선정 시도 (조건: 자연어 규칙 있음 + LLM 활성화 + use_llm=True)
+        if has_natural_rules and self._llm_enabled and use_llm:
+            logger.info(f"[Top3Service] 🤖 LLM 모드: 자연어 규칙 기반 Top3 선정 시도")
+            
+            try:
+                llm_selector = self._get_llm_selector()
+                
+                # LLM 선정 실행
+                top3_ids = llm_selector.select_top3(
+                    todos=candidates,
+                    natural_rule=self._last_instruction,
+                    entity_rules=self._entity_rules
+                )
+                
+                if top3_ids:
+                    # LLM 선정 성공
+                    self._llm_failure_count = 0  # 실패 카운터 리셋
+                    logger.info(f"[Top3Service] ✅ LLM 선정 성공: {len(top3_ids)}개 선정")
+                    return top3_ids
+                else:
+                    # LLM이 빈 결과 반환 (규칙에 맞는 TODO 없음)
+                    logger.warning(f"[Top3Service] ⚠️ LLM이 빈 결과 반환 (규칙에 맞는 TODO 없음)")
+                    return set()
+            
+            except Exception as e:
+                # LLM 선정 실패 - 폴백으로 전환
+                self._llm_failure_count += 1
+                logger.error(f"[Top3Service] ❌ LLM 선정 실패 ({self._llm_failure_count}/{self._max_llm_failures}): {e}")
+                
+                # 연속 실패 시 LLM 비활성화
+                if self._llm_failure_count >= self._max_llm_failures:
+                    self._llm_enabled = False
+                    logger.warning(
+                        f"[Top3Service] 🚫 LLM 연속 {self._max_llm_failures}회 실패 - "
+                        f"점수 기반 선정으로 자동 전환됩니다"
+                    )
+                
+                # 점수 기반 선정으로 폴백
+                logger.info("[Top3Service] 📊 폴백: 점수 기반 선정으로 전환")
+        
+        # 4. 점수 기반 선정 (폴백 또는 기본 모드)
         if has_natural_rules:
-            # 자연어 규칙이 있으면 무조건 규칙 매칭 TODO만 선정
-            logger.info(f"[Top3Service] 🔒 강제 모드: 자연어 규칙에 맞는 TODO만 Top3 선정")
+            # 자연어 규칙이 있으면 규칙 매칭 TODO만 선정
+            logger.info(f"[Top3Service] 🔒 강제 모드: 자연어 규칙에 맞는 TODO만 선정")
             
-            # 규칙 매칭 TODO 필터링
-            rule_matched = self._filter_by_rules(candidates)
+            score_calculator = self._get_score_calculator()
+            top3_ids = score_calculator.select_top3_with_rules(
+                candidates=candidates,
+                entity_rules=self._entity_rules
+            )
             
-            if not rule_matched:
+            if not top3_ids:
                 logger.warning(f"[Top3Service] ⚠️ 규칙에 맞는 TODO가 없음 (전체 {len(candidates)}개 중)")
-                return set()
+            else:
+                logger.info(f"[Top3Service] ✅ 강제 모드 완료: {len(top3_ids)}개 선정")
             
-            # 규칙 매칭 TODO를 점수순으로 정렬
-            for item in rule_matched:
-                item["_top3_score"] = self.calculate_score(item)
-            
-            def _created_iso(x):
-                return x.get("created_at") or datetime.now().isoformat()
-            
-            rule_matched.sort(key=lambda x: (x["_top3_score"], _created_iso(x)), reverse=True)
-            
-            # 규칙 매칭 TODO에서 최대 3개 선정 (3개 미만이어도 채우지 않음)
-            top3_ids = set()
-            for item in rule_matched[:3]:
-                if item.get("id"):
-                    top3_ids.add(item["id"])
-            
-            logger.info(f"[Top3Service] ✅ 강제 모드 완료: 규칙 매칭 {len(rule_matched)}개 중 {len(top3_ids)}개 선정")
             return top3_ids
-        
         else:
             # 자연어 규칙이 없으면 일반 점수 기반 선정
             logger.info(f"[Top3Service] 📊 일반 모드: 점수 기반 Top3 선정")
             
-            # 모든 후보의 점수 계산
-            for item in candidates:
-                item["_top3_score"] = self.calculate_score(item)
-            
-            def _created_iso(x):
-                return x.get("created_at") or datetime.now().isoformat()
-            
-            candidates.sort(key=lambda x: (x["_top3_score"], _created_iso(x)), reverse=True)
-            
-            # 상위 3개 선정
-            top3_ids = set()
-            for item in candidates[:3]:
-                if item.get("id"):
-                    top3_ids.add(item["id"])
+            score_calculator = self._get_score_calculator()
+            top3_ids = score_calculator.select_top3(candidates)
             
             logger.info(f"[Top3Service] ✅ 일반 모드 완료: {len(candidates)}개 중 {len(top3_ids)}개 선정")
             return top3_ids
+    
+    def enable_llm(self) -> None:
+        """LLM 선정 활성화"""
+        self._llm_enabled = True
+        self._llm_failure_count = 0
+        logger.info("[Top3Service] LLM 선정 활성화")
+    
+    def disable_llm(self) -> None:
+        """LLM 선정 비활성화"""
+        self._llm_enabled = False
+        logger.info("[Top3Service] LLM 선정 비활성화")
+    
+    def is_llm_enabled(self) -> bool:
+        """LLM 선정 활성화 여부 확인"""
+        return self._llm_enabled
     
     def describe_rules(self) -> str:
         """현재 규칙을 텍스트로 설명"""
@@ -516,8 +424,12 @@ class Top3Service:
         
         parts = []
         
+        # LLM 상태 표시
         if has_natural_rules:
-            parts.append("🔒 강제 모드: 자연어 규칙에 맞는 TODO만 Top3 표시")
+            if self._llm_enabled:
+                parts.append("🤖 LLM 모드: 자연어 규칙 기반 지능형 선정")
+            else:
+                parts.append("🔒 강제 모드: 자연어 규칙에 맞는 TODO만 Top3 표시 (LLM 비활성화)")
             
             if entity_rules.get("requester"):
                 requester_list = ", ".join(list(entity_rules["requester"].keys())[:5])

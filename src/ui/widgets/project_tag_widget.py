@@ -25,7 +25,13 @@ def get_project_service():
     """프로젝트 서비스 싱글톤 인스턴스 반환"""
     global _project_service_instance
     if _project_service_instance is None:
-        _project_service_instance = ProjectTagService()
+        # 프로젝트 태그 캐시 DB 경로 설정
+        import os
+        vdos_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 
+                               'virtualoffice', 'src', 'virtualoffice')
+        cache_db_path = os.path.join(vdos_dir, 'project_tags_cache.db')
+        
+        _project_service_instance = ProjectTagService(cache_db_path=cache_db_path)
     return _project_service_instance
 
 

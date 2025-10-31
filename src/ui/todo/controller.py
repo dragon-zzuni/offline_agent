@@ -101,6 +101,24 @@ class TodoPanelController:
         return self.repository.fetch_active()
 
     # ------------------------------------------------------------------ #
+    # 저장소 위임 (뷰에서 직접 접근하지 않도록 래핑)
+    # ------------------------------------------------------------------ #
+    def cleanup_old_rows(self, days: int) -> None:
+        self.repository.cleanup_old_rows(days)
+
+    def delete_all(self) -> None:
+        self.repository.delete_all()
+
+    def release_snoozed(self) -> None:
+        self.repository.release_snoozed()
+
+    def mark_done(self, todo_id: str, now_iso: str) -> bool:
+        return self.repository.mark_done(todo_id, now_iso)
+
+    def snooze_until(self, todo_id: str, until_iso: str, updated_iso: str) -> None:
+        self.repository.snooze_until(todo_id, until_iso, updated_iso)
+
+    # ------------------------------------------------------------------ #
     # Top-3 계산
     # ------------------------------------------------------------------ #
     def calculate_top3(self, rows: List[dict]) -> Set[str]:
@@ -143,37 +161,120 @@ class TodoPanelController:
             logger.warning("[프로젝트 태그] 프로젝트 서비스가 없습니다")
             return
 
+        # 1. 배치로 캐시된 프로젝트 태그 로드 (성능 최적화)
+        cached_projects = self._load_cached_project_tags_batch(todos)
+        cache_hits = 0
+        
+        # 2. 캐시된 태그를 TODO에 적용
+        uncached_todos = []
+        for todo in todos:
+            todo_id = todo.get("id")
+            if not todo_id:
+                continue
+                
+            # DB 캐시에서 프로젝트 태그 확인
+            if todo_id in cached_projects:
+                todo["project"] = cached_projects[todo_id]
+                cache_hits += 1
+            else:
+                # 메모리에 이미 있는 프로젝트 태그 확인
+                current_project = todo.get("project")
+                if current_project:
+                    # 메모리에 있는 태그를 DB에 저장
+                    self.repository.set_project(todo_id, current_project)
+                else:
+                    # LLM 분석이 필요한 TODO
+                    uncached_todos.append((todo, len(uncached_todos)))
+        
+        if cache_hits > 0:
+            logger.info(f"✅ 프로젝트 태그 캐시 히트: {cache_hits}개")
+        
+        # 3. 캐시되지 않은 TODO만 LLM 분석 (성능 최적화)
+        if uncached_todos:
+            logger.info(f"🔍 프로젝트 태그 LLM 분석 필요: {len(uncached_todos)}개")
+            self._analyze_uncached_project_tags(uncached_todos)
+        else:
+            logger.info("✅ 모든 TODO 프로젝트 태그 캐시됨 - LLM 분석 불필요")
+    
+    def _load_cached_project_tags_batch(self, todos: List[dict]) -> Dict[str, str]:
+        """배치로 캐시된 프로젝트 태그 로드 (성능 최적화)"""
+        if not todos or not self.repository:
+            return {}
+        
+        try:
+            todo_ids = [todo.get("id") for todo in todos if todo.get("id")]
+            if not todo_ids:
+                return {}
+            
+            # 배치로 DB에서 프로젝트 태그 조회
+            cached_projects = {}
+            for todo_id in todo_ids:
+                project = self.repository.get_project(todo_id)
+                if project and project.strip():
+                    cached_projects[todo_id] = project.strip()
+            
+            logger.debug(f"[프로젝트 태그] 배치 캐시 로드: {len(cached_projects)}/{len(todo_ids)}개")
+            return cached_projects
+            
+        except Exception as e:
+            logger.error(f"프로젝트 태그 배치 캐시 로드 오류: {e}")
+            return {}
+    
+    def _analyze_uncached_project_tags(self, uncached_todos: List[Tuple[dict, int]]) -> None:
+        """캐시되지 않은 TODO들을 비동기로 분석"""
+        if not uncached_todos:
+            return
+        
+        # 비동기 프로젝트 태그 서비스 사용
+        try:
+            from src.services.async_project_tag_service import get_async_project_tag_service
+            
+            async_service = get_async_project_tag_service(self.project_service, self.repository)
+            if async_service:
+                # 콜백 함수 정의 (UI 업데이트용)
+                def on_project_analyzed(todo_id: str, project: str):
+                    logger.debug(f"[AsyncProjectTag] UI 업데이트: {todo_id} → {project}")
+                    # TODO: UI 업데이트 시그널 발생 (필요시)
+                
+                # 비동기 분석 큐에 추가
+                todos_for_analysis = [todo for todo, idx in uncached_todos]
+                async_service.queue_multiple_todos(todos_for_analysis, on_project_analyzed)
+                
+                logger.info(f"🚀 {len(uncached_todos)}개 TODO 비동기 프로젝트 태그 분석 시작")
+                return
+        
+        except Exception as e:
+            logger.warning(f"비동기 프로젝트 태그 서비스 사용 실패, 동기 분석으로 폴백: {e}")
+        
+        # 폴백: 동기 분석
+        self._analyze_uncached_project_tags_sync(uncached_todos)
+    
+    def _analyze_uncached_project_tags_sync(self, uncached_todos: List[Tuple[dict, int]]) -> None:
+        """캐시되지 않은 TODO들을 동기적으로 분석 (폴백)"""
         available_projects = (
             list(self.project_service.project_tags.keys())
             if getattr(self.project_service, "project_tags", None)
-            else ["CARE", "HA", "WD", "BRIDGE", "LINK"]
+            else ["CC", "HA", "WELL", "WI", "CI"]
         )
 
         updated = 0
-        for idx, todo in enumerate(todos):
+        for todo, idx in uncached_todos:
             todo_id = todo.get("id")
             if not todo_id:
                 continue
 
-            db_project = self.repository.get_project(todo_id)
-            if db_project:
-                todo["project"] = db_project
-                continue
-
-            current_project = todo.get("project")
-            if current_project:
-                self.repository.set_project(todo_id, current_project)
-                updated += 1
-                continue
-
+            # LLM으로 프로젝트 추출
             project = self._extract_project(todo, idx, available_projects)
             if project:
                 todo["project"] = project
-                self.repository.set_project(todo_id, project)
+                # DB에 캐시 저장
+                if self.repository:
+                    self.repository.set_project(todo_id, project)
                 updated += 1
+                logger.debug(f"[프로젝트 태그] {todo_id}: {project} (동기 분석)")
 
         if updated:
-            logger.info("✅ %d개 TODO에 프로젝트 태그 추가", updated)
+            logger.info(f"✅ {updated}개 TODO 프로젝트 태그 동기 분석 및 캐시 저장 완료")
 
     def _extract_project(self, todo: dict, index: int, available: List[str]) -> Optional[str]:
         project = None
