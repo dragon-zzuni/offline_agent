@@ -1,0 +1,49 @@
+graph TB
+    subgraph Presentation["Presentation Layer (UI)"]
+        MW[Main Window]
+        TP[Todo Panel]
+        AP[Analysis Panel]
+        SD[Simulation Dashboard]
+    end
+    
+    subgraph Business["Business Logic Layer"]
+        TC[Todo Controller]
+        T3S[Top3 Service]
+        PTS[Project Tag Service]
+        APS[Analysis Pipeline]
+        VOC[VirtualOffice Coordinator]
+    end
+    
+    subgraph Data["Data Access Layer"]
+        JSON[JSON Source]
+        VDOS[VirtualOffice Source]
+        TR[Todo Repository]
+        LLMC[LLM Client]
+    end
+    
+    subgraph Infrastructure["Infrastructure Layer"]
+        DB[(SQLite)]
+        FS[File System]
+        API[External APIs]
+    end
+    
+    MW --> TC
+    TP --> T3S
+    AP --> APS
+    SD --> VOC
+    
+    TC --> TR
+    T3S --> LLMC
+    PTS --> LLMC
+    APS --> LLMC
+    VOC --> VDOS
+    
+    TR --> DB
+    JSON --> FS
+    VDOS --> API
+    LLMC --> API
+    
+    style Presentation fill:#E3F2FD
+    style Business fill:#FFF3E0
+    style Data fill:#F3E5F5
+    style Infrastructure fill:#E8F5E9

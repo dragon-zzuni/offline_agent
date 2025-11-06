@@ -1,0 +1,23 @@
+graph TB
+    GUI[Smart Assistant GUI<br/>PyQt6 Desktop]
+    
+    JSON[JSON Dataset<br/>Offline]
+    VDOS[VirtualOffice<br/>REST API]
+    
+    DSM[Data Sources Manager]
+    AP[Analysis Pipeline]
+    LLM[LLM Services<br/>GPT-4o/Azure/OpenRouter]
+    CACHE[(SQLite Cache<br/>todos_cache.db)]
+    
+    GUI --> JSON
+    GUI --> VDOS
+    JSON --> DSM
+    VDOS --> DSM
+    DSM --> AP
+    AP --> LLM
+    LLM --> CACHE
+    CACHE --> GUI
+    
+    style GUI fill:#4A90E2,color:#fff
+    style LLM fill:#E94B3C,color:#fff
+    style CACHE fill:#50C878,color:#fff

@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-시각적 알림 효과
+시각적 알림 효과 (경량화 버전)
 새 데이터 도착 시 시각적 알림을 표시하는 모듈
+
+성능 최적화:
+- QGraphicsOpacityEffect 제거 (렉 원인)
+- 단순 스타일 변경으로 대체
+- 중복 알람 방지
 """
 import logging
-from PyQt6.QtWidgets import QWidget, QGraphicsOpacityEffect
-from PyQt6.QtCore import QTimer, QPropertyAnimation, QEasingCurve, pyqtProperty
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtWidgets import QWidget
+from PyQt6.QtCore import QTimer
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +48,17 @@ class VisualNotification:
         Args:
             duration_ms: 알림 표시 시간 (밀리초, 기본값: 500ms)
         """
-        # 기존 타이머가 있으면 중지
-        if self.notification_timer:
+        # 기존 타이머가 있으면 중지하고 즉시 복원
+        if self.notification_timer and self.notification_timer.isActive():
             self.notification_timer.stop()
+            self._restore_style()
+            return  # 이미 알람 중이면 새 알람 무시
         
-        # 알림 스타일 적용 (밝은 파란색 배경)
+        # 알림 스타일 적용 (밝은 파란색 배경 - 더 부드럽게)
         notification_style = self.original_style + """
             QWidget {
-                background-color: #DBEAFE;
-                border: 2px solid #3B82F6;
+                background-color: #EFF6FF;
+                border: 1px solid #BFDBFE;
             }
         """
         self.widget.setStyleSheet(notification_style)
@@ -142,14 +148,16 @@ class FlashNotification:
 
 
 class PulseAnimation:
-    """펄스 애니메이션 효과
+    """펄스 애니메이션 효과 (경량화 버전)
     
     위젯에 펄스(맥박) 효과를 적용합니다.
-    크기가 커졌다 작아지는 애니메이션으로 주의를 끕니다.
+    스타일 변경으로 주의를 끕니다 (QGraphicsOpacityEffect 대신 사용).
     
     Attributes:
         widget: 대상 위젯
-        animation: 크기 애니메이션
+        pulse_timer: 펄스 타이머
+        original_style: 원본 스타일
+        is_pulsing: 펄스 상태
     """
     
     def __init__(self, widget: QWidget):
@@ -159,36 +167,46 @@ class PulseAnimation:
             widget: 애니메이션을 적용할 위젯
         """
         self.widget = widget
-        self.animation = None
+        self.pulse_timer = None
+        self.original_style = widget.styleSheet()
+        self.is_pulsing = False
         
         logger.debug(f"PulseAnimation 초기화: {widget.__class__.__name__}")
     
     def start_pulse(self, duration_ms: int = 500):
-        """펄스 애니메이션 시작
+        """펄스 애니메이션 시작 (경량화)
         
         Args:
             duration_ms: 애니메이션 시간 (밀리초, 기본값: 500ms)
         """
-        # 투명도 효과 생성
-        opacity_effect = QGraphicsOpacityEffect(self.widget)
-        self.widget.setGraphicsEffect(opacity_effect)
+        # 이미 펄스 중이면 무시
+        if self.is_pulsing:
+            return
         
-        # 투명도 애니메이션 (1.0 → 0.5 → 1.0)
-        self.animation = QPropertyAnimation(opacity_effect, b"opacity")
-        self.animation.setDuration(duration_ms)
-        self.animation.setStartValue(1.0)
-        self.animation.setKeyValueAt(0.5, 0.5)
-        self.animation.setEndValue(1.0)
-        self.animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        self.animation.finished.connect(self._cleanup)
-        self.animation.start()
+        self.is_pulsing = True
+        
+        # 하이라이트 스타일 적용
+        pulse_style = self.original_style + """
+            QWidget {
+                background-color: #FEF3C7;
+                border: 1px solid #FDE68A;
+            }
+        """
+        self.widget.setStyleSheet(pulse_style)
+        
+        # 지정된 시간 후 원래 스타일로 복원
+        self.pulse_timer = QTimer()
+        self.pulse_timer.setSingleShot(True)
+        self.pulse_timer.timeout.connect(self._cleanup)
+        self.pulse_timer.start(duration_ms)
         
         logger.debug(f"펄스 애니메이션 시작: {duration_ms}ms")
     
     def _cleanup(self):
         """애니메이션 정리"""
-        # 그래픽 효과 제거
-        self.widget.setGraphicsEffect(None)
+        # 원래 스타일로 복원
+        self.widget.setStyleSheet(self.original_style)
+        self.is_pulsing = False
         logger.debug("펄스 애니메이션 종료")
 
 

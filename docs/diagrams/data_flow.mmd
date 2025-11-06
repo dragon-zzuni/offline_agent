@@ -1,0 +1,36 @@
+sequenceDiagram
+    participant User as 사용자
+    participant GUI as PyQt6 GUI
+    participant DSM as Data Source Manager
+    participant VDOS as VirtualOffice API
+    participant AP as Analysis Pipeline
+    participant LLM as GPT-4o
+    participant PTS as Project Tag Service
+    participant T3S as Top3 Service
+    participant DB as SQLite Cache
+    
+    User->>GUI: 페르소나 선택 (이정두)
+    GUI->>DSM: 데이터 수집 요청
+    DSM->>VDOS: GET /api/emails?since_id=6895
+    VDOS-->>DSM: 이메일 10개
+    DSM->>VDOS: GET /api/messages?since_id=3529
+    VDOS-->>DSM: 메시지 15개
+    
+    DSM->>AP: 메시지 25개 분석 요청
+    AP->>LLM: 메시지 요약 생성
+    LLM-->>AP: 요약 텍스트
+    AP->>LLM: TODO 추출
+    LLM-->>AP: TODO 5개
+    
+    AP->>PTS: 프로젝트 태그 분류
+    PTS->>LLM: "API 리팩토링" 분석
+    LLM-->>PTS: HA 프로젝트
+    PTS->>DB: 태그 저장
+    
+    AP->>T3S: Top3 선정 (자연어 규칙)
+    T3S->>LLM: "김연중 + HA" 규칙 적용
+    LLM-->>T3S: TODO 3개 선정
+    T3S->>DB: 결과 캐시 (TTL 5분)
+    
+    DB-->>GUI: TODO 207개 + Top3
+    GUI-->>User: UI 업데이트

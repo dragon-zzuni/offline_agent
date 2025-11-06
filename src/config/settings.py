@@ -72,14 +72,18 @@ UI_CONFIG = {
 # 우선순위 규칙
 PRIORITY_RULES = {
     "high_priority_keywords": [
-        "긴급", "urgent", "asap", "즉시", "오늘까지", "deadline",
-        "미팅", "회의", "프레젠테이션", "발표"
+        "긴급", "긴급요청", "긴급처리", "urgent", "priority", "asap", "immediate",
+        "즉시", "즉시처리", "즉각", "오늘까지", "오늘 마감", "today", "due today",
+        "마감임박", "overdue", "deadline",
+        "미팅", "회의", "프레젠테이션", "발표", "kick-off", "workshop"
     ],
     "high_priority_senders": [
         "boss@company.com", "manager@company.com", "hr@company.com"
     ],
     "medium_priority_keywords": [
-        "요청", "request", "검토", "review", "확인", "check"
+        "요청", "요청사항", "지원요청", "request", "follow up", "follow-up",
+        "검토", "review", "확인", "확인요청", "check", "pending", "update",
+        "조치필요", "action required"
     ]
 }
 

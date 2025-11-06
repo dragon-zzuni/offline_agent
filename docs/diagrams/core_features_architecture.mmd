@@ -1,0 +1,69 @@
+graph LR
+    subgraph F1["1️⃣ REST API 실시간 연동"]
+        VDOS[VirtualOffice API<br/>:8000, :8001]
+        PW[Polling Worker<br/>30초 간격]
+        VOS[증분 수집<br/>since_id 기반]
+        
+        VDOS --> VOS
+        PW --> VOS
+    end
+    
+    subgraph F2["2️⃣ 메시지/메일 통합 분석"]
+        AP[Analysis Pipeline<br/>분석 파이프라인]
+        NLP[NLP 모듈<br/>요약/추출/우선순위]
+        LLM1[LLM<br/>GPT-4o]
+        
+        AP --> NLP
+        NLP --> LLM1
+    end
+    
+    subgraph F3["3️⃣ TODO 리스트 정리"]
+        TR[Todo Repository<br/>CRUD]
+        PTS[Project Tag Service<br/>자동 분류 95%]
+        DB1[(SQLite<br/>todos_cache.db)]
+        
+        TR --> PTS
+        PTS --> DB1
+    end
+    
+    subgraph F4["4️⃣ Top3 맞춤 필터링"]
+        T3S[Top3 Service<br/>오케스트레이션]
+        T3LS[LLM Selector<br/>자연어 규칙]
+        LLM2[LLM RAG<br/>TODO DB 참조]
+        CACHE[(Cache<br/>TTL 5분)]
+        
+        T3S --> T3LS
+        T3LS --> LLM2
+        T3LS --> CACHE
+    end
+    
+    subgraph F5["5️⃣ 메시지 내역 요약"]
+        TRS[Time Range Selector<br/>일일/주간/월별]
+        MG[Message Grouping<br/>시간대별 그룹화]
+        SUM[LLM 요약<br/>그룹별 요약]
+        
+        TRS --> MG
+        MG --> SUM
+    end
+    
+    subgraph F6["6️⃣ 일정 마무리 시스템"]
+        SD[Summary Dialog<br/>요약 다이얼로그]
+        DS[일일/주간 요약<br/>LLM 생성]
+        WS[날씨 정보<br/>Weather API]
+        
+        SD --> DS
+        SD --> WS
+    end
+    
+    VOS --> AP
+    AP --> TR
+    TR --> T3S
+    MG --> SUM
+    DS --> SUM
+    
+    style F1 fill:#E3F2FD,stroke:#1976D2,stroke-width:2px
+    style F2 fill:#FFF3E0,stroke:#F57C00,stroke-width:2px
+    style F3 fill:#F3E5F5,stroke:#7B1FA2,stroke-width:2px
+    style F4 fill:#E8F5E9,stroke:#388E3C,stroke-width:2px
+    style F5 fill:#FFF9C4,stroke:#F9A825,stroke-width:2px
+    style F6 fill:#FFE0B2,stroke:#E64A19,stroke-width:2px

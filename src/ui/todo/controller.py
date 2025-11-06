@@ -32,6 +32,10 @@ class TodoPanelController:
         self.top3_service = top3_service
         self.project_service = project_service
         self._current_project_filter: Optional[str] = None
+        self._current_persona_filter: Optional[str] = None
+        self._current_persona_email: Optional[str] = None
+        self._current_persona_handle: Optional[str] = None
+        self._show_reasoning_popup_flag: bool = False  # 선정이유 팝업 표시 플래그
 
     # ------------------------------------------------------------------ #
     # 서비스 인스턴스 업데이트
@@ -94,11 +98,40 @@ class TodoPanelController:
             prepared.append(todo)
         return prepared
 
-    def save_items(self, rows: Iterable[dict]) -> None:
-        self.repository.save_all(rows)
+    def save_items(self, rows: Iterable[dict], incremental: bool = True) -> dict:
+        """TODO 아이템 저장
+        
+        Args:
+            rows: TODO 딕셔너리 리스트
+            incremental: True면 증분 업데이트, False면 전체 교체
+            
+        Returns:
+            dict: 업데이트 통계 (incremental=True인 경우)
+        """
+        if incremental:
+            stats = self.repository.upsert_todos(rows)
+            logger.info(f"📊 TODO 증분 업데이트: 추가 {stats['added']}개, 수정 {stats['updated']}개, 유지 {stats['unchanged']}개")
+            return stats
+        else:
+            self.repository.save_all(rows)
+            logger.info(f"📊 TODO 전체 교체: {len(list(rows))}개")
+            return {}
 
-    def load_active_items(self) -> List[dict]:
-        return self.repository.fetch_active()
+    def load_active_items(self, persona_name: Optional[str] = None) -> List[dict]:
+        """활성 TODO 로드 (페르소나 필터링 옵션)
+        
+        Args:
+            persona_name: 특정 페르소나의 TODO만 로드 (None이면 현재 필터 사용)
+        """
+        filter_persona = persona_name or self._current_persona_filter
+        filter_email = self._current_persona_email
+        filter_handle = self._current_persona_handle
+        
+        return self.repository.fetch_active(
+            persona_name=filter_persona,
+            persona_email=filter_email,
+            persona_handle=filter_handle
+        )
 
     # ------------------------------------------------------------------ #
     # 저장소 위임 (뷰에서 직접 접근하지 않도록 래핑)
@@ -121,8 +154,13 @@ class TodoPanelController:
     # ------------------------------------------------------------------ #
     # Top-3 계산
     # ------------------------------------------------------------------ #
-    def calculate_top3(self, rows: List[dict]) -> Set[str]:
-        """Top-3 선정 및 점수 계산."""
+    def calculate_top3(self, rows: List[dict], show_reasoning: bool = False) -> Set[str]:
+        """Top-3 선정 및 점수 계산.
+        
+        Args:
+            rows: TODO 리스트
+            show_reasoning: True면 선정이유 팝업 표시 (기본값: False)
+        """
         if not self.top3_service:
             for row in rows:
                 row["_top3_score"] = 0.0
@@ -146,6 +184,13 @@ class TodoPanelController:
 
             if updates:
                 self.repository.update_top3_flags(updates)
+            
+            # Top3 선정 이유 팝업 표시 (플래그가 True일 때만)
+            if show_reasoning:
+                reasoning = self.top3_service.get_last_reasoning()
+                if reasoning and top_ids:
+                    self._show_reasoning_popup(reasoning, len(top_ids))
+            
             return top_ids
         except Exception as exc:
             logger.error("Top-3 계산 오류: %s", exc, exc_info=True)
@@ -330,3 +375,60 @@ class TodoPanelController:
         if not self._current_project_filter:
             return True
         return (todo.get("project") or "").upper() == self._current_project_filter.upper()
+    
+    def set_persona_filter(self, persona_name: Optional[str] = None, persona_email: Optional[str] = None, persona_handle: Optional[str] = None) -> None:
+        """페르소나 필터 설정
+        
+        Args:
+            persona_name: 페르소나 이름 (한글 이름)
+            persona_email: 페르소나 이메일
+            persona_handle: 페르소나 채팅 핸들
+        """
+        self._current_persona_filter = persona_name
+        self._current_persona_email = persona_email
+        self._current_persona_handle = persona_handle
+        
+        filter_info = []
+        if persona_name:
+            filter_info.append(f"이름={persona_name}")
+        if persona_email:
+            filter_info.append(f"이메일={persona_email}")
+        if persona_handle:
+            filter_info.append(f"핸들={persona_handle}")
+        
+        logger.info(f"👤 페르소나 필터 설정: {', '.join(filter_info) if filter_info else '전체'}")
+    
+    def match_persona(self, todo: dict) -> bool:
+        """TODO가 현재 페르소나 필터와 일치하는지 확인"""
+        if not self._current_persona_filter:
+            return True
+        return todo.get("persona_name") == self._current_persona_filter
+
+    def _show_reasoning_popup(self, reasoning: str, count: int):
+        """Top3 선정 이유 팝업 표시
+        
+        Args:
+            reasoning: 선정 이유 (한국어)
+            count: 선정된 TODO 개수
+        """
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            
+            msg_box = QMessageBox()
+            msg_box.setWindowTitle("✅ Top3 선정 완료")
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setText(f"<b>{count}개의 TODO가 Top3로 선정되었습니다</b>")
+            msg_box.setInformativeText(f"<p style='margin-top:10px;'><b>선정 이유:</b><br>{reasoning}</p>")
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: white;
+                }
+                QLabel {
+                    font-size: 13px;
+                    color: #333;
+                }
+            """)
+            msg_box.exec()
+        except Exception as e:
+            logger.error(f"[TodoController] 팝업 표시 오류: {e}")

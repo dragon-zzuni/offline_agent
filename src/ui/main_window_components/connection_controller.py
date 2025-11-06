@@ -140,10 +140,20 @@ class VirtualOfficeConnectionController:
         ui = self.ui
         self._update_connection_ui(personas)
         ui._save_vo_config()
+        
+        # 연결 성공 시 캐시 무효화 및 즉시 분석 시작
+        logger.info("🚀 연결 성공 - 캐시 무효화 및 즉시 분석 시작")
+        if hasattr(ui, 'persona_cache_service') and ui.persona_cache_service:
+            cleared = ui.persona_cache_service.invalidate_all()
+            logger.info(f"🗑️ 전체 캐시 무효화: {cleared}개")
+        
+        # 다이얼로그 표시 (비차단)
         self._show_connection_success_dialog(personas, sim_status)
-
-        logger.info("🚀 연결 성공 - 1초 후 자동 분석 시작")
-        QTimer.singleShot(1000, ui._auto_start_analysis)
+        
+        # 즉시 분석 시작 (캐시 무시)
+        if ui.selected_persona:
+            logger.info(f"⚡ 즉시 분석 시작: {ui.selected_persona.name}")
+            QTimer.singleShot(500, lambda: ui.analysis_controller.start_quick_analysis(force=True))
 
     def _update_connection_ui(self, personas) -> None:
         ui = self.ui
@@ -166,16 +176,30 @@ class VirtualOfficeConnectionController:
 
     def _show_connection_success_dialog(self, personas, sim_status) -> None:
         ui = self.ui
-        QMessageBox.information(
-            ui,
-            "연결 성공",
-            (
-                "VirtualOffice 서버에 성공적으로 연결되었습니다.\n\n"
-                f"페르소나: {len(personas)}개\n"
-                f"현재 틱: {getattr(sim_status, 'current_tick', '?')}\n"
-                f"시뮬레이션 시간: {getattr(sim_status, 'sim_time', '?')}"
-            ),
+        message = (
+            "VirtualOffice 서버에 성공적으로 연결되었습니다.\n\n"
+            f"페르소나: {len(personas)}개\n"
+            f"현재 틱: {getattr(sim_status, 'current_tick', '?')}\n"
+            f"시뮬레이션 시간: {getattr(sim_status, 'sim_time', '?')}"
         )
+
+        existing_dialog = getattr(ui, "_vo_connection_dialog", None)
+        if existing_dialog:
+            try:
+                existing_dialog.close()
+            except Exception:
+                pass
+
+        dialog = QMessageBox(ui)
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setWindowTitle("연결 성공")
+        dialog.setText(message)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.setModal(False)
+        dialog.finished.connect(lambda _: setattr(ui, "_vo_connection_dialog", None))
+        dialog.show()
+
+        ui._vo_connection_dialog = dialog
 
     def _handle_connection_error(self, error: Exception) -> None:
         ui = self.ui

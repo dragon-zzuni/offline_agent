@@ -70,6 +70,7 @@ class Top3Service:
         self._rules = deepcopy(TOP3_RULE_DEFAULT)
         self._entity_rules = deepcopy(ENTITY_RULES_DEFAULT)
         self._last_instruction = ""
+        self._last_reasoning = ""  # 마지막 선정 이유 (한국어)
         self._vdos_connector = vdos_connector
         self._persona_cache_service = persona_cache_service
         
@@ -312,15 +313,23 @@ class Top3Service:
             Set[str]: Top3 TODO ID 집합
         
         선정 방식:
-        1. 자연어 규칙이 있고 LLM이 활성화되어 있으면 LLM 선정 시도
-        2. LLM 실패 시 점수 기반 선정으로 폴백
-        3. 자연어 규칙이 없으면 점수 기반 선정
+        1. 중복 제거 (같은 source_message는 1개만)
+        2. 자연어 규칙이 있고 LLM이 활성화되어 있으면 LLM 선정 시도
+        3. LLM 실패 시 점수 기반 선정으로 폴백
+        4. 자연어 규칙이 없으면 점수 기반 선정
         """
         # 1. status가 done이 아닌 것만 후보
         candidates = [x for x in items if (x.get("status") or "pending") not in ("done",)]
         
         if not candidates:
             logger.info("[Top3Service] 후보 TODO가 없습니다")
+            return set()
+        
+        # 2. 중복 제거 (같은 source_message는 1개만)
+        candidates = self._deduplicate_by_source(candidates)
+        
+        if not candidates:
+            logger.info("[Top3Service] 중복 제거 후 후보 TODO가 없습니다")
             return set()
         
         # 2. 자연어 규칙 확인
@@ -347,6 +356,8 @@ class Top3Service:
                 if top3_ids:
                     # LLM 선정 성공
                     self._llm_failure_count = 0  # 실패 카운터 리셋
+                    # 선정 이유 저장
+                    self._last_reasoning = llm_selector.last_reasoning
                     logger.info(f"[Top3Service] ✅ LLM 선정 성공: {len(top3_ids)}개 선정")
                     return top3_ids
                 else:
@@ -478,25 +489,31 @@ class Top3Service:
             self.set_rules(TOP3_RULE_DEFAULT)
             self.update_entity_rules({}, reset=True)
             self._save_rules()
+            
+            # 초기화 시 캐시 삭제
+            if self._llm_selector:
+                self._llm_selector.cache_manager.clear()
+                logger.info("[Top3Service] 규칙 초기화로 인한 캐시 삭제")
+            
             logger.info("[Top3Service] rules reset by user input")
             return "규칙을 기본값으로 초기화했습니다.", self.describe_rules()
         
-        # 휴리스틱 파싱 먼저 시도 (더 안정적)
+        # LLM 파싱 먼저 시도 (더 정확함)
         logger.info(f"[Top3Service] 자연어 규칙 파싱 시작: '{cleaned_text[:50]}...'")
-        parsed, heuristic_note = self._heuristic_parse_rules(cleaned_text)
+        parsed, llm_message = self._try_llm_parse_rules(cleaned_text)
         
         if parsed:
-            logger.info(f"[Top3Service] 휴리스틱 파싱 성공: {heuristic_note}")
-            llm_message = heuristic_note
+            logger.info(f"[Top3Service] LLM 파싱 성공: {llm_message}")
         else:
-            # 휴리스틱 실패 시 LLM 파싱
-            logger.warning(f"[Top3Service] 휴리스틱 파싱 실패, LLM 파싱으로 전환")
-            parsed, llm_message = self._try_llm_parse_rules(cleaned_text)
+            # LLM 실패 시 휴리스틱 파싱으로 폴백
+            logger.warning(f"[Top3Service] LLM 파싱 실패, 휴리스틱 파싱으로 폴백")
+            parsed, heuristic_note = self._heuristic_parse_rules(cleaned_text)
             
             if parsed:
-                logger.info(f"[Top3Service] LLM 파싱 성공: {llm_message}")
+                logger.info(f"[Top3Service] 휴리스틱 파싱 성공: {heuristic_note}")
+                llm_message = heuristic_note
             else:
-                logger.warning(f"[Top3Service] LLM 파싱도 실패: {llm_message}")
+                logger.warning(f"[Top3Service] 휴리스틱 파싱도 실패")
         
         if not parsed:
             msg = "규칙을 해석하지 못했습니다. 더 명확하게 입력해주세요."
@@ -525,6 +542,11 @@ class Top3Service:
         
         self._last_instruction = cleaned_text
         self._save_rules()
+        
+        # 규칙 변경 시 캐시 삭제 (새로운 규칙으로 재선정하기 위해)
+        if self._llm_selector:
+            self._llm_selector.cache_manager.clear()
+            logger.info("[Top3Service] 규칙 변경으로 인한 캐시 삭제")
         
         result_msg = "규칙을 업데이트했습니다."
         if llm_message:
@@ -889,3 +911,89 @@ class Top3Service:
             logger.info("[Top3Service] rules loaded from %s", self.config_path)
         except Exception as exc:
             logger.warning("[Top3Service] failed to load rules: %s", exc)
+
+    def get_last_reasoning(self) -> str:
+        """마지막 Top3 선정 이유 가져오기 (한국어)
+        
+        Returns:
+            선정 이유 문자열 (없으면 빈 문자열)
+        """
+        return self._last_reasoning
+    
+    def _deduplicate_by_source(self, todos: List[Dict]) -> List[Dict]:
+        """같은 source_message를 가진 TODO 중복 제거
+        
+        같은 메시지에서 여러 유형의 TODO가 생성된 경우,
+        우선순위가 가장 높은 유형 1개만 선택합니다.
+        
+        Args:
+            todos: TODO 리스트
+        
+        Returns:
+            중복 제거된 TODO 리스트
+        """
+        # 유형 우선순위 (TodoDeduplicationService와 동일)
+        TYPE_PRIORITY = {
+            "deadline": 6,
+            "meeting": 5,
+            "task": 4,
+            "review": 3,
+            "documentation": 2,
+            "issue": 1,
+        }
+        
+        # source_message별로 그룹화
+        source_groups = {}
+        for todo in todos:
+            source_msg = todo.get("source_message")
+            
+            if not source_msg:
+                # source_message가 없으면 개별 TODO로 처리
+                unique_key = f"no_source_{todo.get('id', '')}"
+                source_groups[unique_key] = [todo]
+            else:
+                # source_message가 dict인 경우 ID를 키로 사용
+                if isinstance(source_msg, dict):
+                    source_key = source_msg.get("id") or source_msg.get("message_id") or str(source_msg)
+                else:
+                    source_key = str(source_msg)
+                
+                if source_key not in source_groups:
+                    source_groups[source_key] = []
+                source_groups[source_key].append(todo)
+        
+        # 각 그룹에서 최선 TODO 선택
+        deduplicated = []
+        removed_count = 0
+        
+        for source_msg, group in source_groups.items():
+            if len(group) == 1:
+                # 중복 없음
+                deduplicated.append(group[0])
+            else:
+                # 중복 있음 - 우선순위로 정렬
+                sorted_group = sorted(
+                    group,
+                    key=lambda t: (
+                        TYPE_PRIORITY.get(t.get("type", "task"), 0),
+                        t.get("created_at", "")
+                    ),
+                    reverse=True
+                )
+                
+                best_todo = sorted_group[0]
+                deduplicated.append(best_todo)
+                removed_count += len(group) - 1
+                
+                logger.debug(
+                    f"[Top3Service] 중복 제거: source={source_msg}, "
+                    f"{len(group)}개 중 {best_todo.get('type')} 선택"
+                )
+        
+        if removed_count > 0:
+            logger.info(
+                f"[Top3Service] 🗑️ Top3 후보 중복 제거: "
+                f"{len(todos)}개 → {len(deduplicated)}개 ({removed_count}개 제거)"
+            )
+        
+        return deduplicated

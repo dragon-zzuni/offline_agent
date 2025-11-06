@@ -28,18 +28,39 @@ class ProjectTagService:
         self.vdos_connector = vdos_connector
         self.project_tags = {}
         self.person_project_mapping = {}  # 사람별 프로젝트 매핑
+        self.project_periods = {}  # 프로젝트별 기간 정보
         self.vdos_db_path = None  # VDOS 데이터베이스 경로
+        self.tag_cache = None  # 초기화 후 설정
+        self._custom_cache_path = cache_db_path  # 사용자 지정 경로 저장
         
-        # 프로젝트 태그 영구 캐시 초기화
-        if cache_db_path:
-            from services.project_tag_cache_service import ProjectTagCacheService
-            self.tag_cache = ProjectTagCacheService(cache_db_path)
-            logger.info(f"✅ 프로젝트 태그 캐시 활성화: {cache_db_path}")
-        else:
-            self.tag_cache = None
-            logger.warning("⚠️ 프로젝트 태그 캐시 비활성화")
-        
+        # VDOS 프로젝트 로드 (vdos_db_path 설정됨)
         self._load_projects_from_vdos()
+        
+        # 프로젝트 태그 영구 캐시 초기화 (VDOS DB와 같은 위치)
+        self._init_cache()
+    
+    def _init_cache(self):
+        """프로젝트 태그 캐시 초기화 (VDOS DB와 같은 위치)"""
+        from pathlib import Path
+        
+        # 사용자 지정 경로가 있으면 사용
+        if self._custom_cache_path:
+            cache_path = self._custom_cache_path
+        # VDOS DB 경로가 있으면 같은 디렉토리에 캐시 생성
+        elif self.vdos_db_path:
+            vdos_dir = Path(self.vdos_db_path).parent
+            cache_path = str(vdos_dir / "project_tags_cache.db")
+        else:
+            logger.warning("⚠️ 프로젝트 태그 캐시 비활성화 (VDOS DB 경로 없음)")
+            return
+        
+        try:
+            from services.project_tag_cache_service import ProjectTagCacheService
+            self.tag_cache = ProjectTagCacheService(cache_path)
+            logger.info(f"✅ 프로젝트 태그 캐시 활성화: {cache_path}")
+        except Exception as e:
+            logger.error(f"❌ 프로젝트 태그 캐시 초기화 실패: {e}")
+            self.tag_cache = None
     
     def _load_projects_from_vdos(self):
         """VDOS 데이터베이스에서 프로젝트 정보 로드"""
@@ -57,19 +78,16 @@ class ProjectTagService:
         import os
         from pathlib import Path
         
-        # VDOS 데이터베이스 경로 찾기 (더 많은 경로 시도)
-        current_dir = Path(__file__).parent
+        # VDOS 데이터베이스 경로 찾기
+        # 작업 디렉토리 기준으로 절대 경로 사용 (상대 경로 문제 방지)
+        import os
+        workspace_root = Path(os.getcwd())
+        
         possible_paths = [
-            # 현재 프로젝트 기준
-            current_dir / "../../../virtualoffice/src/virtualoffice/vdos.db",
-            current_dir / "../../virtualoffice/src/virtualoffice/vdos.db", 
-            current_dir / "../virtualoffice/src/virtualoffice/vdos.db",
-            current_dir / "../virtualoffice/vdos.db",
-            # 절대 경로 시도
-            Path("../virtualoffice/src/virtualoffice/vdos.db"),
-            Path("../../virtualoffice/src/virtualoffice/vdos.db"),
-            Path("../virtualoffice/vdos.db"),
-            # 환경 변수나 설정에서 가져오기
+            # 작업 디렉토리 기준 (가장 안전)
+            workspace_root / "virtualoffice" / "src" / "virtualoffice" / "vdos.db",
+            # 현재 파일 기준 (폴백)
+            Path(__file__).resolve().parents[3] / "virtualoffice" / "src" / "virtualoffice" / "vdos.db",
         ]
         
         # VDOS 연결자가 있으면 경로 가져오기
@@ -102,9 +120,9 @@ class ProjectTagService:
         cur = conn.cursor()
         
         try:
-            # 프로젝트 정보 조회
+            # 프로젝트 정보 조회 (기간 정보 포함)
             cur.execute("""
-                SELECT id, project_name, project_summary 
+                SELECT id, project_name, project_summary, duration_weeks, start_week
                 FROM project_plans 
                 ORDER BY id
             """)
@@ -120,8 +138,9 @@ class ProjectTagService:
             """)
             assignments = cur.fetchall()
             
-            # 프로젝트 태그 생성
-            for project_id, project_name, project_summary in projects:
+            # 프로젝트 태그 생성 (기간 정보 포함)
+            self.project_periods = {}  # 프로젝트별 기간 정보 저장
+            for project_id, project_name, project_summary, duration_weeks, start_week in projects:
                 project_code = self._extract_project_code_from_name(project_name)
                 
                 self.project_tags[project_code] = ProjectTag(
@@ -130,6 +149,14 @@ class ProjectTagService:
                     color=self._get_project_color(project_code),
                     description=project_summary or ""
                 )
+                
+                # 기간 정보 저장
+                if duration_weeks and start_week:
+                    self.project_periods[project_code] = {
+                        'start_week': start_week,
+                        'end_week': start_week + duration_weeks - 1,
+                        'duration_weeks': duration_weeks
+                    }
             
             # 사람별 프로젝트 매핑 생성
             for project_id, project_name, person_name, email, role in assignments:
@@ -230,7 +257,8 @@ class ProjectTagService:
         1. 캐시 조회 (이미 분석된 TODO)
         2. 명시적 프로젝트명 (대괄호 패턴 등)
         3. LLM 기반 내용 분석 (메시지 내용 우선)
-        4. 발신자 정보 참고 (폴백, 여러 프로젝트 가능하므로 참고용)
+        4. 고급 분석 (프로젝트 기간, 설명, 발신자 종합)
+        5. 발신자 정보 참고 (폴백, 여러 프로젝트 가능하므로 참고용)
         
         Args:
             message: 메시지 데이터
@@ -246,44 +274,70 @@ class ProjectTagService:
             if use_cache and todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
                 cached = self.tag_cache.get_cached_tag(todo_id)
                 if cached:
-                    logger.debug(f"[프로젝트 태그] 캐시 히트: {todo_id} → {cached['project_tag']}")
+                    reason = cached.get('classification_reason', '')
+                    if reason:
+                        logger.debug(f"[프로젝트 태그] 캐시 히트: {todo_id} → {cached['project_tag']} ({reason})")
+                    else:
+                        logger.debug(f"[프로젝트 태그] 캐시 히트: {todo_id} → {cached['project_tag']}")
                     return cached['project_tag']
             
             # 1. 명시적 프로젝트명 확인 (대괄호 패턴 등 명확한 경우만)
             explicit_project = self._extract_explicit_project(message)
             if explicit_project:
+                reason = f"명시적 패턴 매칭"
+                
                 # 명시적 패턴이 발견되면 LLM으로 검증
-                llm_verification = self._extract_project_by_llm(message)
-                if llm_verification and llm_verification != 'UNKNOWN':
-                    logger.info(f"[프로젝트 태그] LLM 검증 결과: {llm_verification} (명시적: {explicit_project})")
-                    result = llm_verification
+                llm_result = self._extract_project_by_llm(message)
+                if llm_result:
+                    llm_project, llm_reason = llm_result
+                    if llm_project and llm_project != 'UNKNOWN':
+                        logger.info(f"[프로젝트 태그] LLM 검증: {llm_project} ({llm_reason})")
+                        result = llm_project
+                        reason = llm_reason
+                    else:
+                        logger.info(f"[프로젝트 태그] 명시적 프로젝트 사용: {explicit_project}")
+                        result = explicit_project
                 else:
                     logger.info(f"[프로젝트 태그] 명시적 프로젝트 사용: {explicit_project}")
                     result = explicit_project
                 
                 # 캐시 저장
                 if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
-                    self.tag_cache.save_tag(todo_id, result, 'explicit', 'pattern_match')
+                    self.tag_cache.save_tag(todo_id, result, 'explicit', 'pattern_match', reason)
                 return result
             
             # 2. LLM 기반 지능 분류 (메시지 내용 우선 분석)
-            llm_project = self._extract_project_by_llm(message)
-            if llm_project and llm_project != 'UNKNOWN':
-                logger.info(f"[프로젝트 태그] LLM 내용 분석 결과: {llm_project}")
+            llm_result = self._extract_project_by_llm(message)
+            if llm_result:
+                llm_project, llm_reason = llm_result
+                if llm_project and llm_project != 'UNKNOWN':
+                    logger.info(f"[프로젝트 태그] LLM 분석: {llm_project} ({llm_reason})")
+                    
+                    # 캐시 저장
+                    if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
+                        self.tag_cache.save_tag(todo_id, llm_project, 'llm', 'content_analysis', llm_reason)
+                    return llm_project
+            
+            # 3. 고급 분석 (프로젝트 기간, 설명, 발신자 종합)
+            advanced_result = self._extract_project_by_advanced_analysis(message)
+            if advanced_result:
+                project_code, reason = advanced_result
+                logger.info(f"[프로젝트 태그] 고급 분석: {project_code} ({reason})")
                 
                 # 캐시 저장
                 if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
-                    self.tag_cache.save_tag(todo_id, llm_project, 'llm', 'content_analysis')
-                return llm_project
+                    self.tag_cache.save_tag(todo_id, project_code, 'advanced', 'advanced_analysis', reason)
+                return project_code
             
-            # 3. 발신자 정보 참고 (폴백 - 여러 프로젝트 가능하므로 참고용)
+            # 4. 발신자 정보 참고 (폴백 - 여러 프로젝트 가능하므로 참고용)
             sender_project = self._extract_project_by_sender(message)
             if sender_project:
-                logger.info(f"[프로젝트 태그] 발신자 참고 (폴백): {sender_project}")
+                reason = "발신자 기본 프로젝트"
+                logger.info(f"[프로젝트 태그] 발신자 폴백: {sender_project} ({reason})")
                 
                 # 캐시 저장
                 if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
-                    self.tag_cache.save_tag(todo_id, sender_project, 'sender', 'sender_fallback')
+                    self.tag_cache.save_tag(todo_id, sender_project, 'sender', 'sender_fallback', reason)
                 return sender_project
             
             logger.debug("[프로젝트 태그] 프로젝트를 식별할 수 없음")
@@ -396,8 +450,197 @@ class ProjectTagService:
         
         return None
     
-    def _extract_project_by_llm(self, message: Dict) -> Optional[str]:
-        """LLM을 사용하여 메시지 내용으로 프로젝트 분류"""
+    def _extract_project_by_advanced_analysis(self, message: Dict) -> Optional[Tuple[str, str]]:
+        """고급 분석: 채팅 메시지 처리 + 프로젝트 기간, 설명, 발신자 종합 분석
+        
+        UNKNOWN이 나올 경우:
+        1. 채팅 메시지인지 확인 (source_message가 비어있는 경우)
+        2. VDOS DB에서 실제 채팅 내용 가져오기
+        3. 프로젝트 기간과 설명을 활용하여 유추
+        
+        Returns:
+            (프로젝트 코드, 분류 근거) 튜플 또는 None
+        """
+        try:
+            content = message.get("content", "")
+            subject = message.get("subject", "")
+            sender = message.get("sender", "")
+            sender_email = message.get("sender_email", "")
+            message_date = message.get("timestamp", "")
+            todo_content = message.get("todo_content", "")  # TODO 내용 (있는 경우)
+            
+            # 채팅 메시지 감지: content와 subject가 모두 비어있고 sender가 이메일 형식이 아님
+            is_chat_message = (not content and not subject and sender and '@' not in sender)
+            
+            if is_chat_message:
+                logger.info(f"[프로젝트 태그] 채팅 메시지 감지: {sender}")
+                
+                # 채팅 전용 매칭 로직 사용
+                if self.vdos_db_path:
+                    chat_result = self._match_project_from_chat(sender, message_date, todo_content)
+                    if chat_result:
+                        return chat_result
+                    else:
+                        logger.debug(f"[프로젝트 태그] 채팅 매칭 실패, 기본 분석으로 폴백")
+                
+                # 폴백: VDOS DB에서 채팅 내용 가져오기
+                content = self._fetch_chat_content_from_vdos(sender, message_date)
+                if content:
+                    logger.debug(f"[프로젝트 태그] 채팅 내용 조회 성공: {content[:100]}...")
+            
+            text = f"{subject} {content} {todo_content}".lower()
+            
+            # 1. 발신자가 참여한 프로젝트 목록 가져오기
+            sender_projects = []
+            if sender_email and sender_email in self.person_project_mapping:
+                sender_projects = self.person_project_mapping[sender_email]
+            elif sender and sender in self.person_project_mapping:
+                sender_projects = self.person_project_mapping[sender]
+            
+            if not sender_projects:
+                return None
+            
+            # 2. 각 프로젝트별 점수 계산
+            project_scores = {}
+            
+            for project_code in sender_projects:
+                score = 0
+                reasons = []
+                
+                project_tag = self.project_tags.get(project_code)
+                if not project_tag:
+                    continue
+                
+                # 2.1 프로젝트 설명과의 유사도
+                if project_tag.description:
+                    desc_lower = project_tag.description.lower()
+                    # 설명에서 주요 키워드 추출
+                    desc_keywords = set(re.findall(r'[가-힣a-z]{2,}', desc_lower))
+                    text_keywords = set(re.findall(r'[가-힣a-z]{2,}', text))
+                    
+                    # 공통 키워드 개수
+                    common_keywords = desc_keywords & text_keywords
+                    if common_keywords:
+                        keyword_score = len(common_keywords) * 10
+                        score += keyword_score
+                        reasons.append(f"키워드 {len(common_keywords)}개 일치")
+                
+                # 2.2 프로젝트 이름 부분 매칭
+                project_name_lower = project_tag.name.lower()
+                project_words = re.findall(r'[가-힣a-z]+', project_name_lower)
+                for word in project_words:
+                    if len(word) > 2 and word in text:
+                        score += 20
+                        reasons.append(f"프로젝트명 '{word}' 포함")
+                        break
+                
+                # 2.3 프로젝트 기간 정보 활용 (메시지 날짜가 있는 경우)
+                if message_date and project_code in self.project_periods:
+                    period = self.project_periods[project_code]
+                    score += 5
+                    reasons.append(f"기간: {period['start_week']}~{period['end_week']}주차")
+                
+                if score > 0:
+                    project_scores[project_code] = (score, ", ".join(reasons))
+            
+            # 3. 가장 높은 점수의 프로젝트 반환
+            if project_scores:
+                best_project = max(project_scores.items(), key=lambda x: x[1][0])
+                project_code, (score, reason) = best_project
+                
+                if score >= 10:  # 최소 점수 임계값
+                    return (project_code, f"고급분석: {reason}")
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"고급 분석 오류: {e}")
+            return None
+    
+    def _match_project_from_chat(self, sender: str, message_date: str = None, 
+                                 todo_content: str = None) -> Optional[Tuple[str, str]]:
+        """채팅 메시지 전용 프로젝트 매칭
+        
+        Args:
+            sender: 발신자 (채팅 핸들)
+            message_date: 메시지 날짜
+            todo_content: TODO 내용 (있는 경우)
+            
+        Returns:
+            (프로젝트 코드, 분류 근거) 튜플 또는 None
+        """
+        try:
+            from services.chat_project_matcher import ChatProjectMatcher
+            
+            matcher = ChatProjectMatcher(
+                vdos_db_path=self.vdos_db_path,
+                project_tags=self.project_tags,
+                person_project_mapping=self.person_project_mapping,
+                project_periods=self.project_periods
+            )
+            
+            return matcher.match_project_from_chat(sender, message_date, todo_content)
+            
+        except Exception as e:
+            logger.error(f"채팅 프로젝트 매칭 오류: {e}")
+            return None
+    
+    def _fetch_chat_content_from_vdos(self, sender: str, message_date: str = None) -> Optional[str]:
+        """VDOS DB에서 채팅 메시지 내용 가져오기
+        
+        Args:
+            sender: 발신자 (채팅 핸들 또는 이메일)
+            message_date: 메시지 날짜 (선택)
+            
+        Returns:
+            채팅 메시지 내용 또는 None
+        """
+        try:
+            if not self.vdos_db_path:
+                return None
+            
+            import sqlite3
+            conn = sqlite3.connect(self.vdos_db_path)
+            cur = conn.cursor()
+            
+            # 최근 메시지 조회 (발신자 기준)
+            if message_date:
+                # 날짜 기준으로 가장 가까운 메시지
+                cur.execute('''
+                    SELECT body
+                    FROM chat_messages
+                    WHERE sender = ?
+                    ORDER BY ABS(julianday(sent_at) - julianday(?))
+                    LIMIT 1
+                ''', (sender, message_date))
+            else:
+                # 가장 최근 메시지
+                cur.execute('''
+                    SELECT body
+                    FROM chat_messages
+                    WHERE sender = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                ''', (sender,))
+            
+            result = cur.fetchone()
+            conn.close()
+            
+            if result:
+                return result[0]
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"채팅 내용 조회 오류: {e}")
+            return None
+    
+    def _extract_project_by_llm(self, message: Dict) -> Optional[Tuple[str, str]]:
+        """LLM을 사용하여 메시지 내용으로 프로젝트 분류
+        
+        Returns:
+            (프로젝트 코드, 분류 근거) 튜플 또는 None
+        """
         try:
             # 메시지 내용 준비
             content = message.get("content", "")
@@ -408,10 +651,12 @@ class ProjectTagService:
                 return None
             
             # 기존 LLM 서비스 사용 (Top3Service와 동일한 방식)
-            response_text = self._call_existing_llm_service(message)
+            result = self._call_existing_llm_service(message)
             
-            if response_text and response_text.strip().upper() in self.project_tags:
-                return response_text.strip().upper()
+            if result:
+                project_code, reason = result
+                if project_code and project_code.strip().upper() in self.project_tags:
+                    return (project_code.strip().upper(), reason)
             
             return None
             
@@ -419,8 +664,186 @@ class ProjectTagService:
             logger.error(f"LLM 프로젝트 분류 오류: {e}")
             return None
     
-    def _call_existing_llm_service(self, message: Dict) -> Optional[str]:
-        """VDOS DB 정보를 활용한 LLM 기반 프로젝트 분류"""
+    def _recover_chat_message_content(self, message: Dict) -> Optional[Dict]:
+        """채팅 메시지 내용 복구
+        
+        source_message에 내용이 없는 경우 VDOS DB에서 실제 채팅 내용을 가져옴
+        
+        Returns:
+            복구된 메시지 딕셔너리 또는 None
+        """
+        try:
+            # 발신자가 채팅 핸들인지 확인 (이메일 형식이 아님)
+            sender = message.get('sender', '') or message.get('sender_email', '')
+            if not sender or '@' in sender:
+                return None  # 이메일이면 채팅이 아님
+            
+            # 내용이 비어있는지 확인
+            content = message.get('content', '') or message.get('body', '')
+            subject = message.get('subject', '')
+            
+            if content or subject:
+                return None  # 이미 내용이 있음
+            
+            # VDOS DB가 없으면 복구 불가
+            if not self.vdos_db_path:
+                return None
+            
+            import sqlite3
+            conn = sqlite3.connect(self.vdos_db_path)
+            cur = conn.cursor()
+            
+            # 채팅 핸들로 최근 메시지 검색 (프로젝트 언급이 있는 메시지 우선)
+            cur.execute('''
+                SELECT cm.id, cm.sender, cm.body, cm.sent_at, cr.name as room_name, cm.room_id
+                FROM chat_messages cm
+                JOIN chat_rooms cr ON cm.room_id = cr.id
+                WHERE cm.sender = ?
+                ORDER BY cm.id DESC
+                LIMIT 20
+            ''', (sender,))
+            
+            recent_messages = cur.fetchall()
+            
+            if not recent_messages:
+                conn.close()
+                return None
+            
+            # 프로젝트 언급이 있는 메시지 우선 선택
+            selected_message = None
+            for msg_id, msg_sender, msg_body, msg_sent_at, room_name, room_id in recent_messages:
+                # 프로젝트 키워드 확인
+                if any(keyword in msg_body for keyword in ['Project', 'LUMINA', 'VERTEX', 'NOVA', 'SYNAPSE', 'OMEGA', '프로젝트']):
+                    selected_message = (msg_id, msg_sender, msg_body, msg_sent_at, room_name, room_id)
+                    logger.info(f"[프로젝트 태그] 프로젝트 언급 채팅 발견: {msg_body[:50]}...")
+                    break
+            
+            # 프로젝트 언급이 없으면 가장 최근 메시지 사용
+            if not selected_message:
+                selected_message = recent_messages[0]
+                logger.info(f"[프로젝트 태그] 최근 채팅 사용: {selected_message[2][:50]}...")
+            
+            msg_id, msg_sender, msg_body, msg_sent_at, room_name, room_id = selected_message
+            
+            # 채팅방 멤버 확인 (프로젝트 유추에 활용)
+            cur.execute('''
+                SELECT handle
+                FROM chat_members
+                WHERE room_id = ?
+            ''', (room_id,))
+            room_members = [row[0] for row in cur.fetchall()]
+            
+            conn.close()
+            
+            # 복구된 메시지 반환
+            return {
+                'id': message.get('id'),
+                'sender': msg_sender,
+                'sender_email': msg_sender,
+                'subject': f"채팅: {room_name}",
+                'content': msg_body,
+                'body': msg_body,
+                'timestamp': msg_sent_at,
+                'source_type': 'chat',
+                'room_members': room_members  # 채팅방 멤버 정보 추가
+            }
+            
+        except Exception as e:
+            logger.error(f"채팅 메시지 복구 오류: {e}")
+            return None
+    
+    def _extract_project_by_advanced_analysis(self, message: Dict) -> Optional[Tuple[str, str]]:
+        """고급 분석: 프로젝트 기간, 설명, 발신자 종합 분석
+        
+        UNKNOWN이 나올 경우 프로젝트 기간과 설명을 활용하여 유추
+        
+        Returns:
+            (프로젝트 코드, 분류 근거) 튜플 또는 None
+        """
+        try:
+            content = message.get("content", "")
+            subject = message.get("subject", "")
+            sender = message.get("sender", "")
+            sender_email = message.get("sender_email", "")
+            message_date = message.get("timestamp", "")
+            
+            text = f"{subject} {content}".lower()
+            
+            # 1. 발신자가 참여한 프로젝트 목록 가져오기
+            sender_projects = []
+            if sender_email and sender_email in self.person_project_mapping:
+                sender_projects = self.person_project_mapping[sender_email]
+            elif sender and sender in self.person_project_mapping:
+                sender_projects = self.person_project_mapping[sender]
+            
+            if not sender_projects:
+                return None
+            
+            # 2. 각 프로젝트별 점수 계산
+            project_scores = {}
+            
+            for project_code in sender_projects:
+                score = 0
+                reasons = []
+                
+                project_tag = self.project_tags.get(project_code)
+                if not project_tag:
+                    continue
+                
+                # 2.1 프로젝트 설명과의 유사도
+                if project_tag.description:
+                    desc_lower = project_tag.description.lower()
+                    # 설명에서 주요 키워드 추출
+                    desc_keywords = set(re.findall(r'[가-힣a-z]{2,}', desc_lower))
+                    text_keywords = set(re.findall(r'[가-힣a-z]{2,}', text))
+                    
+                    # 공통 키워드 개수
+                    common_keywords = desc_keywords & text_keywords
+                    if common_keywords:
+                        keyword_score = len(common_keywords) * 10
+                        score += keyword_score
+                        reasons.append(f"키워드 {len(common_keywords)}개 일치")
+                
+                # 2.2 프로젝트 이름 부분 매칭
+                project_name_lower = project_tag.name.lower()
+                project_words = re.findall(r'[가-힣a-z]+', project_name_lower)
+                for word in project_words:
+                    if len(word) > 2 and word in text:
+                        score += 20
+                        reasons.append(f"프로젝트명 '{word}' 포함")
+                        break
+                
+                # 2.3 프로젝트 기간 정보 활용 (메시지 날짜가 있는 경우)
+                if message_date and project_code in self.project_periods:
+                    period = self.project_periods[project_code]
+                    # TODO: 메시지 날짜를 주차로 변환하여 프로젝트 기간과 비교
+                    # 현재는 기간 정보가 있다는 것만으로 약간의 가산점
+                    score += 5
+                    reasons.append(f"기간: {period['start_week']}~{period['end_week']}주차")
+                
+                if score > 0:
+                    project_scores[project_code] = (score, ", ".join(reasons))
+            
+            # 3. 가장 높은 점수의 프로젝트 반환
+            if project_scores:
+                best_project = max(project_scores.items(), key=lambda x: x[1][0])
+                project_code, (score, reason) = best_project
+                
+                if score >= 10:  # 최소 점수 임계값
+                    return (project_code, f"고급분석: {reason}")
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"고급 분석 오류: {e}")
+            return None
+    
+    def _call_existing_llm_service(self, message: Dict) -> Optional[Tuple[str, str]]:
+        """VDOS DB 정보를 활용한 LLM 기반 프로젝트 분류
+        
+        Returns:
+            (프로젝트 코드, 분류 근거) 튜플 또는 None
+        """
         try:
             # VDOS DB에서 프로젝트 및 사람 정보 가져오기
             project_context = self._build_project_context()
@@ -451,7 +874,8 @@ class ProjectTagService:
 3. 메시지 내용의 키워드와 프로젝트 설명을 매칭하여 판단
 4. 확실하지 않으면 'UNKNOWN' 반환
 
-응답은 반드시 프로젝트 코드만 반환하세요 (예: CC, HA, WELL, WI, CI 또는 UNKNOWN)."""
+응답 형식: "프로젝트코드|분류근거" (예: "PV|제목에 VERTEX 명시" 또는 "UNKNOWN|프로젝트 특정 불가")
+분류근거는 10단어 이내로 간단히 작성하세요."""
 
             user_prompt = f"""다음 메시지를 분석하여 관련 프로젝트를 분류해주세요:
 
@@ -459,15 +883,19 @@ class ProjectTagService:
 제목: {subject}
 내용: {content[:1000]}
 
-프로젝트 코드만 반환하세요."""
+"프로젝트코드|분류근거" 형식으로 반환하세요."""
 
             # LLM API 호출
             response = self._call_llm_api(system_prompt, user_prompt)
             
             if response and response.strip():
-                result = response.strip().upper()
-                logger.info(f"[프로젝트 태그] LLM 분류 결과: {result}")
-                return result
+                # 응답 파싱: "프로젝트코드|분류근거"
+                parts = response.strip().split('|', 1)
+                project_code = parts[0].strip().upper()
+                reason = parts[1].strip() if len(parts) > 1 else "LLM 내용 분석"
+                
+                logger.info(f"[프로젝트 태그] LLM 분류: {project_code} ({reason})")
+                return (project_code, reason)
                 
             return None
             

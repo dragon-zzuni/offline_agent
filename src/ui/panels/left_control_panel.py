@@ -69,7 +69,7 @@ class LeftControlPanel(QWidget):
     
     def _create_title(self, layout):
         """제목 생성"""
-        title = QLabel("OFFLINE-AGENT")
+        title = QLabel("SmartAssistant")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("color: #2c3e50; margin: 8px;")

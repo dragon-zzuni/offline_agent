@@ -39,7 +39,9 @@ class MessageDetailDialog(QDialog):
         """
         super().__init__(parent)
         self.summary_group = summary_group
-        self.messages = messages
+        
+        # 메시지를 최신순으로 정렬
+        self.messages = self._sort_messages(messages)
         
         self._init_ui()
         self._populate_messages()
@@ -244,6 +246,29 @@ class MessageDetailDialog(QDialog):
         layout.addWidget(scroll_area)
         
         return panel
+    
+    def _sort_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """메시지를 최신순으로 정렬
+        
+        Args:
+            messages: 정렬할 메시지 리스트
+            
+        Returns:
+            최신순으로 정렬된 메시지 리스트
+        """
+        if not messages:
+            return messages
+        
+        def get_sort_key(message):
+            # 여러 시간 필드 지원: date, timestamp, sent_at
+            time_value = (message.get('date') or 
+                         message.get('timestamp') or 
+                         message.get('sent_at') or '')
+            return time_value
+        
+        # 최신순 정렬 (내림차순)
+        sorted_messages = sorted(messages, key=get_sort_key, reverse=True)
+        return sorted_messages
     
     def _populate_messages(self):
         """메시지 목록 채우기"""

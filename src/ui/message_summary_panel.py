@@ -337,12 +337,6 @@ class MessageSummaryPanel(QWidget):
             """)
             layout.addWidget(summary_label)
         
-        # 주요 포인트
-        key_points = summary.get("key_points", [])
-        if key_points:
-            points_widget = self._create_key_points(key_points)
-            layout.addWidget(points_widget)
-        
         return card
     
     def _create_card_header(self, summary: Dict) -> QWidget:

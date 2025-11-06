@@ -36,13 +36,14 @@ class Top3LLMSelector:
         self.llm_client = llm_client or LLMClient()
         self.cache_manager = cache_manager or Top3CacheManager()
         self.email_to_name = email_to_name or {}
+        self.last_reasoning = ""  # 마지막 선정 이유 (한국어)
     
     def select_top3(
         self,
         todos: List[Dict],
         natural_rule: str,
         entity_rules: Optional[Dict[str, Dict[str, float]]] = None
-    ) -> Set[str]:
+    ) -> Tuple[Set[str], str]:
         """LLM으로 Top3 선정 (폴백 메커니즘 포함)
         
         Args:
@@ -51,7 +52,7 @@ class Top3LLMSelector:
             entity_rules: 엔티티 규칙 (캐시 키 생성용)
             
         Returns:
-            선정된 TODO ID 집합
+            (선정된 TODO ID 집합, 선정 이유)
         """
         if not todos:
             logger.warning("[Top3LLM] TODO 리스트가 비어있습니다")
@@ -79,11 +80,9 @@ class Top3LLMSelector:
             logger.warning("[Top3LLM] LLM 클라이언트를 사용할 수 없습니다 → 폴백 모드")
             return self._fallback_selection(candidates)
         
-        # 50개 이상이면 사전 필터링
-        if len(candidates) > 50:
-            logger.info(f"[Top3LLM] TODO {len(candidates)}개 → 사전 필터링 적용")
-            candidates = self._prefilter_todos(candidates, natural_rule)
-            logger.info(f"[Top3LLM] 사전 필터링 후: {len(candidates)}개")
+        # 사전 필터링 제거: LLM이 모든 TODO를 직접 분석하도록 함
+        # (자연어 규칙의 모든 조건을 정확히 적용하기 위해)
+        logger.info(f"[Top3LLM] TODO {len(candidates)}개를 LLM에 전달 (사전 필터링 없음)")
         
         # LLM 시도
         try:
@@ -139,9 +138,8 @@ class Top3LLMSelector:
             f"길이={len(response.content)}자"
         )
         
-        # 응답 내용 로깅 (DEBUG)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"[Top3LLM] 응답 내용:\n{response.content}")
+        # 응답 내용 로깅 (항상 표시 - 디버깅용)
+        logger.info(f"[Top3LLM] LLM 응답 내용:\n{response.content}")
         
         # 응답 파싱
         top3_ids, reasoning = self._parse_response(response.content)
@@ -162,6 +160,9 @@ class Top3LLMSelector:
         
         # 캐시 저장
         self.cache_manager.set(original_todos, valid_ids, entity_rules, natural_rule)
+        
+        # 선정 이유 저장 (한국어)
+        self.last_reasoning = reasoning
         
         # 선정 결과 로깅 (INFO)
         logger.info(f"[Top3LLM] ✅ 선정 완료: {len(valid_ids)}개")
@@ -251,16 +252,24 @@ class Top3LLMSelector:
             # 이메일을 이름으로 변환
             requester_name = person_mapping.get(requester, requester)
             
-            todo_info = f"""ID: {todo.get("id", "")}
-제목: {(todo.get("title") or "")[:100]}
-프로젝트: {todo.get("project", "")}
-**요청자(이 TODO를 생성한 사람)**: {requester_name}
-우선순위: {todo.get("priority", "medium")}
-마감일: {todo.get("deadline", "")}
-유형: {todo.get("type", "")}
-수신타입: {todo.get("recipient_type", "to")}
-설명: {(todo.get("description") or "")[:150]}"""
-            todo_list.append(f"{i}. {todo_info}")
+            # 프로젝트 정보 (풀네임 우선, 없으면 코드)
+            project_code = todo.get("project", "")
+            project_fullname = todo.get("project_full_name", "")
+            project_display = f"{project_fullname} ({project_code})" if project_fullname else project_code
+            
+            # ID를 더 명확하게 강조
+            todo_id = todo.get("id", "")
+            todo_type = todo.get("type", "")
+            
+            todo_info = f"""[TODO #{i}]
+→ ID: "{todo_id}" (이 ID를 그대로 사용하세요!)
+→ 제목: {(todo.get("title") or "")[:80]}
+→ 프로젝트: {project_display}
+→ 요청자: {requester_name}
+→ 유형: {todo_type}
+→ 우선순위: {todo.get("priority", "medium")}
+→ 마감일: {todo.get("deadline", "")}"""
+            todo_list.append(todo_info)
         
         todos_text = "\n\n".join(todo_list)
         
@@ -271,31 +280,67 @@ class Top3LLMSelector:
         prompt = f"""다음 TODO 리스트에서 사용자의 자연어 규칙에 가장 잘 맞는 상위 3개를 선정하여 JSON 형식으로 답변해주세요. 
 반드시 소문자 json이라는 단어를 포함한 json 문자열로만 응답하세요.
 
-사용자 규칙: {natural_rule}
+**중요**: 모든 응답은 반드시 한국어로 작성하세요!
 
-프로젝트 태그 매핑:
-- CC: Care Connect 2.0 리디자인 (케어 커넥트, 환자 연결 플랫폼)
-- HA: HealthCore API 리팩토링 (헬스코어, 헬스 코어)
-- WELL: WellLink 브랜드 런칭 캠페인 (웰링크, 웰 링크)
-- WI: WellLink Insight Dashboard (웰링크 인사이트)
-- CI: CareBridge Integration (케어브릿지, 케어 브릿지)
+사용자 규칙: {natural_rule}
 {person_section}
 
 TODO 리스트 ({len(todos)}개):
 {todos_text}
 
-선정 기준:
-1. 사용자 규칙의 모든 조건을 정확히 만족하는 TODO 우선
-2. 프로젝트명은 부분 일치 허용 (예: "Care" → CC, "케어" → CC, "HealthCore" → HA)
-3. **중요**: "요청자"는 TODO를 생성한 사람입니다. 설명에 언급된 사람이 아닙니다.
-   - 예: "요청자: 전형우, 설명: 황다연과 회의" → 요청자는 전형우입니다 (황다연 아님)
-4. 마감일, 우선순위, 유형 등 모든 조건 종합 고려
-5. 정확히 3개를 선정 (조건에 맞는 TODO가 3개 미만이면 조건 완화)
+선정 기준 (반드시 순서대로 적용):
+1. **프로젝트 조건을 최우선으로 정확히 만족**: 
+   - 각 TODO의 "프로젝트" 필드를 확인하세요
+   - 사용자가 "care bridge" 또는 "CareBridge"라고 하면 프로젝트가 "CareBridge Integration (CI)" 또는 "CI"인 TODO만 선택
+   - "Care Connect"라고 하면 프로젝트가 "Care Connect 2.0 (CC)" 또는 "CC"인 TODO만 선택
+   - 프로젝트 조건이 맞지 않으면 절대 선택하지 마세요!
 
-다음 형식으로 분석해주세요:
+2. **요청자 조건을 정확히 만족**: 
+   - "요청자(이 TODO를 생성한 사람)" 필드를 확인하세요
+   - 사용자가 "전형우"라고 하면 요청자가 "전형우" 또는 "hyungwoo.jeon@example.com"인 TODO만 선택
+   - 설명에 언급된 사람이 아니라 "요청자" 필드를 확인하세요!
+
+3. **유형 조건을 절대적으로 만족 (매우 중요!)**: 
+   - "유형" 필드를 확인하세요
+   - 사용자가 "업무처리"라고 하면 **반드시** 유형이 "task"인 TODO**만** 선택
+   - "문서검토"면 **반드시** 유형이 "review"인 TODO**만** 선택
+   - "미팅"이면 **반드시** 유형이 "meeting"인 TODO**만** 선택
+   - "마감작업"이면 **반드시** 유형이 "deadline"인 TODO**만** 선택
+   - **절대로 다른 유형을 섞어서 선정하지 마세요!**
+   - 예: "업무처리"를 요청했는데 "마감작업"이나 "미팅"을 선정하면 안 됩니다!
+
+4. **위 1, 2, 3 조건을 모두 만족하는 TODO 중에서** 마감일, 우선순위 등을 고려하여 3개 선정
+
+5. **반드시 정확히 3개를 선정해야 합니다**:
+   - 조건을 완벽히 만족하는 TODO가 3개 이상이면 → 그 중 3개 선정
+   - 조건을 완벽히 만족하는 TODO가 3개 미만이면:
+     a) 먼저 완벽히 만족하는 TODO를 모두 선정
+     b) 부족한 개수만큼 조건을 **순서대로** 완화하여 추가 선정:
+        - 유형 조건은 **절대 완화하지 마세요** (가장 중요!)
+        - 요청자 조건을 먼저 완화 (같은 프로젝트의 다른 요청자)
+        - 프로젝트 조건을 마지막으로 완화 (같은 요청자의 다른 프로젝트)
+     c) reasoning에 어떤 조건을 완화했는지 명확히 설명
+   - 예: "프로젝트와 요청자 조건을 만족하는 업무처리 TODO 2개를 선정하고, 프로젝트 조건만 만족하는 업무처리 TODO 1개를 추가로 선정했습니다."
+
+6. **매우 중요**: 
+   - selected_ids에는 반드시 위 TODO 리스트의 "ID:" 필드에 있는 **정확한 ID**만 사용하세요
+   - 예: TODO #5의 ID가 "abc123"이면 → "abc123"을 그대로 사용
+   - 절대로 "task_103" 같은 존재하지 않는 ID를 만들지 마세요!
+   - ID를 복사할 때 따옴표나 공백을 제거하세요
+
+다음 형식으로 분석해주세요 (반드시 한국어로, reasoning을 먼저 작성):
 {{
-    "selected_ids": ["선정된_TODO_ID_1", "선정된_TODO_ID_2", "선정된_TODO_ID_3"],
-    "reasoning": "선정 이유를 간략히 설명"
+    "reasoning": "선정 이유를 한국어로 상세히 설명. 먼저 조건을 분석하고, 어떤 TODO들이 조건을 만족하는지 설명한 후, 최종적으로 선정한 3개의 TODO를 각각 설명. (예: 전형우가 요청한 CareBridge 프로젝트의 업무처리 TODO를 찾았습니다. TODO #5, #12, #18이 모두 프로젝트, 요청자, 유형 조건을 완벽히 만족하므로 이 3개를 선정합니다.)",
+    "selected_ids": ["위_TODO_리스트의_실제_ID_1", "위_TODO_리스트의_실제_ID_2", "위_TODO_리스트의_실제_ID_3"]
+}}
+
+**중요**: reasoning에서 선정할 TODO의 번호(#)를 먼저 언급한 후, selected_ids에 해당 TODO의 실제 ID를 정확히 복사하세요!
+
+**예시**:
+만약 TODO #1(ID: "a1b2c3"), TODO #5(ID: "d4e5f6"), TODO #10(ID: "g7h8i9")을 선정한다면:
+{{
+    "reasoning": "전형우가 요청한 CareBridge 프로젝트의 업무처리 TODO를 찾았습니다. TODO #1, #5, #10이 모두 조건을 만족하므로 이 3개를 선정합니다.",
+    "selected_ids": ["a1b2c3", "d4e5f6", "g7h8i9"]
 }}"""
         return prompt
     
@@ -342,7 +387,11 @@ TODO 리스트 ({len(todos)}개):
         """시스템 프롬프트 (기존 summarizer와 동일한 형식)"""
         return """당신은 업무용 TODO 우선순위 분석 전문가입니다. 
 사용자의 자연어 규칙을 정확히 이해하고, 주어진 TODO 리스트에서 규칙에 가장 잘 맞는 상위 3개를 선정합니다.
-프로젝트 태그, 요청자, 마감일, 우선순위, 키워드 등 모든 조건을 종합적으로 고려하여 분석하세요."""
+프로젝트 태그, 요청자, 마감일, 우선순위, 키워드 등 모든 조건을 종합적으로 고려하여 분석하세요.
+
+**중요**: 
+- 모든 응답은 반드시 한국어로 작성하세요.
+- 선정 이유(reasoning)도 반드시 한국어로 작성하세요."""
     
     def _parse_response(self, response: str) -> Tuple[Set[str], str]:
         """LLM 응답 파싱
@@ -359,18 +408,25 @@ TODO 리스트 ({len(todos)}개):
                 response = "\n".join(lines[1:-1])
             
             data = json.loads(response)
+            
+            # reasoning이 먼저 오도록 변경했지만 순서는 상관없음
             selected_ids = data.get("selected_ids", [])
             reasoning = data.get("reasoning", "")
             
             if not isinstance(selected_ids, list):
                 logger.error(f"[Top3LLM] selected_ids가 리스트가 아닙니다: {type(selected_ids)}")
-                return set(), ""
+                return set(), reasoning
+            
+            if len(selected_ids) != 3:
+                logger.warning(f"[Top3LLM] selected_ids 개수가 3개가 아닙니다: {len(selected_ids)}개")
+            
+            logger.info(f"[Top3LLM] 파싱된 ID: {selected_ids}")
             
             return set(selected_ids), reasoning
             
         except json.JSONDecodeError as e:
             logger.error(f"[Top3LLM] JSON 파싱 실패: {e}")
-            logger.debug(f"[Top3LLM] 응답 내용: {response[:500]}")
+            logger.error(f"[Top3LLM] 응답 내용: {response[:500]}")
             return set(), ""
         except Exception as e:
             logger.error(f"[Top3LLM] 응답 파싱 중 예외: {e}")
@@ -394,110 +450,3 @@ TODO 리스트 ({len(todos)}개):
             logger.warning(f"[Top3LLM] 유효하지 않은 ID: {invalid_ids}")
         
         return valid_ids
-    
-    def _prefilter_todos(self, todos: List[Dict], natural_rule: str = "") -> List[Dict]:
-        """50개 이상일 때 사전 필터링
-        
-        자연어 규칙에 언급된 조건(요청자, 프로젝트)을 우선 고려하여 필터링합니다.
-        
-        Args:
-            todos: TODO 리스트
-            natural_rule: 자연어 규칙 (키워드 추출용)
-            
-        Returns:
-            필터링된 TODO 리스트 (최대 50개)
-        """
-        # 자연어 규칙에서 키워드 추출
-        rule_keywords = self._extract_rule_keywords(natural_rule)
-        
-        scored = []
-        now = datetime.now()
-        
-        for todo in todos:
-            score = 0.0
-            
-            # 자연어 규칙 매칭 보너스 (최우선)
-            if rule_keywords:
-                # 요청자 매칭
-                requester = (todo.get("requester") or "").lower()
-                for keyword in rule_keywords.get("requesters", []):
-                    if keyword in requester:
-                        score += 10.0  # 큰 보너스
-                        break
-                
-                # 프로젝트 매칭
-                project = (todo.get("project") or "").lower()
-                for keyword in rule_keywords.get("projects", []):
-                    if keyword in project:
-                        score += 10.0  # 큰 보너스
-                        break
-            
-            # 우선순위 점수
-            priority = (todo.get("priority") or "medium").lower()
-            if priority == "high":
-                score += 3.0
-            elif priority == "medium":
-                score += 2.0
-            else:
-                score += 1.0
-            
-            # 마감일 임박도
-            deadline = todo.get("deadline")
-            if deadline:
-                try:
-                    # ISO 형식 파싱
-                    if isinstance(deadline, str):
-                        dl = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
-                        hours_left = (dl - now).total_seconds() / 3600.0
-                        
-                        if hours_left < 24:
-                            score += 2.0
-                        elif hours_left < 72:
-                            score += 1.0
-                except Exception:
-                    pass
-            
-            # 수신 타입 (TO가 우선)
-            recipient_type = (todo.get("recipient_type") or "to").lower()
-            if recipient_type == "to":
-                score += 0.5
-            
-            scored.append((score, todo))
-        
-        # 점수순 정렬
-        scored.sort(key=lambda x: x[0], reverse=True)
-        
-        # 상위 50개 반환
-        return [todo for _, todo in scored[:50]]
-    
-    def _extract_rule_keywords(self, natural_rule: str) -> Dict[str, List[str]]:
-        """자연어 규칙에서 키워드 추출
-        
-        Args:
-            natural_rule: 자연어 규칙
-            
-        Returns:
-            {"requesters": [...], "projects": [...]}
-        """
-        if not natural_rule:
-            return {}
-        
-        rule_lower = natural_rule.lower()
-        keywords = {"requesters": [], "projects": []}
-        
-        # 프로젝트 코드 추출
-        project_codes = ["cc", "ha", "well", "wi", "ci"]
-        for code in project_codes:
-            if code in rule_lower:
-                keywords["projects"].append(code)
-        
-        # 사람 이름 추출 (VDOS DB에서)
-        person_mapping = self._get_person_mapping()
-        for email, name in person_mapping.items():
-            name_lower = name.lower()
-            if name_lower in rule_lower:
-                # 이메일과 이름 모두 추가
-                keywords["requesters"].append(email.lower())
-                keywords["requesters"].append(name_lower)
-        
-        return keywords

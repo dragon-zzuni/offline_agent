@@ -1,0 +1,121 @@
+graph TB
+    subgraph UI["UI Layer (src/ui/)"]
+        MW[MainWindow<br/>main_window.py<br/>2,382 lines]
+        TP[TodoPanel<br/>todo_panel.py]
+        ARP[AnalysisResultPanel<br/>analysis_result_panel.py]
+        MSP[MessageSummaryPanel<br/>message_summary_panel.py]
+        TRS[TimeRangeSelector<br/>time_range_selector.py]
+        
+        subgraph Dialogs["Dialogs"]
+            SD[SummaryDialog]
+            T3D[Top3RuleDialog]
+            MDD[MessageDetailDialog]
+        end
+        
+        subgraph Widgets["Widgets"]
+            PTW[ProjectTagWidget]
+            E2E[End2EndCard]
+            WT[WorkerThread]
+        end
+    end
+    
+    subgraph Controllers["Controllers (src/controllers/)"]
+        MC[MessageController<br/>message_controller.py]
+        TPC[TodoPanelController<br/>src/ui/todo/controller.py]
+    end
+    
+    subgraph Services["Services (src/services/)"]
+        T3S[Top3Service<br/>top3_service.py]
+        T3LS[Top3LLMSelector<br/>top3_llm_selector.py]
+        T3CM[Top3CacheManager<br/>top3_cache_manager.py]
+        
+        PTS[ProjectTagService<br/>project_tag_service.py]
+        PTCS[ProjectTagCacheService<br/>project_tag_cache_service.py]
+        
+        APS[AnalysisPipelineService<br/>analysis_pipeline_service.py]
+        DCS[DataCollectionService<br/>data_collection_service.py]
+        
+        LLMC[LLMClient<br/>llm_client.py]
+    end
+    
+    subgraph NLP["NLP (src/nlp/)"]
+        SUM[MessageSummarizer<br/>summarize.py]
+        PR[PriorityRanker<br/>priority_ranker.py]
+        AE[ActionExtractor<br/>action_extractor.py]
+        MG[MessageGrouping<br/>message_grouping.py]
+    end
+    
+    subgraph DataSources["Data Sources (src/data_sources/)"]
+        DSM[DataSourceManager<br/>manager.py]
+        JSONS[JSONDataSource<br/>json_source.py]
+        VDOSS[VirtualOfficeSource<br/>virtualoffice_source.py]
+    end
+    
+    subgraph Integration["Integration (src/integrations/)"]
+        VOC[VirtualOfficeCoordinator<br/>virtualoffice_coordinator.py]
+        VOM[VirtualOfficeManager<br/>virtualoffice_manager.py]
+        PW[PollingWorker]
+    end
+    
+    subgraph Repository["Repository (src/ui/todo/)"]
+        TR[TodoRepository<br/>repository.py]
+    end
+    
+    subgraph DB["Database"]
+        TODODB[(todos_cache.db)]
+        PTDB[(project_tags_cache.db)]
+        T3DB[(top3_cache.db)]
+    end
+    
+    subgraph External["External Systems"]
+        VDOSAPI[VirtualOffice API<br/>:8000, :8001]
+        LLMAPI[LLM APIs<br/>OpenAI/Azure/OpenRouter]
+    end
+    
+    MW --> TP
+    MW --> ARP
+    MW --> MSP
+    MW --> TRS
+    
+    TP --> TPC
+    TP --> T3D
+    ARP --> SD
+    MSP --> MDD
+    
+    TPC --> T3S
+    TPC --> TR
+    MC --> DCS
+    
+    T3S --> T3LS
+    T3S --> T3CM
+    T3LS --> LLMC
+    T3CM --> T3DB
+    
+    PTS --> PTCS
+    PTS --> LLMC
+    PTCS --> PTDB
+    
+    APS --> SUM
+    APS --> PR
+    APS --> AE
+    APS --> MG
+    APS --> LLMC
+    
+    DCS --> DSM
+    DSM --> JSONS
+    DSM --> VDOSS
+    
+    VOC --> VOM
+    VOC --> PW
+    VOM --> VDOSS
+    VDOSS --> VDOSAPI
+    
+    TR --> TODODB
+    LLMC --> LLMAPI
+    
+    style UI fill:#E3F2FD
+    style Services fill:#FFF3E0
+    style NLP fill:#F3E5F5
+    style DataSources fill:#E8F5E9
+    style DB fill:#FFE0B2
+    style External fill:#FFCDD2

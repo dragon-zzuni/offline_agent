@@ -174,6 +174,37 @@ class EmailPanel(QWidget):
         # TODO에 없는 이메일만 필터링
         filtered_emails = self._filter_non_todo_emails(emails)
         
+        # 최신순 정렬 (timestamp/date 기준 내림차순)
+        # 여러 필드명 지원: timestamp, date, sent_at
+        def get_sort_key(email):
+            from datetime import datetime
+            time_value = email.get('timestamp') or email.get('date') or email.get('sent_at') or ''
+            
+            # 날짜 문자열을 datetime 객체로 변환하여 정확한 정렬
+            if time_value:
+                try:
+                    # 여러 날짜 형식 지원
+                    for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d']:
+                        try:
+                            return datetime.strptime(time_value, fmt)
+                        except ValueError:
+                            continue
+                    # 파싱 실패 시 문자열 그대로 반환
+                    return time_value
+                except:
+                    return time_value
+            return datetime.min  # 날짜 없으면 가장 오래된 것으로 처리
+        
+        filtered_emails.sort(key=get_sort_key, reverse=True)
+        
+        # 정렬 결과 로깅 (디버깅용)
+        if filtered_emails:
+            logger.info(f"📧 이메일 정렬 완료 (최신순, 총 {len(filtered_emails)}건):")
+            for i, email in enumerate(filtered_emails[:3], 1):  # 상위 3개만 로깅
+                time_val = email.get('timestamp') or email.get('date') or email.get('sent_at') or 'No date'
+                subject = email.get('subject', 'No subject')[:40]
+                logger.info(f"  {i}. {subject} - {time_val}")
+        
         self.count_label.setText(f"{len(filtered_emails)}건")
         
         for email in filtered_emails:
@@ -227,7 +258,7 @@ class EmailPanel(QWidget):
             email = filtered_emails[row]
             
             # MessageDetailDialog를 사용하여 이메일 상세 표시
-            from ui.message_detail_dialog import MessageDetailDialog
+            from .message_detail_dialog import MessageDetailDialog
             
             # 단일 이메일을 위한 요약 그룹 데이터 생성
             summary_group = {

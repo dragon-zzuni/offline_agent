@@ -161,7 +161,7 @@ def convert_message_to_internal_format(
             "type": "messenger",
             "platform": "dm:designer:dev",  # room_slug
             "room_slug": "dm:designer:dev",
-            "recipient_type": "to",
+            "recipient_type": "to",  # 또는 선택된 페르소나가 보낸 메시지라면 "from"
             "is_read": False,
             "metadata": {
                 "chat_id": 26,
@@ -172,10 +172,16 @@ def convert_message_to_internal_format(
         }
     """
     sender_handle = (message.get("sender") or "").strip()
-    sender_persona = persona_map.get(sender_handle.lower(), {})
+    sender_handle_lower = sender_handle.lower()
+    sender_persona = persona_map.get(sender_handle_lower, {})
     sender_name = sender_persona.get("name", sender_handle)
     
     room_slug = message.get("room_slug") or ""
+    selected_handle_lower = (selected_persona_handle or "").strip().lower()
+    
+    recipient_type = "to"
+    if selected_handle_lower and sender_handle_lower == selected_handle_lower:
+        recipient_type = "from"
     
     # ISO 날짜 표준화
     iso_date = _to_aware_iso(message.get("sent_at"))
@@ -193,7 +199,7 @@ def convert_message_to_internal_format(
         "type": "messenger",
         "platform": room_slug or "chat",
         "room_slug": room_slug,
-        "recipient_type": "to",
+        "recipient_type": recipient_type,
         "is_read": False,
         "metadata": {
             "chat_id": message.get("id"),

@@ -5,9 +5,12 @@ VirtualOffice API 기반 데이터 소스
 """
 import asyncio
 import logging
+import os
 import time
-from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+import sqlite3
+from bisect import bisect_right
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Any, Optional, Tuple
 
 from data_sources.manager import DataSource
 from integrations.virtualoffice_client import VirtualOfficeClient
@@ -16,6 +19,7 @@ from integrations.converters import (
     convert_message_to_internal_format,
     build_persona_maps
 )
+from utils.vdos_connector import VDOSConnector
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,16 @@ class VirtualOfficeDataSource(DataSource):
         
         # 메시지 캐시 (메모리 관리용)
         self.cached_messages: List[Dict[str, Any]] = []
+
+        # 시뮬레이션 시간 매핑
+        self._tick_datetimes: List[datetime] = []
+        self._tick_values: List[int] = []
+        self._sim_base_dt: Optional[datetime] = None
+        try:
+            self._sim_hours_per_day = max(1, int(os.getenv("VDOS_HOURS_PER_DAY", "8")))
+        except ValueError:
+            self._sim_hours_per_day = 8
+        self._vdos_connector: Optional[VDOSConnector] = None
         
         # 시뮬레이션 상태 캐시
         self._cached_sim_status: Optional[Dict[str, Any]] = None
@@ -53,6 +67,7 @@ class VirtualOfficeDataSource(DataSource):
         
         # 초기화 시 페르소나 로드
         self._load_personas()
+        self._initialize_simulation_clock()
         
         logger.info(
             f"VirtualOfficeDataSource 초기화: "
@@ -70,6 +85,147 @@ class VirtualOfficeDataSource(DataSource):
             self.personas = []
             self.persona_by_email = {}
             self.persona_by_handle = {}
+
+    def _initialize_simulation_clock(self) -> None:
+        """시뮬레이션 tick → datetime 매핑 초기화"""
+        try:
+            if not self._vdos_connector:
+                self._vdos_connector = VDOSConnector()
+            if not self._vdos_connector or not self._vdos_connector.is_available:
+                logger.warning("VDOS DB를 사용할 수 없어 시뮬레이션 시간 매핑을 건너뜁니다.")
+                return
+
+            db_path = self._vdos_connector.vdos_db_path
+            with sqlite3.connect(f"file:{db_path}?immutable=1", uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("SELECT tick, created_at FROM tick_log ORDER BY tick ASC")
+                rows = cursor.fetchall()
+
+            if not rows:
+                logger.warning("tick_log 데이터가 없어 시뮬레이션 시간 매핑을 구성할 수 없습니다.")
+                return
+
+            tick_datetimes: List[datetime] = []
+            tick_values: List[int] = []
+            for row in rows:
+                created_at = row["created_at"]
+                tick = int(row["tick"])
+                try:
+                    dt = self._parse_db_datetime(created_at)
+                except Exception:
+                    continue
+                tick_datetimes.append(dt)
+                tick_values.append(tick)
+
+            if not tick_datetimes:
+                logger.warning("tick_log의 datetime 파싱에 실패했습니다.")
+                return
+
+            self._tick_datetimes = tick_datetimes
+            self._tick_values = tick_values
+            self._sim_base_dt = tick_datetimes[0]
+            logger.info(
+                "시뮬레이션 시계 초기화 완료: base=%s, ticks=%d",
+                self._sim_base_dt.isoformat(),
+                tick_values[-1],
+            )
+        except Exception as e:
+            logger.warning(f"시뮬레이션 시간 매핑 초기화 실패: {e}", exc_info=True)
+
+    @staticmethod
+    def _parse_db_datetime(value: str) -> datetime:
+        """SQLite timestamp를 UTC aware datetime으로 변환"""
+        if not value:
+            raise ValueError("빈 datetime 문자열입니다.")
+        normalized = value.replace("Z", "+00:00")
+        if "T" not in normalized and "+" not in normalized[10:]:
+            return datetime.fromisoformat(normalized).replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(normalized).astimezone(timezone.utc)
+
+    def _safe_parse_iso_datetime(self, value: Optional[str]) -> Optional[datetime]:
+        """메시지 날짜 문자열을 UTC aware datetime으로 변환"""
+        if not value:
+            return None
+        try:
+            normalized = value.replace("Z", "+00:00")
+            if "T" not in normalized and "+" not in normalized[10:]:
+                return datetime.fromisoformat(normalized).replace(tzinfo=timezone.utc)
+            return datetime.fromisoformat(normalized).astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    def _infer_tick_for_datetime(self, dt: datetime) -> Optional[int]:
+        """실제 발생 시각으로부터 시뮬레이션 tick 추정"""
+        if not self._tick_datetimes or not self._tick_values:
+            return None
+        idx = bisect_right(self._tick_datetimes, dt)
+        if idx <= 0:
+            return self._tick_values[0]
+        if idx >= len(self._tick_values):
+            return self._tick_values[-1]
+        return self._tick_values[idx - 1]
+
+    def _compute_sim_datetime_from_tick(self, tick: int) -> Optional[Tuple[datetime, int, int]]:
+        """tick을 시뮬레이션 datetime으로 변환"""
+        if not self._sim_base_dt:
+            return None
+        tick = max(1, tick)
+        day_ticks = max(1, self._sim_hours_per_day * 60)
+        tick_index = tick - 1
+        day_index = tick_index // day_ticks
+        tick_of_day = tick_index % day_ticks
+        minutes_24h = int((tick_of_day / day_ticks) * 1440)
+        sim_dt = self._sim_base_dt + timedelta(days=day_index, minutes=minutes_24h)
+        return sim_dt, day_index, minutes_24h
+
+    def _annotate_simulation_timestamps(self, messages: List[Dict[str, Any]]) -> None:
+        """메시지에 시뮬레이션 시간 관련 메타데이터를 주입"""
+        if not messages or not self._sim_base_dt or not self._tick_datetimes:
+            return
+
+        for msg in messages:
+            metadata = msg.get("metadata") or {}
+            source_date = (
+                metadata.get("original_date")
+                or msg.get("date")
+                or msg.get("timestamp")
+                or msg.get("datetime")
+            )
+            msg_dt = self._safe_parse_iso_datetime(source_date)
+            if not msg_dt:
+                continue
+
+            if msg_dt <= self._tick_datetimes[0]:
+                tick = self._tick_values[0]
+            elif msg_dt >= self._tick_datetimes[-1]:
+                tick = self._tick_values[-1]
+            else:
+                tick = self._infer_tick_for_datetime(msg_dt)
+            if not tick:
+                continue
+
+            result = self._compute_sim_datetime_from_tick(tick)
+            if not result:
+                continue
+
+            sim_dt, day_index, minutes_24h = result
+            hours = minutes_24h // 60
+            minutes = minutes_24h % 60
+
+            if source_date and "original_date" not in metadata:
+                metadata["original_date"] = source_date
+
+            metadata["sim_tick"] = tick
+            metadata["sim_day_index"] = day_index + 1
+            metadata["sim_time"] = f"Day {day_index + 1} {hours:02d}:{minutes:02d}"
+            msg["metadata"] = metadata
+
+            msg["simulated_datetime"] = sim_dt.isoformat()
+            msg["sim_day_index"] = day_index + 1
+            msg["sim_week_index"] = day_index // 7 + 1
+            msg["sim_month_index"] = day_index // 30 + 1
+            msg["date"] = sim_dt.isoformat()
     
     async def collect_messages(self, options: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
@@ -91,18 +247,18 @@ class VirtualOfficeDataSource(DataSource):
         
         # 선택된 페르소나의 메일박스와 핸들
         mailbox = self.selected_persona.get("email_address")
-        handle = self.selected_persona.get("chat_handle")
+        handle = (self.selected_persona.get("chat_handle") or "").strip()
         
         if not mailbox or not handle:
             logger.error("선택된 페르소나에 email_address 또는 chat_handle이 없습니다")
             return []
         
         # 핸들을 소문자로 변환 (VDOS 데이터베이스 대소문자 불일치 해결)
-        handle = handle.lower()
+        normalized_handle = handle.lower()
         
         logger.info(
             f"메시지 수집 시작 (증분={incremental}, 병렬={parallel}): "
-            f"mailbox={mailbox}, handle={handle}"
+            f"mailbox={mailbox}, handle={normalized_handle}"
         )
         
         # 증분 수집 시 since_id 사용
@@ -113,24 +269,40 @@ class VirtualOfficeDataSource(DataSource):
         try:
             if parallel:
                 raw_emails, raw_messages = await self._collect_parallel(
-                    mailbox, handle, since_email_id, since_message_id
+                    mailbox, normalized_handle, since_email_id, since_message_id
                 )
             else:
                 raw_emails = self.client.get_emails(mailbox, since_id=since_email_id)
-                raw_messages = self.client.get_messages(handle, since_id=since_message_id)
+                raw_messages = self.client.get_messages(
+                    normalized_handle, since_id=since_message_id
+                )
         except Exception as e:
             logger.error(f"API 호출 실패: {e}")
             return []
         
-        # 데이터 변환
+        # 데이터 변환 (성능 측정)
+        start_time = time.time()
         emails = [
             convert_email_to_internal_format(e, self.persona_by_email, mailbox)
             for e in raw_emails
         ]
+        email_time = time.time() - start_time
+        
+        start_time = time.time()
         messages = [
-            convert_message_to_internal_format(m, self.persona_by_handle)
+            convert_message_to_internal_format(
+                m,
+                self.persona_by_handle,
+                selected_persona_handle=handle
+            )
             for m in raw_messages
         ]
+        message_time = time.time() - start_time
+        
+        logger.info(
+            f"⏱️ 변환 시간: 이메일 {email_time:.2f}초 ({len(raw_emails)}개), "
+            f"메시지 {message_time:.2f}초 ({len(raw_messages)}개)"
+        )
         
         # last_id 업데이트
         if raw_emails:
@@ -140,7 +312,38 @@ class VirtualOfficeDataSource(DataSource):
         
         # 통합 및 정렬
         all_messages = emails + messages
+        
+        # msg_id 기준 중복 제거 (TO/CC 중복 수신 처리) - 성능 측정
+        start_time = time.time()
+        seen_msg_ids = set()
+        unique_messages = []
+        for msg in all_messages:
+            msg_id = msg.get("msg_id")
+            if msg_id and msg_id not in seen_msg_ids:
+                seen_msg_ids.add(msg_id)
+                unique_messages.append(msg)
+            elif not msg_id:
+                # msg_id가 없는 경우는 그대로 추가
+                unique_messages.append(msg)
+        
+        dedup_time = time.time() - start_time
+        
+        if len(all_messages) != len(unique_messages):
+            logger.info(
+                f"🔍 중복 메시지 제거: {len(all_messages)}개 → {len(unique_messages)}개 "
+                f"({len(all_messages) - len(unique_messages)}개 중복) - {dedup_time:.2f}초"
+            )
+        
+        all_messages = unique_messages
+
+        # 시뮬레이션 시간 메타데이터 주입
+        self._annotate_simulation_timestamps(all_messages)
+        
+        # 정렬 - 성능 측정
+        start_time = time.time()
         all_messages.sort(key=lambda m: m["date"])
+        sort_time = time.time() - start_time
+        logger.info(f"⏱️ 정렬 시간: {sort_time:.2f}초 ({len(all_messages)}개)")
         
         # 시간 범위 필터링 적용 (옵션)
         if time_range:
@@ -210,7 +413,7 @@ class VirtualOfficeDataSource(DataSource):
             >>>     print(f"새 이메일: {len(result['emails'])}개")
         """
         mailbox = self.selected_persona.get("email_address")
-        handle = self.selected_persona.get("chat_handle")
+        handle = (self.selected_persona.get("chat_handle") or "").strip()
         
         if not mailbox or not handle:
             return {
@@ -225,7 +428,7 @@ class VirtualOfficeDataSource(DataSource):
         try:
             # 병렬 수집
             raw_emails, raw_messages = await self._collect_parallel(
-                mailbox, handle, self.last_email_id, self.last_message_id
+                mailbox, handle.lower(), self.last_email_id, self.last_message_id
             )
             
             # 데이터 변환
@@ -234,15 +437,41 @@ class VirtualOfficeDataSource(DataSource):
                 for e in raw_emails
             ]
             messages = [
-                convert_message_to_internal_format(m, self.persona_by_handle)
+                convert_message_to_internal_format(
+                    m,
+                    self.persona_by_handle,
+                    selected_persona_handle=handle
+                )
                 for m in raw_messages
             ]
+            
+            # msg_id 기준 중복 제거 (TO/CC 중복 수신 처리)
+            seen_msg_ids = set()
+            unique_emails = []
+            for email in emails:
+                msg_id = email.get("msg_id")
+                if msg_id and msg_id not in seen_msg_ids:
+                    seen_msg_ids.add(msg_id)
+                    unique_emails.append(email)
+                elif not msg_id:
+                    unique_emails.append(email)
+            
+            if len(emails) != len(unique_emails):
+                logger.info(
+                    f"🔍 중복 이메일 제거: {len(emails)}개 → {len(unique_emails)}개 "
+                    f"({len(emails) - len(unique_emails)}개 중복)"
+                )
+            
+            emails = unique_emails
             
             # last_id 업데이트
             if raw_emails:
                 self.last_email_id = max(e["id"] for e in raw_emails)
             if raw_messages:
                 self.last_message_id = max(m["id"] for m in raw_messages)
+
+            self._annotate_simulation_timestamps(emails)
+            self._annotate_simulation_timestamps(messages)
             
             return {
                 "emails": emails,

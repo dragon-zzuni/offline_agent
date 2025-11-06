@@ -27,6 +27,77 @@ class AnalysisCacheController:
 
     def __init__(self, ui: "SmartAssistantGUI") -> None:
         self.ui = ui
+        self._collect_in_progress: bool = False
+
+    # ------------------------------------------------------------------
+    # 공개 API
+    # ------------------------------------------------------------------
+    def start_quick_analysis(self, force: bool = False) -> None:
+        """선택된 페르소나에 대해 빠른 분석을 시작한다.
+
+        Args:
+            force: True일 경우 캐시를 무시하고 데이터를 새로 수집한다.
+        """
+        ui = self.ui
+        try:
+            persona = getattr(ui, "selected_persona", None)
+            if not persona:
+                logger.warning("⚠️ 선택된 페르소나가 없어 빠른 분석을 건너뜀")
+                return
+
+            persona_key = getattr(ui, "_current_persona_id", None)
+            if not persona_key:
+                email = getattr(persona, "email_address", "") or ""
+                handle = getattr(persona, "chat_handle", "") or ""
+                if email or handle:
+                    persona_key = f"{email}_{handle}".strip("_")
+                else:
+                    persona_key = getattr(persona, "id", "") or persona.name
+
+            if not persona_key:
+                logger.warning("⚠️ 페르소나 키를 결정할 수 없어 빠른 분석을 중단")
+                return
+
+            if self._collect_in_progress:
+                logger.info("⏳ 메시지 수집이 진행 중이라 빠른 분석 요청을 대기 상태로 전환")
+                return
+
+            existing_messages = getattr(ui, "collected_messages", []) or []
+            if existing_messages and not force:
+                logger.info(
+                    "📂 기존 메시지 %d개로 빠른 분석 실행 (persona=%s)",
+                    len(existing_messages),
+                    persona_key,
+                )
+                self._trigger_background_analysis(existing_messages)
+                return
+
+            if not force and self._should_use_cache(persona_key):
+                logger.info("📂 캐시된 데이터로 빠른 분석 시작: %s", persona_key)
+                self._load_from_cache(persona_key)
+                messages = getattr(ui, "collected_messages", []) or []
+                if messages:
+                    self._trigger_background_analysis(messages)
+                else:
+                    logger.info("ℹ️ 캐시된 메시지가 없어 새로 수집합니다.")
+                    self._collect_and_cache_data(persona_key)
+                return
+
+            # 데이터 소스 준비 (VirtualOffice 모드)
+            if (
+                getattr(ui, "data_source_type", None) == "virtualoffice"
+                and hasattr(ui, "assistant")
+                and hasattr(ui.assistant, "set_virtualoffice_source")
+                and getattr(ui, "vo_client", None)
+            ):
+                ui.assistant.set_virtualoffice_source(ui.vo_client, persona)
+
+            logger.info("🚀 빠른 분석을 위해 메시지를 새로 수집합니다. force=%s", force)
+            self._collect_and_cache_data(persona_key)
+        except Exception as exc:  # pragma: no cover
+            logger.error("❌ 빠른 분석 실행 오류: %s", exc, exc_info=True)
+            if hasattr(ui, "status_message"):
+                ui.status_message.setText(f"빠른 분석 오류: {exc}")
 
     # ------------------------------------------------------------------
     # 백그라운드 분석
@@ -36,6 +107,11 @@ class AnalysisCacheController:
         ui = self.ui
         try:
             if not new_messages:
+                return
+
+            worker = getattr(ui, "worker_thread", None)
+            if worker and worker.isRunning():
+                logger.info("🧵 백그라운드 워커가 이미 실행 중이어서 새 요청을 건너뜀")
                 return
 
             logger.info("🔄 새 메시지 분석 시작: %d개", len(new_messages))
@@ -247,6 +323,8 @@ class AnalysisCacheController:
                 if hasattr(ui.assistant, "collected_messages"):
                     ui.assistant.collected_messages = cached_result.messages
                 logger.info("📨 메시지 복원: %d개", len(cached_result.messages))
+                if hasattr(ui, "_message_summary_cache"):
+                    ui._message_summary_cache.clear()
 
             if cached_result.analysis_summary and hasattr(ui, "analysis_result_panel"):
                 logger.info("📊 분석 결과 표시")
@@ -333,6 +411,9 @@ class AnalysisCacheController:
     def _trigger_immediate_polling(self) -> None:
         ui = self.ui
         try:
+            if not getattr(ui, "_initial_collection_completed", False):
+                logger.info("⏳ 초기 전체 수집이 끝나지 않아 즉시 폴링을 건너뜀")
+                return
             worker = getattr(ui, "polling_worker", None)
             if worker and worker.isRunning() and hasattr(worker, "trigger_immediate_poll"):
                 worker.trigger_immediate_poll()
@@ -407,6 +488,13 @@ class AnalysisCacheController:
 
     def _collect_and_cache_data(self, persona_key: str) -> None:
         ui = self.ui
+        if self._collect_in_progress:
+            logger.info("⏳ 메시지 수집이 진행 중이어서 새 요청을 무시합니다: persona_key=%s", persona_key)
+            return
+
+        self._collect_in_progress = True
+        start_ts = time.time()
+
         try:
             logger.info("📥 데이터 수집 시작: persona_key=%s", persona_key)
             self._clear_todos_for_persona_change()
@@ -437,6 +525,8 @@ class AnalysisCacheController:
                 ui.collected_messages = messages
                 if hasattr(ui.assistant, "collected_messages"):
                     ui.assistant.collected_messages = messages
+                if hasattr(ui, "_message_summary_cache"):
+                    ui._message_summary_cache.clear()
 
                 persona_info = ui.selected_persona.__dict__ if ui.selected_persona else {}
                 cache_data = {
@@ -463,11 +553,20 @@ class AnalysisCacheController:
                     ui._last_simulation_tick = current_tick
                 ui._simulation_running = is_running
 
-                logger.info("✅ 데이터 수집 및 캐시 저장 완료: %d개 메시지", len(messages))
+                logger.info(
+                    "✅ 데이터 수집 및 캐시 저장 완료: %d개 메시지 (%.2f초)",
+                    len(messages),
+                    time.time() - start_ts,
+                )
+                if hasattr(ui, "_initial_collection_completed") and not ui._initial_collection_completed:
+                    ui._initial_collection_completed = True
+                    logger.debug("🎯 첫 전체 수집 완료 플래그 설정")
             finally:
                 loop.close()
         except Exception as exc:  # pragma: no cover
             logger.error("❌ 데이터 수집 및 캐시 저장 오류: %s", exc, exc_info=True)
+        finally:
+            self._collect_in_progress = False
 
     def _update_cache_with_analysis_results(
         self,
@@ -629,6 +728,14 @@ class AnalysisCacheController:
         try:
             logger.info("⚡ 즉시 분석 시작: %d개 메시지", len(messages))
             self._quick_analysis(messages)
+            if messages:
+                ui = self.ui
+                worker = getattr(ui, "worker_thread", None)
+                if worker and worker.isRunning():
+                    logger.info("🧵 기존 백그라운드 워커가 실행 중이라 새 작업을 생략")
+                else:
+                    logger.info("🧵 빠른 분석 이후 백그라운드 워커 스레드 즉시 시작")
+                    self._process_new_messages_async(list(messages))
         except Exception as exc:  # pragma: no cover
             logger.error("백그라운드 분석 트리거 오류: %s", exc)
 
@@ -718,6 +825,10 @@ class AnalysisCacheController:
         try:
             ui._persona_cache.clear()
             ui._cache_valid_until.clear()
+            if hasattr(ui, "_initial_collection_completed"):
+                ui._initial_collection_completed = False
+            if hasattr(ui, "_message_summary_cache"):
+                ui._message_summary_cache.clear()
             logger.info("🗑️ 모든 캐시 무효화됨 (첫 로드 플래그 보존)")
         except Exception as exc:  # pragma: no cover
             logger.error("캐시 무효화 오류: %s", exc)
@@ -737,14 +848,15 @@ class AnalysisCacheController:
             logger.error("프로젝트 태그 강제 업데이트 오류: %s", exc)
 
     def _clear_todos_for_persona_change(self) -> None:
+        """페르소나 변경 시 TODO UI 갱신 (DB는 유지, 필터링만 적용)"""
         ui = self.ui
         try:
             if hasattr(ui, "todo_panel") and ui.todo_panel:
-                ui.todo_panel.clear_all_todos_silent()
-                ui.todo_panel.todo_list.clear()
-                logger.info("🗑️ 페르소나 변경으로 TODO 데이터베이스 초기화 완료")
+                # DB는 삭제하지 않고, UI만 갱신 (필터링은 controller에서 자동 적용)
+                ui.todo_panel.refresh_todo_list()
+                logger.info("🔄 페르소나 변경으로 TODO 리스트 갱신 완료")
         except Exception as exc:  # pragma: no cover
-            logger.error("TODO 초기화 오류: %s", exc)
+            logger.error("TODO 갱신 오류: %s", exc)
 
     def _restore_todos_from_cache(self, cached_todos: List[Dict[str, Any]]) -> None:
         ui = self.ui

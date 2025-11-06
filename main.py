@@ -249,6 +249,15 @@ class SmartAssistant:
         # AnalysisPipelineService는 lazy initialization (순환 참조 방지)
         self._pipeline_service = None
         
+        # ProjectTagService 초기화 (프로젝트 태그 자동 할당)
+        try:
+            from services.project_tag_service import ProjectTagService
+            self.project_tag_service = ProjectTagService()
+            logger.info("✅ ProjectTagService 초기화 완료")
+        except Exception as e:
+            logger.warning(f"⚠️ ProjectTagService 초기화 실패: {e}")
+            self.project_tag_service = None
+        
         # Top3Service 초기화
         self.top3_service = None
         self._init_top3_service()
@@ -733,6 +742,18 @@ class SmartAssistant:
                 # 소스 타입 결정 (메일/메시지)
                 source_type = "메일" if source_msg.get("platform") == "email" else "메시지"
                 
+                if recipient_type != "to":
+                    continue
+                
+                # 페르소나 이름 결정: 메시지의 주 수신자(TO)를 기준으로 설정
+                # CC/BCC로 받은 메시지는 해당 페르소나의 TODO가 아님
+                persona_name = None
+                if recipient_type == "to":
+                    # TO로 받은 메시지만 현재 페르소나의 TODO로 설정
+                    if hasattr(self, 'user_profile') and self.user_profile:
+                        persona_name = self.user_profile.get('name')
+                # CC/BCC로 받은 메시지는 persona_name을 None으로 남겨둠 (필터링됨)
+                
                 todo_item = {
                     "id": action.get("action_id"),
                     "title": action.get("title"),
@@ -744,6 +765,7 @@ class SmartAssistant:
                     "status": "pending",
                     "recipient_type": recipient_type,  # 수신 타입 추가 (to/cc/bcc)
                     "source_type": source_type,  # 소스 타입 추가 (메일/메시지)
+                    "persona_name": persona_name,  # 페르소나 이름 추가
                     "source_message": {
                         "id": source_msg.get("msg_id"),
                         "sender": source_msg.get("sender"),
@@ -776,7 +798,10 @@ class SmartAssistant:
                 todo_item["evidence"] = json.dumps(reasons, ensure_ascii=False)
                 todo_item["deadline_confidence"] = result.get("deadline_confidence", "mid")
 
-                # ❸ 정렬에 쓰일 값 준비
+                # ❸ 프로젝트 태그는 나중에 비동기로 처리 (초기 TODO 생성 속도 향상)
+                todo_item["project"] = None
+                
+                # ❹ 정렬에 쓰일 값 준비
                 todo_item["_priority_val"] = priority_value.get(todo_item["priority"], 1)
                 todo_item["_deadline_dt"] = _parse_deadline(todo_item.get("deadline"))
 

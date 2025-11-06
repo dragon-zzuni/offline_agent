@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Assistant - 아키텍처 다이어그램 뷰어</title>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ 
+            startOnLoad: true,
+            theme: 'default',
+            themeVariables: {
+                fontSize: '16px',
+                fontFamily: 'Malgun Gothic, Arial, sans-serif'
+            }
+        });
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Malgun Gothic', Arial, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        
+        .tab {
+            padding: 12px 24px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+            color: #666;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s;
+        }
+        
+        .tab:hover {
+            color: #4A90E2;
+        }
+        
+        .tab.active {
+            color: #4A90E2;
+            border-bottom-color: #4A90E2;
+            font-weight: bold;
+        }
+        
+        .diagram-container {
+            display: none;
+            padding: 20px;
+            background: #fafafa;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        
+        .diagram-container.active {
+            display: block;
+        }
+        
+        .diagram-title {
+            font-size: 20px;
+            color: #333;
+            margin-bottom: 15px;
+            font-weight: bold;
+        }
+        
+        .diagram-description {
+            color: #666;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+        
+        .mermaid {
+            background: white;
+            padding: 20px;
+            border-radius: 4px;
+            display: flex;
+            justify-content: center;
+        }
+        
+        .download-btn {
+            margin-top: 15px;
+            padding: 10px 20px;
+            background: #4A90E2;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+        
+        .download-btn:hover {
+            background: #357ABD;
+        }
+        
+        .info-box {
+            background: #E3F2FD;
+            border-left: 4px solid #4A90E2;
+            padding: 15px;
+            margin-top: 20px;
+            border-radius: 4px;
+        }
+        
+        .info-box h3 {
+            color: #4A90E2;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        
+        .info-box p {
+            color: #555;
+            line-height: 1.6;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏗️ Smart Assistant - 시스템 아키텍처</h1>
+        <p class="subtitle">PM을 위한 AI 기반 업무 자동화 도구</p>
+        
+        <div class="tabs">
+            <button class="tab active" onclick="showDiagram('core')">핵심 기능</button>
+            <button class="tab" onclick="showDiagram('system')">전체 구조</button>
+            <button class="tab" onclick="showDiagram('layer')">레이어 구조</button>
+            <button class="tab" onclick="showDiagram('detailed')">상세 구조</button>
+            <button class="tab" onclick="showDiagram('dataflow')">데이터 플로우</button>
+        </div>
+        
+        <!-- 핵심 기능 아키텍처 -->
+        <div id="core" class="diagram-container active">
+            <div class="diagram-title">🎯 핵심 기능 아키텍처</div>
+            <div class="diagram-description">
+                Smart Assistant의 6대 핵심 기능과 각 기능을 구현하는 컴포넌트들의 관계를 보여줍니다.
+                <br><br>
+                <strong>6대 핵심 기능:</strong><br>
+                1️⃣ REST API 통한 실시간 연동<br>
+                2️⃣ 메시지/메일 통합 분석 및 TODO 리스트 정리<br>
+                3️⃣ Top3 TODO 사용자 맞춤 필터링 (자연어 규칙 적용)<br>
+                4️⃣ 메시지 내역 (일일/주간/월별 요약)<br>
+                5️⃣ 일정 마무리 시스템 (일일요약, 주간요약, 날씨)
+            </div>
+            <div class="mermaid">
+graph LR
+    subgraph F1["1️⃣ REST API 실시간 연동"]
+        VDOS[VirtualOffice API]
+        PW[Polling Worker<br/>30초 간격]
+        VOS[증분 수집<br/>since_id]
+        
+        VDOS --> VOS
+        PW --> VOS
+    end
+    
+    subgraph F2["2️⃣ 메시지/메일 통합 분석"]
+        AP[Analysis Pipeline]
+        NLP[NLP 모듈<br/>요약/추출/우선순위]
+        LLM1[LLM<br/>GPT-4o]
+        
+        AP --> NLP
+        NLP --> LLM1
+    end
+    
+    subgraph F3["3️⃣ TODO 리스트 정리"]
+        TR[Todo Repository]
+        PTS[Project Tag<br/>자동 분류]
+        DB1[(SQLite)]
+        
+        TR --> PTS
+        PTS --> DB1
+    end
+    
+    subgraph F4["4️⃣ Top3 맞춤 필터링"]
+        T3S[Top3 Service]
+        T3LS[LLM Selector<br/>자연어 규칙]
+        LLM2[LLM RAG]
+        CACHE[(Cache<br/>TTL 5분)]
+        
+        T3S --> T3LS
+        T3LS --> LLM2
+        T3LS --> CACHE
+    end
+    
+    subgraph F5["5️⃣ 메시지 내역 요약"]
+        TRS[Time Range<br/>일일/주간/월별]
+        MG[Message Grouping<br/>시간대별]
+        SUM[LLM 요약]
+        
+        TRS --> MG
+        MG --> SUM
+    end
+    
+    subgraph F6["6️⃣ 일정 마무리 시스템"]
+        SD[Summary Dialog]
+        DS[일일/주간 요약]
+        WS[날씨 정보]
+        
+        SD --> DS
+        SD --> WS
+    end
+    
+    VOS --> AP
+    AP --> TR
+    TR --> T3S
+    MG --> SUM
+    DS --> SUM
+    
+    style F1 fill:#E3F2FD,stroke:#1976D2,stroke-width:2px
+    style F2 fill:#FFF3E0,stroke:#F57C00,stroke-width:2px
+    style F3 fill:#F3E5F5,stroke:#7B1FA2,stroke-width:2px
+    style F4 fill:#E8F5E9,stroke:#388E3C,stroke-width:2px
+    style F5 fill:#FFF9C4,stroke:#F9A825,stroke-width:2px
+    style F6 fill:#FFE0B2,stroke:#E64A19,stroke-width:2px
+            </div>
+            <div class="info-box">
+                <h3>💡 핵심 기능 설명</h3>
+                <p>
+                    <strong>1️⃣ REST API 실시간 연동</strong>: 30초 간격으로 VirtualOffice API를 폴링하여 신규 메시지 자동 수집<br>
+                    <strong>2️⃣ 메시지/메일 통합 분석</strong>: LLM 기반 NLP로 메시지 요약, TODO 추출, 우선순위 계산<br>
+                    <strong>3️⃣ TODO 리스트 정리</strong>: 프로젝트 자동 분류 (명시적 패턴 → LLM 분석 → 발신자 폴백)<br>
+                    <strong>4️⃣ Top3 맞춤 필터링</strong>: 자연어 규칙으로 가장 중요한 TODO 3개 선정 (LLM RAG 방식)<br>
+                    <strong>5️⃣ 메시지 내역 요약</strong>: 시간대별/발신자별 그룹화 및 요약 (일일/주간/월별)<br>
+                    <strong>6️⃣ 일정 마무리 시스템</strong>: 일일/주간 업무 요약 + 날씨 정보 제공
+                </p>
+            </div>
+        </div>
+        
+        <!-- 전체 구조 -->
+        <div id="system" class="diagram-container">
+            <div class="diagram-title">1. 전체 시스템 구조</div>
+            <div class="diagram-description">
+                Smart Assistant의 전체 아키텍처를 보여줍니다. 
+                GUI, 데이터 소스, 분석 파이프라인, LLM 서비스, 캐시 시스템 간의 관계를 나타냅니다.
+            </div>
+            <div class="mermaid">
+graph TB
+    GUI[Smart Assistant GUI<br/>PyQt6 Desktop]
+    
+    JSON[JSON Dataset<br/>Offline]
+    VDOS[VirtualOffice<br/>REST API]
+    
+    DSM[Data Sources Manager]
+    AP[Analysis Pipeline]
+    LLM[LLM Services<br/>GPT-4o/Azure/OpenRouter]
+    CACHE[(SQLite Cache<br/>todos_cache.db)]
+    
+    GUI --> JSON
+    GUI --> VDOS
+    JSON --> DSM
+    VDOS --> DSM
+    DSM --> AP
+    AP --> LLM
+    LLM --> CACHE
+    CACHE --> GUI
+    
+    style GUI fill:#4A90E2,color:#fff
+    style LLM fill:#E94B3C,color:#fff
+    style CACHE fill:#50C878,color:#fff
+            </div>
+            <div class="info-box">
+                <h3>💡 핵심 포인트</h3>
+                <p>
+                    • GUI는 JSON(오프라인)과 VirtualOffice(실시간) 두 가지 데이터 소스를 지원합니다.<br>
+                    • 모든 분석은 LLM(GPT-4o)을 통해 수행되며, 결과는 SQLite에 캐시됩니다.<br>
+                    • 캐시 시스템으로 API 호출을 최소화하여 비용을 절감합니다.
+                </p>
+            </div>
+        </div>
+        
+        <!-- 레이어 구조 -->
+        <div id="layer" class="diagram-container">
+            <div class="diagram-title">2. 레이어 구조</div>
+            <div class="diagram-description">
+                4계층 아키텍처: Presentation(UI) → Business Logic → Data Access → Infrastructure
+            </div>
+            <div class="mermaid">
+graph TB
+    subgraph Presentation["Presentation Layer (UI)"]
+        MW[Main Window]
+        TP[Todo Panel]
+        AP[Analysis Panel]
+        SD[Simulation Dashboard]
+    end
+    
+    subgraph Business["Business Logic Layer"]
+        TC[Todo Controller]
+        T3S[Top3 Service]
+        PTS[Project Tag Service]
+        APS[Analysis Pipeline]
+        VOC[VirtualOffice Coordinator]
+    end
+    
+    subgraph Data["Data Access Layer"]
+        JSON[JSON Source]
+        VDOS[VirtualOffice Source]
+        TR[Todo Repository]
+        LLMC[LLM Client]
+    end
+    
+    subgraph Infrastructure["Infrastructure Layer"]
+        DB[(SQLite)]
+        FS[File System]
+        API[External APIs]
+    end
+    
+    MW --> TC
+    TP --> T3S
+    AP --> APS
+    SD --> VOC
+    
+    TC --> TR
+    T3S --> LLMC
+    PTS --> LLMC
+    APS --> LLMC
+    VOC --> VDOS
+    
+    TR --> DB
+    JSON --> FS
+    VDOS --> API
+    LLMC --> API
+    
+    style Presentation fill:#E3F2FD
+    style Business fill:#FFF3E0
+    style Data fill:#F3E5F5
+    style Infrastructure fill:#E8F5E9
+            </div>
+            <div class="info-box">
+                <h3>💡 레이어별 책임</h3>
+                <p>
+                    • <strong>Presentation</strong>: 사용자 인터페이스, 이벤트 처리<br>
+                    • <strong>Business Logic</strong>: 비즈니스 규칙, 워크플로우 조정<br>
+                    • <strong>Data Access</strong>: 데이터 소스 추상화, CRUD 작업<br>
+                    • <strong>Infrastructure</strong>: 외부 시스템, 저장소, API 연동
+                </p>
+            </div>
+        </div>
+        
+        <!-- 상세 구조 -->
+        <div id="detailed" class="diagram-container">
+            <div class="diagram-title">3. offline_agent 상세 구조</div>
+            <div class="diagram-description">
+                모든 주요 컴포넌트와 파일 구조를 상세하게 보여줍니다. 
+                UI, Controllers, Services, NLP, Data Sources, Integration 레이어 포함.
+            </div>
+            <div class="mermaid">
+graph TB
+    subgraph UI["UI Layer"]
+        MW[MainWindow<br/>2,382 lines]
+        TP[TodoPanel]
+        ARP[AnalysisResultPanel]
+    end
+    
+    subgraph Services["Services"]
+        T3S[Top3Service]
+        PTS[ProjectTagService]
+        APS[AnalysisPipeline]
+        LLMC[LLMClient]
+    end
+    
+    subgraph NLP["NLP"]
+        SUM[Summarizer]
+        PR[PriorityRanker]
+        AE[ActionExtractor]
+    end
+    
+    subgraph DataSources["Data Sources"]
+        DSM[Manager]
+        JSONS[JSON]
+        VDOSS[VirtualOffice]
+    end
+    
+    subgraph DB["Database"]
+        TODODB[(todos_cache.db)]
+        PTDB[(project_tags.db)]
+        T3DB[(top3_cache.db)]
+    end
+    
+    MW --> TP
+    TP --> T3S
+    T3S --> LLMC
+    
+    APS --> SUM
+    APS --> PR
+    APS --> AE
+    APS --> LLMC
+    
+    PTS --> LLMC
+    PTS --> PTDB
+    
+    DSM --> JSONS
+    DSM --> VDOSS
+    
+    T3S --> T3DB
+    LLMC --> TODODB
+    
+    style UI fill:#E3F2FD
+    style Services fill:#FFF3E0
+    style NLP fill:#F3E5F5
+    style DataSources fill:#E8F5E9
+    style DB fill:#FFE0B2
+            </div>
+            <div class="info-box">
+                <h3>💡 주요 컴포넌트</h3>
+                <p>
+                    • <strong>UI Layer</strong>: 8개 주요 컴포넌트 (MainWindow 2,382줄)<br>
+                    • <strong>Services</strong>: 8개 핵심 서비스 (Top3, ProjectTag, Analysis, LLM)<br>
+                    • <strong>NLP</strong>: 4개 분석 모듈 (요약, 우선순위, TODO 추출, 그룹화)<br>
+                    • <strong>Database</strong>: 3개 SQLite DB (TODO, 프로젝트 태그, Top3 캐시)
+                </p>
+            </div>
+        </div>
+        
+        <!-- 데이터 플로우 -->
+        <div id="dataflow" class="diagram-container">
+            <div class="diagram-title">4. 데이터 플로우 (시퀀스 다이어그램)</div>
+            <div class="diagram-description">
+                사용자가 페르소나를 선택한 후 TODO가 생성되고 Top3가 선정되기까지의 전체 흐름을 보여줍니다.
+            </div>
+            <div class="mermaid">
+sequenceDiagram
+    participant User as 사용자
+    participant GUI as PyQt6 GUI
+    participant DSM as Data Source Manager
+    participant VDOS as VirtualOffice API
+    participant AP as Analysis Pipeline
+    participant LLM as GPT-4o
+    participant PTS as Project Tag Service
+    participant T3S as Top3 Service
+    participant DB as SQLite Cache
+    
+    User->>GUI: 페르소나 선택 (이정두)
+    GUI->>DSM: 데이터 수집 요청
+    DSM->>VDOS: GET /api/emails?since_id=6895
+    VDOS-->>DSM: 이메일 10개
+    DSM->>VDOS: GET /api/messages?since_id=3529
+    VDOS-->>DSM: 메시지 15개
+    
+    DSM->>AP: 메시지 25개 분석 요청
+    AP->>LLM: 메시지 요약 생성
+    LLM-->>AP: 요약 텍스트
+    AP->>LLM: TODO 추출
+    LLM-->>AP: TODO 5개
+    
+    AP->>PTS: 프로젝트 태그 분류
+    PTS->>LLM: "API 리팩토링" 분석
+    LLM-->>PTS: HA 프로젝트
+    PTS->>DB: 태그 저장
+    
+    AP->>T3S: Top3 선정 (자연어 규칙)
+    T3S->>LLM: "김연중 + HA" 규칙 적용
+    LLM-->>T3S: TODO 3개 선정
+    T3S->>DB: 결과 캐시 (TTL 5분)
+    
+    DB-->>GUI: TODO 207개 + Top3
+    GUI-->>User: UI 업데이트
+            </div>
+            <div class="info-box">
+                <h3>💡 처리 흐름</h3>
+                <p>
+                    1. <strong>데이터 수집</strong>: VirtualOffice API에서 증분 수집 (since_id 기반)<br>
+                    2. <strong>분석</strong>: LLM으로 메시지 요약 및 TODO 추출<br>
+                    3. <strong>분류</strong>: 프로젝트 태그 자동 분류 (LLM 기반)<br>
+                    4. <strong>선정</strong>: 자연어 규칙으로 Top3 선정 (LLM + 캐시)<br>
+                    5. <strong>표시</strong>: UI 업데이트 (실시간)
+                </p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function showDiagram(id) {
+            // 모든 탭과 다이어그램 비활성화
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.diagram-container').forEach(container => container.classList.remove('active'));
+            
+            // 선택된 탭과 다이어그램 활성화
+            event.target.classList.add('active');
+            document.getElementById(id).classList.add('active');
+        }
+    </script>
+</body>
+</html>

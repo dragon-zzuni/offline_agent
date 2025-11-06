@@ -9,6 +9,7 @@ import json
 import logging
 import sqlite3
 import time
+import re
 
 from typing import Dict, List, Optional, Any
 from pathlib import Path
@@ -91,8 +92,8 @@ from src.integrations.polling_worker import PollingWorker
 from src.integrations.simulation_monitor import SimulationMonitor
 
 # 시각적 알림 관련 import
-from src.ui.visual_notification import NotificationManager, VisualNotification
-from src.ui.tick_history_dialog import TickHistoryDialog
+from .visual_notification import NotificationManager, VisualNotification
+from .tick_history_dialog import TickHistoryDialog
 
 def _init_todo_schema(conn: sqlite3.Connection):
     cur = conn.cursor()
@@ -250,6 +251,17 @@ def _save_todos_to_db(items: list[dict], db_path=TODO_DB_PATH):
 
 class SmartAssistantGUI(QMainWindow):
     """Smart Assistant 메인 GUI"""
+
+    _ACTION_SUMMARY_RULES = [
+        ("결재 요청", ("결재", "승인", "approve", "approval")),
+        ("검토/확인 요청", ("검토", "확인", "확인부탁", "확인 부탁", "review", "check", "feedback")),
+        ("답변 요청", ("답변", "회신", "응답", "reply", "response")),
+        ("보고/업데이트", ("보고", "업데이트", "status", "현황", "progress")),
+        ("자료 전달", ("공유", "전달", "첨부", "자료", "파일", "share", "attachment")),
+        ("미팅/일정 안내", ("미팅", "회의", "일정", "스케줄", "meeting", "schedule")),
+        ("작업 진행", ("작업", "처리", "조치", "진행", "완료", "implement", "fix")),
+    ]
+    _GENERIC_REQUEST_KEYWORDS = ("요청", "부탁", "request", "please")
     
     def __init__(self):
         super().__init__()
@@ -272,6 +284,8 @@ class SmartAssistantGUI(QMainWindow):
         }
         self.analysis_results: List[Dict] = []
         self.collected_messages: List[Dict] = []
+        self._initial_collection_completed: bool = False
+        self._message_summary_cache: Dict[tuple, List[Dict]] = {}
     
     def _init_services(self):
         """서비스 초기화"""
@@ -335,6 +349,7 @@ class SmartAssistantGUI(QMainWindow):
         self.new_message_ids = set()
         self._progress_bar = None
         self._progress_label = None
+        self._widgets_registered = False  # 위젯 등록 여부 추적
     
     def _finalize_initialization(self):
         """초기화 완료"""
@@ -347,7 +362,7 @@ class SmartAssistantGUI(QMainWindow):
     
     def init_ui(self):
         """UI 초기화"""
-        self.setWindowTitle("OFFLINE AGENT v2.0")
+        self.setWindowTitle("SmartAssistant v2.0")
         self.setGeometry(100, 100, 1400, 900)
         
         # 중앙 위젯 설정
@@ -1063,10 +1078,17 @@ class SmartAssistantGUI(QMainWindow):
             filtered_messages: 필터링된 메시지 리스트
         """
         try:
-            # 이메일 패널 업데이트
+            # 이메일 패널 업데이트 (TODO 아이템 포함)
             if hasattr(self, 'email_panel'):
                 email_messages = [m for m in filtered_messages if m.get("type") == "email"]
-                self.email_panel.update_emails(email_messages)
+                # repository를 통해 TODO 아이템 가져오기
+                todo_items = []
+                if hasattr(self, 'todo_panel') and hasattr(self.todo_panel, 'repository'):
+                    try:
+                        todo_items = self.todo_panel.repository.get_all()
+                    except Exception as e:
+                        logger.warning(f"TODO 아이템 가져오기 실패: {e}")
+                self.email_panel.update_emails(email_messages, todo_items)
             
             # 메시지 요약 패널 업데이트
             if hasattr(self, 'message_summary_panel'):
@@ -1257,6 +1279,22 @@ class SmartAssistantGUI(QMainWindow):
         if not self.collected_messages:
             return
         
+        if not hasattr(self, "_message_summary_cache"):
+            self._message_summary_cache = {}
+
+        cache_key = (
+            self._current_persona_id or "unknown",
+            unit,
+            getattr(self, "_current_data_version", "0"),
+            len(self.collected_messages),
+        )
+        cached_summaries = self._message_summary_cache.get(cache_key)
+        if cached_summaries:
+            logger.info("🗂️ 메시지 요약 캐시 히트: unit=%s, entries=%d", unit, len(cached_summaries))
+            if hasattr(self, "message_summary_panel"):
+                self.message_summary_panel.display_summaries(cached_summaries)
+            return
+
         from nlp.message_grouping import group_by_day, group_by_week, group_by_month
         from nlp.grouped_summary import GroupedSummary
         
@@ -1270,25 +1308,36 @@ class SmartAssistantGUI(QMainWindow):
         else:
             # 기본값: 일별 그룹화
             groups = group_by_day(self.collected_messages)
+
+        # 메시지 ID -> 우선순위 매핑 미리 계산
+        priority_lookup: Dict[str, str] = {}
+        for result in self.analysis_results or []:
+            try:
+                message = result.get("message", {}) if isinstance(result, dict) else {}
+                msg_id = message.get("msg_id")
+                if not msg_id:
+                    continue
+                priority_level = result.get("priority", {}).get("priority_level") if isinstance(result, dict) else None
+                if priority_level:
+                    priority_lookup[msg_id] = str(priority_level).lower()
+            except Exception:
+                continue
         
         # 그룹별 요약 생성
         summaries = []
         for period, messages in groups.items():
             # 간단한 요약 생성
-            brief_summary = self._generate_brief_summary(messages)
             key_points = self._extract_key_points(messages)
+            brief_summary = self._generate_brief_summary(messages, key_points)
             
             # 발신자별 우선순위 계산
             sender_priority_map = {}
             for msg in messages:
                 sender = msg.get("sender", "Unknown")
                 # 분석 결과에서 우선순위 찾기
-                priority = "low"
-                for result in self.analysis_results:
-                    if result.get("message", {}).get("msg_id") == msg.get("msg_id"):
-                        priority = result.get("priority", {}).get("priority_level", "low")
-                        break
-                
+                msg_id = msg.get("msg_id")
+                priority = priority_lookup.get(msg_id, "low")
+
                 # 최고 우선순위 유지
                 if sender not in sender_priority_map:
                     sender_priority_map[sender] = priority
@@ -1324,11 +1373,13 @@ class SmartAssistantGUI(QMainWindow):
             
             summaries.append(summary_dict)
         
+        self._message_summary_cache[cache_key] = summaries
+
         # MessageSummaryPanel에 표시
         if hasattr(self, "message_summary_panel"):
             self.message_summary_panel.display_summaries(summaries)
     
-    def _generate_brief_summary(self, messages: list) -> str:
+    def _generate_brief_summary(self, messages: list, key_points: Optional[List[str]] = None) -> str:
         """간결한 요약 생성 (1-2줄)"""
         if not messages:
             return "메시지 없음"
@@ -1341,52 +1392,108 @@ class SmartAssistantGUI(QMainWindow):
         senders = [m.get("sender", "Unknown") for m in messages]
         sender_counts = Counter(senders)
         top_sender = sender_counts.most_common(1)[0] if sender_counts else ("Unknown", 0)
-        
-        return f"총 {total}건 (이메일 {email_count}, 메신저 {messenger_count}) | 주요 발신자: {top_sender[0]} ({top_sender[1]}건)"
+
+        summary_text = f"총 {total}건 (이메일 {email_count}, 메신저 {messenger_count})"
+
+        if key_points:
+            cleaned_points = [kp.strip() for kp in key_points if kp and kp.strip()]
+            if cleaned_points:
+                highlights = " · ".join(cleaned_points[:2])
+                summary_text += f" | {highlights}"
+                return summary_text
+
+        return f"{summary_text} | 주요 발신자: {top_sender[0]} ({top_sender[1]}건)"
     
     def _extract_key_points(self, messages: List[Dict]) -> List[str]:
         """주요 포인트 추출 (최대 3개)
-        
-        메시지에서 핵심 포인트를 추출합니다.
-        제목이 있으면 제목을 우선 사용하고, 없으면 본문의 첫 문장을 사용합니다.
-        
-        Args:
-            messages: 메시지 리스트
-            
-        Returns:
-            주요 포인트 문자열 리스트 (최대 3개)
-            
-        Examples:
-            >>> points = self._extract_key_points(messages)
-            >>> print(points[0])
-            "Kim Jihoon: 오늘 오전 2일차 작업 진행 상황 점검..."
+
+        메시지에서 액션 중심의 요약 문장을 찾아 반환합니다.
         """
-        points = []
-        
-        # 최대 3개 메시지에서 포인트 추출
-        for msg in messages[:3]:
-            # 제목 우선, 없으면 본문 첫 문장
-            subject = msg.get("subject", "")
-            content = msg.get("content", "") or msg.get("body", "")
-            sender = msg.get("sender", "Unknown")
-            
-            if subject:
-                # 제목이 있으면 제목 사용
-                point = f"{sender}: {subject[:80]}"
-            elif content:
-                # 첫 문장 추출 (마침표 기준)
-                first_sentence = content.split(".")[0].strip()
-                if len(first_sentence) > 10:  # 너무 짧은 문장 제외
-                    point = f"{sender}: {first_sentence[:80]}"
-                else:
-                    point = f"{sender}: {content[:80]}"
-            else:
-                # 제목도 본문도 없으면 건너뛰기
-                continue
-            
-            points.append(point)
-        
-        return points
+        points: List[str] = []
+        fallback: List[str] = []
+        seen: set[str] = set()
+
+        for msg in messages:
+            sender = (msg.get("sender") or msg.get("from") or "Unknown").strip() or "Unknown"
+            action_label, snippet = self._summarize_action_snippet(msg)
+
+            if action_label and snippet:
+                entry = f"{sender} -> {action_label}: {snippet}"
+                normalized = entry.lower()
+                if normalized not in seen:
+                    points.append(entry)
+                    seen.add(normalized)
+            elif snippet:
+                fallback_entry = f"{sender}: {snippet}"
+                normalized = fallback_entry.lower()
+                if normalized not in seen:
+                    fallback.append(fallback_entry)
+
+            if len(points) >= 3:
+                break
+
+        if len(points) < 3:
+            for entry in fallback:
+                if len(points) >= 3:
+                    break
+                normalized = entry.lower()
+                if normalized not in seen:
+                    points.append(entry)
+                    seen.add(normalized)
+
+        return points[:3]
+
+    def _summarize_action_snippet(self, message: Dict[str, Any]) -> tuple[Optional[str], str]:
+        """메시지에서 액션 라벨과 요약 문장을 추출."""
+        subject = str(message.get("subject") or "").strip()
+        content = str(message.get("content") or message.get("body") or "").strip()
+
+        combined = f"{subject} {content}".lower()
+        action_label = self._classify_action_label(combined)
+
+        snippet_source = subject or self._extract_primary_sentence(content)
+        snippet = self._clean_summary_snippet(snippet_source)
+        if not snippet and content:
+            snippet = self._clean_summary_snippet(content)
+
+        return action_label, snippet
+
+    @staticmethod
+    def _extract_primary_sentence(text: str) -> str:
+        """본문에서 첫 번째 의미 있는 문장을 반환."""
+        if not text:
+            return ""
+
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text) if s.strip()]
+        for sentence in sentences:
+            if len(sentence) >= 6:
+                return sentence
+        return text.strip()
+
+    @staticmethod
+    def _clean_summary_snippet(snippet: str) -> str:
+        """요약 문장을 한 줄로 정리하고 길이를 제한."""
+        if not snippet:
+            return ""
+
+        cleaned = re.sub(r"\s+", " ", snippet).strip()
+        if len(cleaned) > 90:
+            cleaned = cleaned[:87].rstrip() + "..."
+        return cleaned
+
+    def _classify_action_label(self, text_lower: str) -> Optional[str]:
+        """메시지 텍스트에서 액션 라벨을 결정."""
+        if not text_lower:
+            return None
+
+        for label, keywords in self._ACTION_SUMMARY_RULES:
+            if any(keyword.lower() in text_lower for keyword in keywords):
+                return label
+
+        if any(keyword in text_lower for keyword in self._GENERIC_REQUEST_KEYWORDS):
+            return "요청 사항"
+
+        return None
     
     def start_collection(self):
         """메시지 수집 시작"""
@@ -1469,6 +1576,11 @@ class SmartAssistantGUI(QMainWindow):
             # 현재 페르소나 ID 업데이트
             self._current_persona_id = persona.email_address or persona.chat_handle
             
+            # TODO 컨트롤러에 페르소나 필터 설정
+            if hasattr(self, 'todo_panel') and self.todo_panel:
+                self.todo_panel.controller.set_persona_filter(persona.name)
+                logger.info(f"👤 TODO 페르소나 필터 설정: {persona.name}")
+            
             # 데이터 소스 업데이트 (VirtualOffice 모드인 경우에만)
             if self.data_source_type == "virtualoffice":
                 # 새로운 캐시 서비스 사용
@@ -1479,6 +1591,11 @@ class SmartAssistantGUI(QMainWindow):
                     # 캐시 히트: 즉시 결과 표시
                     logger.info(f"✅ 캐시 히트: {persona.name} - 즉시 표시")
                     self.status_message.setText(f"캐시에서 로드 중: {persona.name}...")
+                    
+                    # ✅ 캐시 히트 시: TODO DB 초기화 후 캐시 복원
+                    logger.info(f"🗑️ 이전 페르소나의 TODO 초기화 중...")
+                    self._clear_todos_for_persona_change()
+                    
                     self._display_cached_result(cached_result)
                     self.status_message.setText(f"페르소나 변경됨 (캐시): {persona.name}")
                     
@@ -1494,6 +1611,10 @@ class SmartAssistantGUI(QMainWindow):
                     # 캐시 미스: 분석 파이프라인 실행
                     logger.info(f"❌ 캐시 미스: {persona.name} - 데이터 수집 시작")
                     self.status_message.setText(f"데이터 분석 중: {persona.name}...")
+                    
+                    # ✅ 캐시 미스 시: TODO DB 초기화
+                    logger.info(f"🗑️ 이전 페르소나의 TODO 초기화 중...")
+                    self._clear_todos_for_persona_change()
                     
                     # ✅ 캐시 미스 시: 재분석 플래그 리셋
                     self._skip_reanalysis_after_cache_hit = False
@@ -1605,21 +1726,34 @@ class SmartAssistantGUI(QMainWindow):
         """새 데이터를 위한 UI 업데이트"""
         self._show_visual_notification()
         
+        # 위젯 등록 (최초 1회만)
+        if not self._widgets_registered:
+            if hasattr(self, 'message_summary_panel'):
+                self.notification_manager.register_widget(self.message_summary_panel, "visual")
+            if hasattr(self, 'email_panel'):
+                self.notification_manager.register_widget(self.email_panel, "visual")
+            self._widgets_registered = True
+        
         # 메시지 요약 패널 업데이트
         if hasattr(self, 'message_summary_panel'):
-            self.notification_manager.register_widget(self.message_summary_panel, "visual")
-            self.notification_manager.show_notification(self.message_summary_panel, duration_ms=500)
+            self.notification_manager.show_notification(self.message_summary_panel, duration_ms=300)
         
         if show_progress:
             self._update_progress_bar(70)
         
-        # 이메일 패널 업데이트
+        # 이메일 패널 업데이트 (TODO 아이템 포함)
         if hasattr(self, 'email_panel'):
             email_messages = [m for m in self.collected_messages if m.get("type") == "email"]
-            self.email_panel.update_emails(email_messages)
+            # repository를 통해 TODO 아이템 가져오기
+            todo_items = []
+            if hasattr(self, 'todo_panel') and hasattr(self.todo_panel, 'repository'):
+                try:
+                    todo_items = self.todo_panel.repository.get_all()
+                except Exception as e:
+                    logger.warning(f"TODO 아이템 가져오기 실패: {e}")
+            self.email_panel.update_emails(email_messages, todo_items)
             
-            self.notification_manager.register_widget(self.email_panel, "visual")
-            self.notification_manager.show_notification(self.email_panel, duration_ms=500)
+            self.notification_manager.show_notification(self.email_panel, duration_ms=300)
         
         if show_progress:
             self._update_progress_bar(90)

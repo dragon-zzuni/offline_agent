@@ -39,6 +39,7 @@ class ProjectTagCacheService:
                     project_tag TEXT NOT NULL,
                     confidence TEXT,
                     analysis_method TEXT,
+                    classification_reason TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -78,7 +79,7 @@ class ProjectTagCacheService:
             cursor = conn.cursor()
             
             cursor.execute("""
-                SELECT project_tag, confidence, analysis_method, created_at, updated_at
+                SELECT project_tag, confidence, analysis_method, classification_reason, created_at, updated_at
                 FROM project_tag_cache
                 WHERE todo_id = ?
             """, (todo_id,))
@@ -91,8 +92,9 @@ class ProjectTagCacheService:
                     'project_tag': result[0],
                     'confidence': result[1],
                     'analysis_method': result[2],
-                    'created_at': result[3],
-                    'updated_at': result[4]
+                    'classification_reason': result[3],
+                    'created_at': result[4],
+                    'updated_at': result[5]
                 }
             
             return None
@@ -102,7 +104,8 @@ class ProjectTagCacheService:
             return None
     
     def save_tag(self, todo_id: str, project_tag: str, 
-                 confidence: str = None, analysis_method: str = None):
+                 confidence: str = None, analysis_method: str = None,
+                 classification_reason: str = None):
         """
         프로젝트 태그를 캐시에 저장
         
@@ -111,6 +114,7 @@ class ProjectTagCacheService:
             project_tag: 프로젝트 태그
             confidence: 신뢰도 (explicit, llm, sender, unknown)
             analysis_method: 분석 방법
+            classification_reason: 분류 근거 (짧은 설명)
         """
         try:
             conn = sqlite3.connect(self.db_path)
@@ -120,16 +124,20 @@ class ProjectTagCacheService:
             
             cursor.execute("""
                 INSERT OR REPLACE INTO project_tag_cache 
-                (todo_id, project_tag, confidence, analysis_method, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 
+                (todo_id, project_tag, confidence, analysis_method, classification_reason, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 
                     COALESCE((SELECT created_at FROM project_tag_cache WHERE todo_id = ?), ?),
                     ?)
-            """, (todo_id, project_tag, confidence, analysis_method, todo_id, now, now))
+            """, (todo_id, project_tag, confidence, analysis_method, classification_reason, todo_id, now, now))
             
             conn.commit()
             conn.close()
             
-            logger.debug(f"✅ 캐시 저장: {todo_id} → {project_tag}")
+            # 로그에 분류 근거 포함
+            if classification_reason:
+                logger.info(f"✅ 캐시 저장: {todo_id} → {project_tag} ({classification_reason})")
+            else:
+                logger.debug(f"✅ 캐시 저장: {todo_id} → {project_tag}")
             
         except Exception as e:
             logger.error(f"❌ 캐시 저장 실패 ({todo_id}): {e}")

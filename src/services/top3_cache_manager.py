@@ -205,3 +205,9 @@ class Top3CacheManager:
         self._hit_count = 0
         self._miss_count = 0
         logger.debug("[Top3Cache] 통계 초기화")
+    
+    def clear(self) -> None:
+        """캐시 전체 삭제"""
+        count = len(self._cache)
+        self._cache.clear()
+        logger.info(f"[Top3Cache] 캐시 전체 삭제: {count}개 항목")

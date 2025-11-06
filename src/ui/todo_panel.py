@@ -194,7 +194,7 @@ class BasicTodoItem(QWidget):
         logger.debug(f"[프로젝트 태그] TODO {todo.get('id', 'unknown')}: project_code={project_code}")
         if project_code:
             try:
-                from src.ui.widgets.project_tag_widget import create_project_tag_label
+                from .widgets.project_tag_widget import create_project_tag_label
                 project_tag = create_project_tag_label(project_code)
                 if project_tag:
                     top.addWidget(project_tag, 0)
@@ -248,12 +248,13 @@ class BasicTodoItem(QWidget):
                 summary_label.setStyleSheet("""
                     color:#6B7280; 
                     background:#F9FAFB; 
-                    padding:6px 10px; 
+                    padding:8px 12px; 
                     border-radius:6px;
                     border:1px solid #E5E7EB;
+                    line-height: 1.4;
                 """)
                 summary_label.setWordWrap(True)
-                summary_label.setMaximumHeight(50)
+                summary_label.setMaximumHeight(65)  # 높이 증가 (2줄 표시 가능)
                 root.addWidget(summary_label)
 
         meta = QHBoxLayout()
@@ -319,22 +320,43 @@ class BasicTodoItem(QWidget):
         self.set_unread(unread)
     
     def _create_brief_summary(self, description: str) -> str:
-        """설명을 간단하게 요약 (첫 줄만 표시)"""
+        """설명을 간단하게 요약 (가독성 개선)"""
         if not description:
             return ""
         
-        # 줄바꿈 제거 및 공백 정리
-        cleaned = " ".join(description.split())
+        # 여러 줄 공백 정리 (줄바꿈은 유지)
+        lines = [line.strip() for line in description.split('\n') if line.strip()]
         
-        # 첫 문장만 추출
-        sentences = cleaned.replace("。", ".").split(".")
-        first_sentence = sentences[0].strip() if sentences else cleaned
+        # 빈 줄이 없으면 첫 2줄만, 있으면 첫 문단만
+        if not lines:
+            return ""
         
-        # 최대 100자로 제한 (첫 줄이 이미 보이므로 간단하게)
-        if len(first_sentence) > 100:
-            return first_sentence[:97] + "..."
+        # 첫 문장 또는 첫 줄 추출
+        first_part = lines[0]
         
-        return first_sentence
+        # 한국어 문장 구분자로 분리 시도
+        for separator in ['. ', '.\n', '! ', '?\n', '? ', '!\n']:
+            if separator in first_part:
+                first_part = first_part.split(separator)[0] + separator.strip()
+                break
+        
+        # 너무 짧으면 두 번째 줄도 추가
+        if len(first_part) < 30 and len(lines) > 1:
+            second_line = lines[1]
+            # 두 번째 줄이 너무 길지 않으면 추가
+            if len(second_line) < 50:
+                first_part = f"{first_part} {second_line}"
+        
+        # 최대 120자로 제한 (단어 중간에서 자르지 않도록)
+        if len(first_part) > 120:
+            # 마지막 공백 위치 찾기
+            truncated = first_part[:117]
+            last_space = truncated.rfind(' ')
+            if last_space > 80:  # 너무 앞에서 자르지 않도록
+                return truncated[:last_space] + "..."
+            return truncated + "..."
+        
+        return first_part
 
     def set_unread(self, unread: bool) -> None:
         """읽음/안읽음 상태 설정
@@ -429,8 +451,8 @@ class TodoPanel(QWidget):
         
         project_service: Optional[object] = None
         try:
-            from src.ui.widgets.project_tag_widget import get_project_service
-            from src.services.todo_migration_service import TodoMigrationService
+            from .widgets.project_tag_widget import get_project_service
+            from ..services.todo_migration_service import TodoMigrationService
             
             # 프로젝트 서비스 초기화
             project_service = get_project_service()
@@ -557,7 +579,7 @@ class TodoPanel(QWidget):
         project_service = self.controller.project_service
         if project_service:
             try:
-                from src.ui.widgets.project_tag_widget import ProjectTagBar
+                from .widgets.project_tag_widget import ProjectTagBar
                 self.project_tag_bar = ProjectTagBar()
                 self.project_tag_bar.tag_clicked.connect(self._on_project_filter_changed)
             except ImportError as e:
@@ -620,11 +642,19 @@ class TodoPanel(QWidget):
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             text = dialog.rule_text()
-            message, summary = self.top3_service.apply_natural_language_rules(text, reset=dialog.should_reset())
-            # DB에서 다시 로드하여 Top3 재계산
-            self.refresh_todo_list()
-            self._refresh_rule_tooltip()
+            is_reset = dialog.should_reset()
+            message, summary = self.top3_service.apply_natural_language_rules(text, reset=is_reset)
+            
+            # 1. 규칙 업데이트 팝업 먼저 표시
             QMessageBox.information(self, "Top-3 자연어 규칙", f"{message}\n\n{summary}")
+            
+            # 2. DB에서 다시 로드하여 Top3 재계산 (팝업 없이)
+            self.refresh_todo_list(show_reasoning=False)
+            self._refresh_rule_tooltip()
+            
+            # 3. 초기화가 아닐 때만 선정이유 팝업을 500ms 후에 표시
+            if not is_reset:
+                QTimer.singleShot(500, self._show_delayed_reasoning_popup)
 
     def _refresh_rule_tooltip(self) -> None:
         if not self.top3_service:
@@ -639,6 +669,40 @@ class TodoPanel(QWidget):
             self.top3_rule_btn.setToolTip(summary)
         if hasattr(self, "top3_nl_btn") and self.top3_nl_btn:
             self.top3_nl_btn.setToolTip(summary + "\n\n자연어 규칙을 입력하여 특정 요청자/키워드에 추가 가중치를 부여합니다.")
+    
+    def _show_delayed_reasoning_popup(self) -> None:
+        """지연된 선정이유 팝업 표시 (규칙 업데이트 팝업 이후)"""
+        if not self.top3_service:
+            return
+        
+        reasoning = self.top3_service.get_last_reasoning()
+        if not reasoning:
+            return
+        
+        # Top3 개수 계산
+        top3_count = len([todo for todo in self._top3_all if todo.get("is_top3")])
+        if top3_count == 0:
+            return
+        
+        try:
+            msg_box = QMessageBox()
+            msg_box.setWindowTitle("✅ Top3 선정 완료")
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setText(f"<b>{top3_count}개의 TODO가 Top3로 선정되었습니다</b>")
+            msg_box.setInformativeText(f"<p style='margin-top:10px;'><b>선정 이유:</b><br>{reasoning}</p>")
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: white;
+                }
+                QLabel {
+                    font-size: 13px;
+                    color: #333;
+                }
+            """)
+            msg_box.exec()
+        except Exception as e:
+            logger.error(f"[TodoPanel] 선정이유 팝업 표시 오류: {e}")
 
     def on_snooze_timer(self) -> None:
         self.controller.release_snoozed()
@@ -687,24 +751,45 @@ class TodoPanel(QWidget):
         self.update_project_tags(prepared)
         
         logger.info(f"[TodoPanel] {len(prepared)}개 TODO를 DB에 저장")
-        self.controller.save_items(prepared)
+        # 전체 TODO 리스트를 받았으므로 전체 교체 (incremental=False)
+        self.controller.save_items(prepared, incremental=False)
         self._rebuild_from_rows(prepared)
     
-    def refresh_todo_list(self) -> None:
-        logger.info(f"[TodoPanel] refresh_todo_list 시작")
+    def refresh_todo_list(self, show_reasoning: bool = False) -> None:
+        """TODO 리스트 새로고침
+        
+        Args:
+            show_reasoning: True면 Top3 선정이유 팝업 표시 (기본값: False)
+        """
+        logger.info(f"[TodoPanel] refresh_todo_list 시작 (show_reasoning={show_reasoning})")
+        
+        # 현재 페르소나 정보 가져오기
+        persona_name = self._get_current_persona_name()
+        persona_email = self._get_current_persona_email()
+        persona_handle = self._get_current_persona_handle()
+        
+        # 페르소나 필터 설정
+        self.controller.set_persona_filter(
+            persona_name=persona_name,
+            persona_email=persona_email,
+            persona_handle=persona_handle
+        )
+        
         rows = self.controller.load_active_items()
         logger.info(f"[TodoPanel] DB에서 {len(rows)}개 TODO 로드")
 
         if not rows:
-            logger.warning("[TodoPanel] TODO가 없음")
+            # 기존 TODO가 있으면 유지 (백그라운드 분석 중)
             if self._all_rows:
-                self._set_render_lists(self._all_rows, self._top3_all or [], self._rest_all or [])
+                logger.info("[TodoPanel] TODO 없음 - 기존 TODO 유지 (백그라운드 분석 중)")
                 return
-            self._rebuild_from_rows([])
-            return
+            else:
+                logger.warning("[TodoPanel] TODO 없음 - 빈 리스트 표시")
+                self._rebuild_from_rows([])
+                return
 
         self.update_project_tags(rows)
-        self._rebuild_from_rows(rows)
+        self._rebuild_from_rows(rows, show_reasoning=show_reasoning)
     
     def _get_current_persona_email(self) -> Optional[str]:
         """현재 선택된 페르소나의 이메일 주소 가져오기"""
@@ -723,6 +808,44 @@ class TodoPanel(QWidget):
                 return None
         except Exception as e:
             logger.error(f"[TodoPanel] 페르소나 이메일 가져오기 오류: {e}")
+            return None
+    
+    def _get_current_persona_name(self) -> Optional[str]:
+        """현재 선택된 페르소나의 이름 가져오기"""
+        try:
+            # 부모 윈도우에서 선택된 페르소나 정보 가져오기
+            parent_window = self.parent()
+            while parent_window and not hasattr(parent_window, 'selected_persona'):
+                parent_window = parent_window.parent()
+            
+            if parent_window and hasattr(parent_window, 'selected_persona') and parent_window.selected_persona:
+                name = parent_window.selected_persona.name
+                logger.debug(f"[TodoPanel] 현재 페르소나 이름: {name}")
+                return name
+            else:
+                logger.debug("[TodoPanel] 페르소나 정보를 찾을 수 없음")
+                return None
+        except Exception as e:
+            logger.error(f"[TodoPanel] 페르소나 이름 가져오기 오류: {e}")
+            return None
+    
+    def _get_current_persona_handle(self) -> Optional[str]:
+        """현재 선택된 페르소나의 채팅 핸들 가져오기"""
+        try:
+            # 부모 윈도우에서 선택된 페르소나 정보 가져오기
+            parent_window = self.parent()
+            while parent_window and not hasattr(parent_window, 'selected_persona'):
+                parent_window = parent_window.parent()
+            
+            if parent_window and hasattr(parent_window, 'selected_persona') and parent_window.selected_persona:
+                handle = parent_window.selected_persona.chat_handle
+                logger.debug(f"[TodoPanel] 현재 페르소나 핸들: {handle}")
+                return handle
+            else:
+                logger.debug("[TodoPanel] 페르소나 정보를 찾을 수 없음")
+                return None
+        except Exception as e:
+            logger.error(f"[TodoPanel] 페르소나 핸들 가져오기 오류: {e}")
             return None
 
     def set_top3_callback(self, callback: Optional[Callable[[List[dict]], None]]) -> None:
@@ -753,7 +876,13 @@ class TodoPanel(QWidget):
 
         self._re_render()
 
-    def _rebuild_from_rows(self, rows: List[dict]) -> None:
+    def _rebuild_from_rows(self, rows: List[dict], show_reasoning: bool = False) -> None:
+        """TODO 리스트 재구성
+        
+        Args:
+            rows: TODO 리스트
+            show_reasoning: True면 Top3 선정이유 팝업 표시 (기본값: False)
+        """
         if not rows:
             self._set_render_lists([], [], [])
             return
@@ -764,7 +893,8 @@ class TodoPanel(QWidget):
             cloned["status"] = (cloned.get("status") or "pending").lower()
             cloned_rows.append(cloned)
 
-        top_ids = self.controller.calculate_top3(cloned_rows)
+        # Top3 계산 (선정이유 팝업 표시 여부 전달)
+        top_ids = self.controller.calculate_top3(cloned_rows, show_reasoning=show_reasoning)
         
         top3_items = sorted(
             [row for row in cloned_rows if row.get("id") in top_ids],
@@ -953,6 +1083,10 @@ class TodoPanel(QWidget):
         dlg = QDialog(self)
         dlg.setWindowTitle("Top-3 즉시 처리 카드")
         layout = QVBoxLayout(dlg)
+        
+        # 카드 리스트 저장 (나중에 unread 상태 업데이트용)
+        cards = []
+        
         for todo in self._top3_cache:
             todo_id = todo.get("id")
             already_viewed = todo.get("_viewed") or (todo_id in self._viewed_ids if todo_id else False)
@@ -962,9 +1096,23 @@ class TodoPanel(QWidget):
             card.hold_clicked.connect(self.on_hold_clicked)
             card.snooze_clicked.connect(self.on_snooze_clicked)
             layout.addWidget(card)
+            cards.append((card, todo_id))
+        
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dlg)
         buttons.rejected.connect(dlg.reject)
         layout.addWidget(buttons)
+        
+        # 다이얼로그가 열리면 모든 카드를 읽음 처리
+        def on_dialog_shown():
+            for card, todo_id in cards:
+                if todo_id:
+                    self._viewed_ids.add(todo_id)
+                # 1초 후 unread 상태 해제 (사용자가 볼 시간을 줌)
+                QTimer.singleShot(1000, lambda c=card: c.set_unread(False))
+        
+        # 다이얼로그가 표시된 직후 실행
+        QTimer.singleShot(100, on_dialog_shown)
+        
         dlg.exec()
 
     def _on_mark_done_clicked(self, todo: dict) -> None:
@@ -1076,7 +1224,7 @@ class TodoPanel(QWidget):
     def update_project_tags(self, todos: List[dict], force_immediate: bool = False) -> None:
         """프로젝트 태그를 컨트롤러에 위임하고 UI를 갱신한다."""
         todos = todos or []
-        logger.info(f"[프로젝트 태그] update_project_tags 호출: {len(todos)}개 TODO (즉시실행: {force_immediate})")
+        logger.info(f"[프로젝트 태그] update_project_tags 호출: {len(todos)}개 TODO")
 
         if not todos:
             self._update_project_tag_bar_from_todos([])
@@ -1088,13 +1236,7 @@ class TodoPanel(QWidget):
             logger.info(f"[프로젝트 태그] {len(todos_without_project)}개 TODO를 비동기 분석 큐에 추가")
             self.queue_new_todos_for_async_analysis(todos_without_project)
 
-        # 백그라운드 분석이 완료되지 않았고 강제 실행이 아니면 지연
-        if not force_immediate and not self._is_background_analysis_complete():
-            logger.info(f"[프로젝트 태그] 백그라운드 분석 미완료 - 프로젝트 태그 분석 지연")
-            self._pending_project_tag_todos = todos
-            self._update_project_tag_bar_from_todos([])  # 빈 태그 바 표시
-            return
-
+        # 즉시 UI 업데이트 (프로젝트 태그는 백그라운드에서 비동기 처리)
         try:
             self.controller.update_project_tags(todos)
         except Exception as exc:
@@ -1105,31 +1247,7 @@ class TodoPanel(QWidget):
         except Exception as exc:
             logger.error("[프로젝트 태그] 태그 바 업데이트 실패: %s", exc, exc_info=True)
     
-    def _is_background_analysis_complete(self) -> bool:
-        """백그라운드 분석 완료 여부 확인"""
-        # 메인 윈도우에서 분석 상태 확인
-        try:
-            main_window = self.parent()
-            while main_window and not hasattr(main_window, 'assistant'):
-                main_window = main_window.parent()
-            
-            if main_window and hasattr(main_window, 'assistant'):
-                # 분석이 진행 중이면 False
-                return not getattr(main_window.assistant, '_analysis_in_progress', True)
-            
-            # 메인 윈도우를 찾을 수 없으면 True (안전한 기본값)
-            return True
-            
-        except Exception as e:
-            logger.debug(f"백그라운드 분석 상태 확인 오류: {e}")
-            return True
-    
-    def trigger_delayed_project_tag_analysis(self) -> None:
-        """지연된 프로젝트 태그 분석 실행"""
-        if hasattr(self, '_pending_project_tag_todos') and self._pending_project_tag_todos:
-            logger.info(f"[프로젝트 태그] 지연된 프로젝트 태그 분석 실행: {len(self._pending_project_tag_todos)}개")
-            self.update_project_tags(self._pending_project_tag_todos, force_immediate=True)
-            self._pending_project_tag_todos = None
+
     
     def _init_async_project_tag_service(self, project_service):
         """비동기 프로젝트 태그 서비스 초기화"""
@@ -1192,7 +1310,8 @@ class TodoPanel(QWidget):
             # 현재 TODO들에서 실제 사용 중인 프로젝트 추출
             active_projects = set()
             for todo in todos:
-                project = todo.get("project")
+                # project_tag 또는 project 필드 모두 지원 (하위 호환성)
+                project = todo.get("project_tag") or todo.get("project")
                 if project and project.strip():
                     active_projects.add(project.strip())
             
@@ -1203,7 +1322,7 @@ class TodoPanel(QWidget):
                 if db_path:
                     conn = sqlite3.connect(db_path)
                     cur = conn.cursor()
-                    cur.execute("SELECT DISTINCT project FROM todos WHERE project IS NOT NULL AND project != ''")
+                    cur.execute("SELECT DISTINCT project_tag FROM todos WHERE project_tag IS NOT NULL AND project_tag != ''")
                     results = cur.fetchall()
                     conn.close()
                     for (project,) in results:

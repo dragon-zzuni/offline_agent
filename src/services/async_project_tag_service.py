@@ -9,7 +9,7 @@ import asyncio
 import logging
 import threading
 from typing import List, Dict, Optional, Callable
-from queue import Queue
+from queue import Queue, PriorityQueue
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -35,7 +35,7 @@ class AsyncProjectTagService:
     def __init__(self, project_service, repository):
         self.project_service = project_service
         self.repository = repository
-        self.task_queue = Queue()
+        self.task_queue = PriorityQueue()  # 우선순위 큐로 변경
         self.is_running = False
         self.worker_thread = None
         self.stats = {
@@ -44,6 +44,7 @@ class AsyncProjectTagService:
             "analyzed": 0,
             "errors": 0
         }
+        self._task_counter = 0  # 같은 우선순위 내에서 순서 보장
         
         # VDOS DB와 같은 경로의 todos_cache.db 사용
         self.db_path = self._get_vdos_todos_db_path()
@@ -135,8 +136,15 @@ class AsyncProjectTagService:
             self.worker_thread.join(timeout=5.0)
         logger.info("⏹️ 비동기 프로젝트 태그 서비스 중지")
     
-    def queue_todo_for_analysis(self, todo_id: str, todo_data: Dict, callback: Optional[Callable] = None):
-        """TODO를 프로젝트 태그 분석 큐에 추가"""
+    def queue_todo_for_analysis(self, todo_id: str, todo_data: Dict, callback: Optional[Callable] = None, priority: bool = False):
+        """TODO를 프로젝트 태그 분석 큐에 추가
+        
+        Args:
+            todo_id: TODO ID
+            todo_data: TODO 데이터
+            callback: 완료 콜백
+            priority: True면 큐의 앞에 추가 (현재 페르소나 우선)
+        """
         if not self.is_running:
             self.start()
         
@@ -186,10 +194,14 @@ class AsyncProjectTagService:
                 callback(todo_id, cached_project)
             return
         
-        # 분석 큐에 추가
+        # 분석 큐에 추가 (우선순위: 0=높음, 1=낮음)
         task = ProjectTagTask(todo_id, todo_data, callback)
-        self.task_queue.put(task)
-        logger.debug(f"[AsyncProjectTag] {todo_id}: 분석 큐에 추가 (큐 크기: {self.task_queue.qsize()})")
+        priority_value = 0 if priority else 1
+        self._task_counter += 1
+        # (우선순위, 카운터, 태스크) 튜플로 저장
+        self.task_queue.put((priority_value, self._task_counter, task))
+        priority_label = "우선" if priority else "일반"
+        logger.debug(f"[AsyncProjectTag] {todo_id}: 분석 큐에 추가 ({priority_label}, 큐 크기: {self.task_queue.qsize()})")
     
     def queue_multiple_todos(self, todos: List[Dict], callback: Optional[Callable] = None):
         """여러 TODO를 배치로 큐에 추가"""
@@ -247,7 +259,7 @@ class AsyncProjectTagService:
             try:
                 # 큐에서 작업 가져오기 (타임아웃 1초)
                 try:
-                    task = self.task_queue.get(timeout=1.0)
+                    priority, counter, task = self.task_queue.get(timeout=1.0)
                 except:
                     continue  # 타임아웃 시 계속 루프
                 

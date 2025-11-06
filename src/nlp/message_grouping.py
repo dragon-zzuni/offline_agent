@@ -29,7 +29,8 @@ def group_by_day(messages: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any
         date_key = dt.strftime("%Y-%m-%d")
         groups[date_key].append(message)
     
-    sorted_groups = dict(sorted(groups.items()))
+    # 최신순 정렬 (내림차순)
+    sorted_groups = dict(sorted(groups.items(), reverse=True))
     logger.info(f"📅 일별 그룹화 완료: {len(sorted_groups)}개 그룹")
     return sorted_groups
 
@@ -55,7 +56,8 @@ def group_by_week(messages: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, An
         week_key = monday.strftime("%Y-%m-%d")
         groups[week_key].append(message)
     
-    sorted_groups = dict(sorted(groups.items()))
+    # 최신순 정렬 (내림차순)
+    sorted_groups = dict(sorted(groups.items(), reverse=True))
     logger.info(f"📅 주별 그룹화 완료: {len(sorted_groups)}개 그룹")
     return sorted_groups
 
@@ -76,7 +78,8 @@ def group_by_month(messages: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, A
         month_key = dt.strftime("%Y-%m")
         groups[month_key].append(message)
     
-    sorted_groups = dict(sorted(groups.items()))
+    # 최신순 정렬 (내림차순)
+    sorted_groups = dict(sorted(groups.items(), reverse=True))
     logger.info(f"📅 월별 그룹화 완료: {len(sorted_groups)}개 그룹")
     return sorted_groups
 

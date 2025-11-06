@@ -12,6 +12,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# TODO 중복 제거 서비스 import
+try:
+    from services.todo_deduplication_service import TodoDeduplicationService
+    DEDUPLICATION_AVAILABLE = True
+except ImportError:
+    logger.warning("TodoDeduplicationService를 import할 수 없습니다. 중복 제거 기능이 비활성화됩니다.")
+    DEDUPLICATION_AVAILABLE = False
+
 
 class AnalysisPipelineService:
     """메시지 분석 파이프라인 서비스
@@ -27,7 +35,8 @@ class AnalysisPipelineService:
         summarizer,
         action_extractor,
         user_profile: Optional[Dict[str, Any]] = None,
-        top3_service=None
+        top3_service=None,
+        todo_repository=None
     ):
         """
         Args:
@@ -37,6 +46,7 @@ class AnalysisPipelineService:
             action_extractor: ActionExtractor 인스턴스
             user_profile: 사용자 프로필 정보 (email_address 등)
             top3_service: Top3Service 인스턴스 (선택사항, LLM 자동 선정용)
+            todo_repository: TodoRepository 인스턴스 (선택사항, 중복 제거용)
         """
         self._data_source_manager = data_source_manager
         self._priority_ranker = priority_ranker
@@ -44,6 +54,23 @@ class AnalysisPipelineService:
         self._action_extractor = action_extractor
         self._user_profile = user_profile or {}
         self._top3_service = top3_service
+        self._todo_repository = todo_repository
+        
+        # TODO 중복 제거 서비스 초기화
+        if DEDUPLICATION_AVAILABLE:
+            self._deduplication_service = TodoDeduplicationService()
+            logger.info("✅ TodoDeduplicationService 초기화 완료")
+        else:
+            self._deduplication_service = None
+            logger.warning("⚠️ TodoDeduplicationService 비활성화")
+        
+        # 통계
+        self._stats = {
+            "total_messages_analyzed": 0,
+            "todos_created": 0,
+            "todos_prevented": 0,
+            "extraction_rate": 0.0
+        }
         
         if top3_service:
             logger.info("✅ AnalysisPipelineService 초기화 완료 (Top3 자동 선정 활성화)")
@@ -130,8 +157,12 @@ class AnalysisPipelineService:
             actions=actions
         )
         
-        # 6. TODO 리스트 생성
-        todo_list = self._generate_todo_list(analysis_results)
+        # 6. TODO 리스트 생성 (persona_name 전달)
+        persona_name = self._user_profile.get("name") or persona_id
+        todo_list = self._generate_todo_list(analysis_results, persona_name=persona_name)
+        
+        # 통계 업데이트
+        self._stats["total_messages_analyzed"] = len(messages)
         
         # 7. 전체 대화 요약 (메시지가 50개 이하일 때만)
         conversation_summary = None
@@ -322,13 +353,24 @@ class AnalysisPipelineService:
     
     def _generate_todo_list(
         self,
-        analysis_results: List[Dict[str, Any]]
+        analysis_results: List[Dict[str, Any]],
+        persona_name: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """TODO 리스트 생성"""
+        """TODO 리스트 생성 (중복 제거 및 requester 필드 포함)
+        
+        Args:
+            analysis_results: 분석 결과 리스트
+            persona_name: 페르소나 이름 (requester로 사용)
+        """
         logger.info("📋 TODO 리스트 생성 중...")
         
         todo_items: List[Dict] = []
         priority_value = {"high": 3, "medium": 2, "low": 1}
+        
+        # 통계
+        total_actions = 0
+        created_count = 0
+        prevented_count = 0
         
         def _parse_deadline(d: str | None) -> datetime:
             if not d:
@@ -347,27 +389,79 @@ class AnalysisPipelineService:
                 else getattr(priority_obj, "priority_level", "low")
             ).lower()
             
+            # 원본 메시지 정보
+            message = result.get("message", {})
+            source_message_id = message.get("msg_id") or message.get("id")
+            recipient_type = (message.get("recipient_type") or "to").lower()
+            source_type = "메일" if message.get("platform") == "email" else "메시지"
+            
             for action in actions:
+                if recipient_type != "to":
+                    continue
+
+                total_actions += 1
+                
+                # 액션에서 정보 추출
                 if isinstance(action, dict):
-                    todo_items.append({
-                        "title": action.get("title") or action.get("description") or "제목 없음",
-                        "description": action.get("description") or "",
-                        "priority": priority_level,
-                        "deadline": action.get("deadline"),
-                        "source_message_id": action.get("source_message_id"),
-                        "created_at": datetime.now().isoformat(),
-                        "status": "pending"
-                    })
+                    title = action.get("title") or action.get("description") or "제목 없음"
+                    description = action.get("description") or ""
+                    deadline = action.get("deadline")
+                    todo_type = action.get("type", "task")
+                    action_source_id = action.get("source_message_id") or source_message_id
+                    requester = action.get("requester") or message.get("sender") or "Unknown"
                 else:
-                    todo_items.append({
-                        "title": getattr(action, "title", None) or getattr(action, "description", "제목 없음"),
-                        "description": getattr(action, "description", ""),
-                        "priority": priority_level,
-                        "deadline": getattr(action, "deadline", None),
-                        "source_message_id": getattr(action, "source_message_id", None),
-                        "created_at": datetime.now().isoformat(),
-                        "status": "pending"
-                    })
+                    title = getattr(action, "title", None) or getattr(action, "description", "제목 없음")
+                    description = getattr(action, "description", "")
+                    deadline = getattr(action, "deadline", None)
+                    todo_type = getattr(action, "type", "task")
+                    action_source_id = getattr(action, "source_message_id", None) or source_message_id
+                    requester = getattr(action, "requester", None) or message.get("sender") or "Unknown"
+                
+                # 중복 체크 (중복 제거 서비스가 있을 때만)
+                if self._deduplication_service and action_source_id:
+                    should_create, existing_id = self._deduplication_service.should_create_todo(
+                        source_message=action_source_id,
+                        todo_type=todo_type,
+                        repository=self._todo_repository
+                    )
+                    
+                    if not should_create:
+                        logger.debug(
+                            f"중복 TODO 생성 방지: source={action_source_id}, "
+                            f"existing={existing_id}"
+                        )
+                        prevented_count += 1
+                        continue
+                
+                # TODO 생성
+                todo_id = f"todo_{datetime.now().timestamp()}_{created_count}"
+                
+                # source_message에 전체 메시지 내용 저장 (프로젝트 태그 추출용)
+                import json
+                source_message_full = json.dumps(message, ensure_ascii=False) if message else action_source_id
+                
+                todo_item = {
+                    "id": todo_id,
+                    "title": title,
+                    "description": description,
+                    "priority": priority_level,
+                    "deadline": deadline,
+                    "source_message": source_message_full,  # 전체 메시지 JSON
+                    "type": todo_type,
+                    "requester": requester,  # 실제 요청자 (보낸 사람)
+                    "created_at": datetime.now().isoformat(),
+                    "status": "pending",
+                    "recipient_type": recipient_type,
+                    "source_type": source_type,
+                    "persona_name": persona_name,
+                }
+                
+                todo_items.append(todo_item)
+                created_count += 1
+                
+                # 중복 제거 서비스에 등록
+                if self._deduplication_service and action_source_id:
+                    self._deduplication_service.register_todo(action_source_id, todo_id)
         
         # 우선순위 및 마감일 기준 정렬
         todo_items.sort(
@@ -377,7 +471,29 @@ class AnalysisPipelineService:
             )
         )
         
-        logger.info(f"📋 TODO 리스트 생성 완료: {len(todo_items)}개")
+        # 통계 업데이트
+        self._stats["todos_created"] = created_count
+        self._stats["todos_prevented"] = prevented_count
+        
+        # 추출률 계산
+        if total_actions > 0:
+            extraction_rate = (created_count / total_actions) * 100
+            self._stats["extraction_rate"] = extraction_rate
+            
+            logger.info(
+                f"📋 TODO 리스트 생성 완료: {created_count}개 생성, "
+                f"{prevented_count}개 중복 방지 (추출률: {extraction_rate:.1f}%)"
+            )
+            
+            # 추출률이 너무 낮으면 경고
+            if extraction_rate < 5.0:
+                logger.warning(
+                    f"⚠️ TODO 추출률이 낮습니다 ({extraction_rate:.1f}%). "
+                    f"LLM 분석 품질을 확인하세요."
+                )
+        else:
+            logger.info(f"📋 TODO 리스트 생성 완료: {created_count}개")
+        
         return todo_items
     
     async def _summarize_conversation(
@@ -488,3 +604,30 @@ class AnalysisPipelineService:
             "conversation_summary": None,
             "analysis_report_text": ""
         }
+    
+    def get_pipeline_stats(self) -> Dict[str, Any]:
+        """파이프라인 통계 반환"""
+        stats = self._stats.copy()
+        
+        # 중복 제거 서비스 통계 추가
+        if self._deduplication_service:
+            dedup_stats = self._deduplication_service.get_deduplication_stats()
+            stats["deduplication"] = dedup_stats
+        
+        return stats
+    
+    def cleanup_duplicate_todos(self) -> Dict[str, int]:
+        """기존 중복 TODO 정리
+        
+        Returns:
+            {"removed": int, "kept": int}
+        """
+        if not self._deduplication_service or not self._todo_repository:
+            logger.warning("중복 제거 서비스 또는 Repository가 없어 정리를 건너뜁니다.")
+            return {"removed": 0, "kept": 0}
+        
+        logger.info("🗑️ 기존 중복 TODO 정리 시작...")
+        result = self._deduplication_service.cleanup_duplicates(self._todo_repository)
+        logger.info(f"✅ 중복 TODO 정리 완료: 제거={result['removed']}개, 유지={result['kept']}개")
+        
+        return result

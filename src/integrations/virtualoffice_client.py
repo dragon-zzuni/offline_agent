@@ -38,7 +38,7 @@ class VirtualOfficeClient:
         email_url: str = "http://127.0.0.1:8000",
         chat_url: str = "http://127.0.0.1:8001",
         sim_url: str = "http://127.0.0.1:8015",
-        timeout: int = 5,
+        timeout: int = 10,  # 5초 → 10초로 증가
         use_connection_manager: bool = True
     ):
         """VirtualOfficeClient 초기화
@@ -47,7 +47,7 @@ class VirtualOfficeClient:
             email_url: Email Server URL
             chat_url: Chat Server URL
             sim_url: Simulation Manager URL
-            timeout: 요청 타임아웃 (초)
+            timeout: 요청 타임아웃 (초, 기본값: 10초)
             use_connection_manager: ConnectionManager 사용 여부 (기본값: True)
         """
         self.email_url = email_url.rstrip('/')

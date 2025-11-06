@@ -216,8 +216,10 @@ class ActionExtractor:
     def _create_action_from_pattern(self, text: str, match: str, action_type: str, 
                                   sender: str, msg_id: str, pattern: str) -> Optional[ActionItem]:
         """패턴 매칭으로부터 액션 생성"""
+        match_text = " ".join(m for m in match if m) if isinstance(match, tuple) else match
+
         # 매칭된 부분 주변 문맥 추출
-        context = self._extract_context_around_match(text, match)
+        context = self._extract_context_around_match(text, match_text)
         
         if not context:
             return None
@@ -229,7 +231,7 @@ class ActionExtractor:
         priority = self._determine_priority(text)
         
         # 데드라인 추출 (특별히 패턴에서)
-        deadline = self._extract_deadline_from_match(match, action_type)
+        deadline = self._extract_deadline_from_match(match_text, action_type)
         
         return ActionItem(
             action_id=f"{action_type}_{uuid.uuid4().hex[:12]}",
@@ -241,7 +243,7 @@ class ActionExtractor:
             assignee="나",
             requester=sender,
             source_message_id=msg_id,
-            context={"match": match, "pattern": pattern, "extracted_from": "pattern"}
+            context={"match": match_text, "pattern": pattern, "extracted_from": "pattern"}
         )
     
     def _extract_context_around_keyword(self, text: str, keyword: str) -> str:
