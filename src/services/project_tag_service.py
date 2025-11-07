@@ -1049,10 +1049,24 @@ class ProjectTagService:
             response = self._call_llm_api(system_prompt, user_prompt)
             
             if response and response.strip():
-                # 응답 파싱: "프로젝트코드|분류근거"
-                parts = response.strip().split('|', 1)
-                project_code = parts[0].strip().upper()
-                reason = parts[1].strip() if len(parts) > 1 else "LLM 내용 분석"
+                # 응답 파싱: "프로젝트코드|분류근거" 또는 "프로젝트코드 (분류근거)"
+                response_clean = response.strip().strip('"')  # 따옴표 제거
+                
+                # | 구분자가 있으면 사용
+                if '|' in response_clean:
+                    parts = response_clean.split('|', 1)
+                    project_code = parts[0].strip().upper()
+                    reason = parts[1].strip() if len(parts) > 1 else "LLM 내용 분석"
+                # ( 구분자가 있으면 사용 (예: "PV (김세린 참여 프로젝트)")
+                elif '(' in response_clean:
+                    parts = response_clean.split('(', 1)
+                    project_code = parts[0].strip().upper()
+                    reason = parts[1].strip().rstrip(')') if len(parts) > 1 else "LLM 내용 분석"
+                # 공백으로 구분 (예: "PV 디자인작업")
+                else:
+                    parts = response_clean.split(None, 1)
+                    project_code = parts[0].strip().upper()
+                    reason = parts[1].strip() if len(parts) > 1 else "LLM 내용 분석"
                 
                 logger.info(f"[프로젝트 태그] LLM 분류: {project_code} ({reason})")
                 return (project_code, reason)

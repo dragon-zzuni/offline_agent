@@ -161,6 +161,7 @@ class BasicTodoItem(QWidget):
     def __init__(self, todo: dict, parent=None, unread: bool = False, closable: bool = True):
         super().__init__(parent)
         self.todo = todo
+        self.todo_data = todo  # 프로젝트 태그 업데이트를 위해 참조 저장
         self._unread = False
         self._unread_style = "QWidget{border:1px solid #FB923C; border-radius:10px; background:#FFF7ED;} QWidget:hover{border-color:#F97316; background:#FFE7D3;}"
         self._read_style = "QWidget{border:1px solid #D1D5DB; border-radius:10px; background:#E5E7EB;} QWidget:hover{border-color:#9CA3AF; background:#D1D5DB;}"
@@ -173,6 +174,8 @@ class BasicTodoItem(QWidget):
 
         top = QHBoxLayout()
         top.setSpacing(8)
+        self.top_layout = top  # 프로젝트 태그 업데이트를 위해 레이아웃 저장
+        
         title = QLabel(todo.get("title", ""))
         title.setStyleSheet("font-weight:700;")
         top.addWidget(title, 1)
@@ -193,6 +196,7 @@ class BasicTodoItem(QWidget):
         top.addWidget(status, 0)
         
         # 프로젝트 태그 추가
+        self.project_tag_widget = None  # 프로젝트 태그 위젯 참조 저장
         project_code = todo.get("project")
         logger.debug(f"[프로젝트 태그] TODO {todo.get('id', 'unknown')}: project_code={project_code}")
         if project_code:
@@ -200,6 +204,7 @@ class BasicTodoItem(QWidget):
                 from .widgets.project_tag_widget import create_project_tag_label
                 project_tag = create_project_tag_label(project_code)
                 if project_tag:
+                    self.project_tag_widget = project_tag
                     top.addWidget(project_tag, 0)
                     logger.debug(f"[프로젝트 태그] ✅ {project_code} 태그 추가 완료")
                 else:
@@ -448,6 +453,27 @@ class BasicTodoItem(QWidget):
             # 위젯이 이미 삭제됨
             pass
 
+    def update_project_tag(self, project_code: str) -> None:
+        """프로젝트 태그 업데이트 (비동기 분석 완료 후 호출)"""
+        try:
+            # 기존 프로젝트 태그 위젯 제거
+            if self.project_tag_widget:
+                self.top_layout.removeWidget(self.project_tag_widget)
+                self.project_tag_widget.deleteLater()
+                self.project_tag_widget = None
+            
+            # 새 프로젝트 태그 위젯 추가
+            if project_code:
+                from .widgets.project_tag_widget import create_project_tag_label
+                project_tag = create_project_tag_label(project_code)
+                if project_tag:
+                    self.project_tag_widget = project_tag
+                    # status 위젯 다음에 삽입 (인덱스 3)
+                    self.top_layout.insertWidget(3, project_tag, 0)
+                    logger.info(f"[프로젝트 태그] ✅ TODO {self.todo.get('id')}: {project_code} 태그 업데이트 완료")
+        except Exception as e:
+            logger.error(f"[프로젝트 태그] 업데이트 오류: {e}")
+    
     def _emit_mark_done(self) -> None:
         self.mark_done_clicked.emit(self.todo)
 # 2) TodoPanel 본체
@@ -521,11 +547,12 @@ class TodoPanel(QWidget):
         self.snooze_timer.timeout.connect(self.on_snooze_timer)
         self.snooze_timer.start()
 
-        # 프로젝트 태그 업데이트 타이머 (10초마다)
+        # 프로젝트 태그 업데이트 타이머 (3초마다 - 빠른 UI 반영)
         self.project_update_timer = QTimer(self)
-        self.project_update_timer.setInterval(10 * 1000)
+        self.project_update_timer.setInterval(3 * 1000)
         self.project_update_timer.timeout.connect(self.on_project_update_timer)
         self.project_update_timer.start()
+        logger.info("[프로젝트 업데이트] 타이머 시작됨 (3초 간격)")
 
     def set_top3_service_instance(self, service: Optional[Top3Service]) -> None:
         self.top3_service = service
@@ -743,16 +770,23 @@ class TodoPanel(QWidget):
     def on_project_update_timer(self) -> None:
         """프로젝트 태그 업데이트 타이머 콜백: 새로 분석된 프로젝트 태그를 UI에 반영"""
         try:
+            logger.info("[프로젝트 업데이트] 타이머 실행")
+            
             # TODO 리스트를 다시 로드해서 프로젝트 태그 업데이트
             rows = self.controller.load_active_items()
             if not rows:
+                logger.debug("[프로젝트 업데이트] rows 없음")
                 return
+            
+            logger.debug(f"[프로젝트 업데이트] DB에서 {len(rows)}개 TODO 로드")
             
             # 프로젝트 태그가 실제로 변경되었는지 확인
             has_changes = False
+            changes_detail = []
             for row in rows:
                 todo_id = row.get('id')
-                new_project = row.get('project')
+                # DB 컬럼명은 'project_tag'
+                new_project = row.get('project_tag') or row.get('project')
                 
                 # 현재 UI에 표시된 TODO와 비교
                 if todo_id in self._item_widgets:
@@ -761,10 +795,13 @@ class TodoPanel(QWidget):
                         old_project = widget.todo_data.get('project')
                         if old_project != new_project:
                             has_changes = True
-                            break
+                            changes_detail.append(f"{todo_id}: {old_project} → {new_project}")
+                            if len(changes_detail) < 5:  # 최대 5개만 로그
+                                logger.info(f"[프로젝트 업데이트] 변경 감지: {todo_id}: '{old_project}' → '{new_project}'")
             
             # 변경사항이 없으면 업데이트 건너뛰기
             if not has_changes:
+                logger.debug("[프로젝트 업데이트] 변경사항 없음 - 스킵")
                 return
             
             logger.info(f"[프로젝트 업데이트] 프로젝트 태그 변경 감지 - UI 업데이트")
@@ -781,9 +818,11 @@ class TodoPanel(QWidget):
                     # DB에서 최신 프로젝트 태그 가져오기
                     for row in rows:
                         if row.get('id') == todo_id:
-                            widget.todo_data['project'] = row.get('project')
+                            # DB 컬럼명은 'project_tag'
+                            new_project = row.get('project_tag') or row.get('project')
+                            widget.todo_data['project'] = new_project
                             if hasattr(widget, 'update_project_tag'):
-                                widget.update_project_tag(row.get('project'))
+                                widget.update_project_tag(new_project)
                             break
         except Exception as e:
             logger.error(f"프로젝트 업데이트 타이머 오류: {e}")
