@@ -11,7 +11,7 @@ import sqlite3
 import time
 import re
 
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 from pathlib import Path
 
 from datetime import datetime, timezone, timedelta
@@ -323,6 +323,10 @@ class SmartAssistantGUI(QMainWindow):
         self.connection_controller = VirtualOfficeConnectionController(self)
         self.data_controller = DataRefreshController(self)
         self.analysis_controller = AnalysisCacheController(self)
+        # 실시간 수집 시 메시지 상한 (필요 시 환경별로 조정)
+        self.quick_collect_email_limit = 1200
+        self.quick_collect_messenger_limit = 2200
+        self.quick_collect_overall_limit = 2800
     
     def _init_cache_system(self):
         """캐시 시스템 초기화"""
@@ -347,6 +351,7 @@ class SmartAssistantGUI(QMainWindow):
         """UI 컴포넌트 초기화"""
         self.notification_manager = NotificationManager()
         self.new_message_ids = set()
+        self._known_message_ids: Set[str] = set()
         self._progress_bar = None
         self._progress_label = None
         self._widgets_registered = False  # 위젯 등록 여부 추적
@@ -806,8 +811,12 @@ class SmartAssistantGUI(QMainWindow):
                 snippet = snippet[:80] + "..."
             
             # 새 메시지인지 확인
-            msg_id = msg.get("msg_id")
-            is_new = msg_id in self.new_message_ids if hasattr(self, 'new_message_ids') else False
+            identity = self._message_identity(msg)
+            is_new = (
+                identity in self.new_message_ids
+                if identity and hasattr(self, "new_message_ids")
+                else False
+            )
             
             # NEW 배지 추가
             if is_new:
@@ -1658,11 +1667,25 @@ class SmartAssistantGUI(QMainWindow):
             if total_new == 0:
                 return
             
+            # 중복 제거 후 실제 신규 데이터 계산
+            unique_messages = self._filter_duplicate_messages(all_messages)
+
+            def _msg_type(entry: Dict[str, Any]) -> str:
+                return (entry.get("type") or entry.get("platform") or "").lower()
+
+            unique_emails = [m for m in unique_messages if _msg_type(m) == "email"]
+            unique_chats = [m for m in unique_messages if _msg_type(m) == "messenger"]
+            total_new_unique = len(unique_emails) + len(unique_chats)
+
+            if total_new_unique == 0:
+                logger.info("📭 중복 메시지로 새로 분석할 데이터가 없어 건너뜁니다.")
+                return
+
             # 데이터 처리 및 UI 업데이트
-            show_progress = total_new > 50
-            self._process_new_data(emails, messages, all_messages, show_progress)
-            self._update_ui_for_new_data(emails, messages, show_progress)
-            self._finalize_new_data_processing(all_messages, total_new, timestamp)
+            show_progress = total_new_unique > 50
+            self._process_new_data(unique_emails, unique_chats, unique_messages, show_progress)
+            self._update_ui_for_new_data(unique_emails, unique_chats, show_progress)
+            self._finalize_new_data_processing(unique_messages, total_new_unique, timestamp)
             
         except Exception as e:
             logger.error(f"❌ 새 데이터 처리 오류: {e}", exc_info=True)
@@ -1692,6 +1715,54 @@ class SmartAssistantGUI(QMainWindow):
                     logger.info("⏰ 시간 필터링 후 새 데이터 없음")
                     
         return emails, messages, all_messages, len(emails) + len(messages)
+
+    def _message_identity(self, message: Dict[str, Any]) -> Optional[str]:
+        if not message:
+            return None
+        for key in ("msg_id", "id", "message_id"):
+            value = message.get(key)
+            if value:
+                return str(value)
+        sender = message.get("sender", "")
+        subject = message.get("subject", "")
+        date = message.get("date", "")
+        if sender or subject or date:
+            return f"{sender}|{subject}|{date}"
+        return None
+
+    def _filter_duplicate_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """이미 처리한 메시지를 제외하고 새 메시지 목록만 반환."""
+        unique_messages: List[Dict[str, Any]] = []
+        duplicate_count = 0
+        for msg in messages or []:
+            identity = self._message_identity(msg)
+            if identity and identity in self._known_message_ids:
+                duplicate_count += 1
+                continue
+            if identity:
+                self._known_message_ids.add(identity)
+                self.new_message_ids.add(identity)
+            unique_messages.append(msg)
+
+        if duplicate_count:
+            logger.info("🔁 중복 메시지 %d개 제외", duplicate_count)
+        return unique_messages
+
+    def _register_known_messages(self, messages: List[Dict[str, Any]]) -> None:
+        """기존 메시지를 known 목록에 등록하여 이후 중복을 방지."""
+        if not hasattr(self, "_known_message_ids"):
+            self._known_message_ids = set()
+        for msg in messages or []:
+            identity = self._message_identity(msg)
+            if identity:
+                self._known_message_ids.add(identity)
+
+    def _clear_new_message_ids(self) -> None:
+        """타임라인 하이라이트용 NEW ID 초기화 (중복 추적은 유지)."""
+        try:
+            self.new_message_ids.clear()
+        except Exception:
+            self.new_message_ids = set()
     
     def _process_new_data(self, emails, messages, all_messages, show_progress):
         """새 데이터 처리"""
@@ -1703,12 +1774,6 @@ class SmartAssistantGUI(QMainWindow):
             self.sim_monitor.record_new_data(
                 email_count=len(emails), message_count=len(messages)
             )
-        
-        # 새 메시지 ID 추적
-        for msg in all_messages:
-            msg_id = msg.get("msg_id")
-            if msg_id:
-                self.new_message_ids.add(msg_id)
         
         if show_progress:
             self._update_progress_bar(30)
@@ -1809,7 +1874,11 @@ class SmartAssistantGUI(QMainWindow):
     
     def _process_new_messages_async(self, new_messages: list) -> None:
         """새 메시지에 대한 분석 및 TODO 생성 (백그라운드 처리)"""
-        self.analysis_controller._process_new_messages_async(new_messages)
+        # 실시간 데이터는 증분 처리로 캐시에 누적으로 반영한다.
+        self.analysis_controller._process_new_messages_async(
+            new_messages,
+            incremental=True,
+        )
     
     def _handle_background_analysis_result(self, result):
         """백그라운드 분석 결과 처리"""
@@ -1894,9 +1963,18 @@ class SmartAssistantGUI(QMainWindow):
         """
         self.analysis_controller._collect_and_cache_data(persona_key)
     
-    def _update_cache_with_analysis_results(self, todos: List[Dict], analysis_results: List[Dict]) -> None:
+    def _update_cache_with_analysis_results(
+        self,
+        todos: List[Dict],
+        analysis_results: List[Dict],
+        incremental: bool = False,
+    ) -> None:
         """백그라운드 분석 결과로 캐시 업데이트"""
-        self.analysis_controller._update_cache_with_analysis_results(todos, analysis_results)
+        self.analysis_controller._update_cache_with_analysis_results(
+            todos,
+            analysis_results,
+            incremental=incremental,
+        )
     
     def _update_polling_worker_persona(self, persona) -> None:
         """PollingWorker의 페르소나만 업데이트 (재시작 없이)

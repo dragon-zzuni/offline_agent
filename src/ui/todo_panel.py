@@ -1,7 +1,7 @@
 ﻿# ui/todo_panel.py
 from __future__ import annotations
 
-import os, sys, uuid, json, subprocess, logging
+import os, sys, uuid, json, subprocess, logging, re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Callable, Optional, Tuple
 
@@ -164,6 +164,9 @@ class BasicTodoItem(QWidget):
         self._unread = False
         self._unread_style = "QWidget{border:1px solid #FB923C; border-radius:10px; background:#FFF7ED;} QWidget:hover{border-color:#F97316; background:#FFE7D3;}"
         self._read_style = "QWidget{border:1px solid #D1D5DB; border-radius:10px; background:#E5E7EB;} QWidget:hover{border-color:#9CA3AF; background:#D1D5DB;}"
+        
+        # 기본 스타일을 읽음 상태로 설정 (노란색 깜빡임 방지)
+        self.setStyleSheet(self._read_style)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 8, 12, 8)
@@ -317,7 +320,24 @@ class BasicTodoItem(QWidget):
             chips_row.addStretch(1)
             root.addLayout(chips_row)
 
-        self.set_unread(unread)
+        # 초기 스타일 설정 (set_unread 호출 전에 명시적으로 설정)
+        todo_id = todo.get("id", "unknown")
+        if not unread:
+            # 읽음 상태로 초기화
+            logger.info(f"[BasicTodoItem.__init__] ✅ TODO {todo_id}: unread=False로 초기화 (회색)")
+            self.new_badge.hide()
+            self.setStyleSheet(self._read_style)
+            self._unread = False
+            
+            # Qt 렌더링 후 스타일 재적용 (깜빡임 방지)
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self.setStyleSheet(self._read_style) if not self._unread else None)
+        else:
+            # 안읽음 상태로 초기화
+            logger.warning(f"[BasicTodoItem.__init__] ⚠️ TODO {todo_id}: unread=TRUE로 초기화 (노란색)!!!")
+            self.new_badge.show()
+            self.setStyleSheet(self._unread_style)
+            self._unread = True
     
     def _create_brief_summary(self, description: str) -> str:
         """설명을 간단하게 요약 (가독성 개선)"""
@@ -347,12 +367,11 @@ class BasicTodoItem(QWidget):
             if len(second_line) < 50:
                 first_part = f"{first_part} {second_line}"
         
-        # 최대 120자로 제한 (단어 중간에서 자르지 않도록)
-        if len(first_part) > 120:
-            # 마지막 공백 위치 찾기
-            truncated = first_part[:117]
+        # 최대 320자로 제한 (단어 중간에서 자르지 않도록)
+        if len(first_part) > 320:
+            truncated = first_part[:317]
             last_space = truncated.rfind(' ')
-            if last_space > 80:  # 너무 앞에서 자르지 않도록
+            if last_space > 200:  # 너무 앞에서 자르지 않도록
                 return truncated[:last_space] + "..."
             return truncated + "..."
         
@@ -372,6 +391,15 @@ class BasicTodoItem(QWidget):
             # 위젯이 이미 삭제됨
             return
         
+        # 디버깅: unread=True로 설정되는 경우 로그 출력
+        todo_id = self.todo.get("id", "unknown")
+        if unread:
+            import traceback
+            stack = ''.join(traceback.format_stack()[-5:-1])  # 최근 4개 호출 스택
+            logger.warning(f"[BasicTodoItem.set_unread] ⚠️⚠️⚠️ TODO {todo_id}를 unread=TRUE로 설정! 호출 스택:\n{stack}")
+        else:
+            logger.info(f"[BasicTodoItem.set_unread] ✅ TODO {todo_id}를 unread=False로 설정 (회색)")
+        
         self._unread = unread
         if unread:
             try:
@@ -387,6 +415,10 @@ class BasicTodoItem(QWidget):
                 self._auto_read_timer = QTimer(self)  # parent 설정으로 자동 정리
                 self._auto_read_timer.setSingleShot(True)
                 self._auto_read_timer.timeout.connect(self._safe_set_read)
+            
+            # 이미 실행 중인 타이머가 있으면 중지하고 다시 시작
+            if self._auto_read_timer.isActive():
+                self._auto_read_timer.stop()
             
             self._auto_read_timer.start(10000)  # 10초
         else:
@@ -713,47 +745,237 @@ class TodoPanel(QWidget):
         try:
             # TODO 리스트를 다시 로드해서 프로젝트 태그 업데이트
             rows = self.controller.load_active_items()
-            if rows:
-                logger.debug(f"[프로젝트 업데이트] {len(rows)}개 TODO 프로젝트 태그 업데이트")
-                # 프로젝트 태그 바만 업데이트 (전체 새로고침 없이)
-                self._update_project_tag_bar_from_todos(rows)
-                # 각 TODO 위젯의 프로젝트 태그도 업데이트
-                for i in range(self.todo_list.count()):
-                    item = self.todo_list.item(i)
-                    widget = self.todo_list.itemWidget(item)
+            if not rows:
+                return
+            
+            # 프로젝트 태그가 실제로 변경되었는지 확인
+            has_changes = False
+            for row in rows:
+                todo_id = row.get('id')
+                new_project = row.get('project')
+                
+                # 현재 UI에 표시된 TODO와 비교
+                if todo_id in self._item_widgets:
+                    item, widget = self._item_widgets[todo_id]
                     if widget and hasattr(widget, 'todo_data'):
-                        todo_id = widget.todo_data.get('id')
-                        # DB에서 최신 프로젝트 태그 가져오기
-                        for row in rows:
-                            if row.get('id') == todo_id:
-                                widget.todo_data['project'] = row.get('project')
-                                if hasattr(widget, 'update_project_tag'):
-                                    widget.update_project_tag(row.get('project'))
-                                break
+                        old_project = widget.todo_data.get('project')
+                        if old_project != new_project:
+                            has_changes = True
+                            break
+            
+            # 변경사항이 없으면 업데이트 건너뛰기
+            if not has_changes:
+                return
+            
+            logger.info(f"[프로젝트 업데이트] 프로젝트 태그 변경 감지 - UI 업데이트")
+            
+            # 프로젝트 태그 바만 업데이트 (전체 새로고침 없이)
+            self._update_project_tag_bar_from_todos(rows)
+            
+            # 각 TODO 위젯의 프로젝트 태그도 업데이트
+            for i in range(self.todo_list.count()):
+                item = self.todo_list.item(i)
+                widget = self.todo_list.itemWidget(item)
+                if widget and hasattr(widget, 'todo_data'):
+                    todo_id = widget.todo_data.get('id')
+                    # DB에서 최신 프로젝트 태그 가져오기
+                    for row in rows:
+                        if row.get('id') == todo_id:
+                            widget.todo_data['project'] = row.get('project')
+                            if hasattr(widget, 'update_project_tag'):
+                                widget.update_project_tag(row.get('project'))
+                            break
         except Exception as e:
             logger.error(f"프로젝트 업데이트 타이머 오류: {e}")
 
-    def populate_from_items(self, items: List[dict]) -> None:
-        logger.info(f"[TodoPanel] populate_from_items 호출: {len(items or [])}개 항목")
-        items = items or []
+    def populate_from_items(
+        self,
+        items: List[dict],
+        incremental: bool = False,
+        show_reasoning: bool = False,
+    ) -> None:
+        """TODO 데이터를 UI/저장소에 반영한다.
 
+        Args:
+            items: 새 TODO 리스트
+            incremental: True면 기존 목록에 증분 반영
+            show_reasoning: Top3 선정 이유 팝업 표시 여부
+        """
+
+        safe_count = len(items or [])
+        logger.info(
+            "[TodoPanel] populate_from_items 호출: %d개 (incremental=%s)",
+            safe_count,
+            incremental,
+        )
+
+        items = items or []
         if not items:
+            if incremental:
+                logger.info("[TodoPanel] 증분 업데이트에 추가할 항목이 없어 건너뜀")
+                return
             logger.info("[TodoPanel] 항목이 없어 빈 목록으로 재구성")
             self._rebuild_from_rows([])
             return
 
         prepared = self.controller.prepare_items(items)
-        
+        prepared = self._deduplicate_todos(prepared)
+        if not prepared:
+            logger.info("[TodoPanel] 정규화 결과가 없어 업데이트를 건너뜀")
+            return
+
         # 새로운 TODO들을 비동기 프로젝트 태그 분석 큐에 추가
         self.queue_new_todos_for_async_analysis(prepared)
-        
+
         # 기존 캐시된 프로젝트 태그만 즉시 적용 (LLM 분석은 비동기로)
         self.update_project_tags(prepared)
+
+        if incremental:
+            logger.info("[TodoPanel] 증분 모드로 %d개 TODO 저장", len(prepared))
+            self.controller.save_items(prepared, incremental=True)
+            
+            # 증분 모드: 새로 추가된 TODO도 viewed로 처리 (unread 없음)
+            for item in prepared:
+                todo_id = item.get("id")
+                if todo_id:
+                    self._viewed_ids.add(todo_id)
+            logger.info(f"[TodoPanel] 증분 모드: {len(prepared)}개 새 TODO를 viewed로 처리")
+            
+            self.refresh_todo_list(show_reasoning=show_reasoning)
+        else:
+            logger.info("[TodoPanel] 전체 교체 모드로 %d개 TODO 저장", len(prepared))
+            self.controller.save_items(prepared, incremental=False)
+            
+            # 전체 교체 모드: 모든 TODO를 viewed로 처리 (unread 없음)
+            self._viewed_ids.clear()  # 기존 viewed_ids 초기화
+            for item in prepared:
+                todo_id = item.get("id")
+                if todo_id:
+                    self._viewed_ids.add(todo_id)
+            logger.info(f"[TodoPanel] 전체 교체 모드: {len(self._viewed_ids)}개 TODO를 viewed로 처리")
+            logger.info(f"[TodoPanel] _viewed_ids 샘플 (처음 5개): {list(self._viewed_ids)[:5]}")
+            
+            self._rebuild_from_rows(prepared, show_reasoning=show_reasoning)
+
+    def _todo_identity(self, todo: dict) -> str:
+        """TODO 고유 식별자 생성 (source_message + title + description)."""
+        msg_id = None
+        source_message = todo.get("source_message")
+        if isinstance(source_message, str):
+            try:
+                source_message = json.loads(source_message)
+            except Exception:
+                source_message = None
+        if isinstance(source_message, dict):
+            msg_id = (
+                source_message.get("msg_id")
+                or source_message.get("id")
+                or source_message.get("message_id")
+            )
         
-        logger.info(f"[TodoPanel] {len(prepared)}개 TODO를 DB에 저장")
-        # 전체 TODO 리스트를 받았으므로 전체 교체 (incremental=False)
-        self.controller.save_items(prepared, incremental=False)
-        self._rebuild_from_rows(prepared)
+        # 제목 정규화
+        title = (todo.get("title") or "").strip().lower()
+        title_normalized = re.sub(r"\s+", " ", title).strip()
+        
+        # 메시지 ID가 있으면 메시지 ID + 제목으로 식별
+        # (같은 메시지에서 여러 TODO가 나올 수 있으므로 제목 포함 필수)
+        if msg_id:
+            return f"msg:{msg_id}|title:{title_normalized}"
+
+        # description(내용)을 기준으로 중복 판단
+        description = (todo.get("description") or "").strip()
+        deadline_hint = (todo.get("deadline") or todo.get("deadline_ts") or "").strip()
+        deadline_bucket = deadline_hint[:10] if deadline_hint else ""
+        
+        # description이 있으면 내용 기반으로 중복 판단
+        if description:
+            normalized = re.sub(r"\s+", " ", description).strip().lower()
+            if normalized:
+                requester = (todo.get("requester") or "").strip().lower() or "-"
+                due = deadline_bucket or "-"
+                # 내용이 같으면 중복으로 간주 (제목은 무시)
+                return f"desc:{normalized}|req:{requester}|due:{due}"
+
+        # description이 없으면 제목+발신자+마감일 조합으로 판단
+        requester = (todo.get("requester") or "").strip().lower() or "-"
+        due = deadline_bucket or "-"
+        return f"title:{title_normalized}|req:{requester}|due:{due}"
+
+    def _deduplicate_todos(self, todos: List[dict]) -> List[dict]:
+        """설명/원본이 동일한 TODO를 제거한다."""
+        merged: Dict[str, dict] = {}
+        duplicates_info = []  # 중복 정보 저장
+        
+        for todo in todos:
+            identity = self._todo_identity(todo)
+            if identity in merged:
+                # 중복 발견 - 상세 정보 기록
+                duplicates_info.append({
+                    'identity': identity,
+                    'original_title': merged[identity].get('title', ''),
+                    'duplicate_title': todo.get('title', ''),
+                    'original_desc': (merged[identity].get('description', '') or '')[:100],
+                    'duplicate_desc': (todo.get('description', '') or '')[:100],
+                    'requester': todo.get('requester', ''),
+                    'deadline': todo.get('deadline', '')
+                })
+                merged[identity] = self._merge_todo_records(merged[identity], todo)
+            else:
+                merged[identity] = dict(todo)
+        
+        if len(merged) != len(todos):
+            logger.info(
+                "[TodoPanel] 중복 TODO %d개 정리 (총 %d개 → %d개)",
+                len(todos) - len(merged),
+                len(todos),
+                len(merged),
+            )
+            
+            # 중복된 TODO 상세 정보 출력 (처음 10개만)
+            logger.info("[TodoPanel] === 중복 제거된 TODO 샘플 (최대 10개) ===")
+            for idx, dup in enumerate(duplicates_info[:10], 1):
+                logger.info(f"  [{idx}] Identity: {dup['identity']}")
+                logger.info(f"      원본 제목: {dup['original_title']}")
+                logger.info(f"      중복 제목: {dup['duplicate_title']}")
+                logger.info(f"      원본 설명: {dup['original_desc']}...")
+                logger.info(f"      중복 설명: {dup['duplicate_desc']}...")
+                logger.info(f"      요청자: {dup['requester']}, 마감일: {dup['deadline']}")
+                logger.info("")
+        
+        return list(merged.values())
+
+    def _merge_todo_records(self, base: dict, candidate: dict) -> dict:
+        """중복 TODO 간에 정보를 병합하고 더 풍부한 데이터를 유지한다."""
+        merged = dict(base)
+        desc_base = base.get("description") or ""
+        desc_new = candidate.get("description") or ""
+        if len(desc_new) > len(desc_base):
+            merged["description"] = desc_new
+
+        for key in [
+            "title",
+            "type",
+            "deadline",
+            "deadline_ts",
+            "priority",
+            "source_message",
+            "requester",
+            "status",
+            "project",
+            "persona_name",
+            "project_full_name",
+        ]:
+            if not merged.get(key) and candidate.get(key):
+                merged[key] = candidate[key]
+
+        # type 우선순위: deadline > meeting > task 등
+        priority_order = {"deadline": 3, "meeting": 2, "task": 1}
+        cur_type = (merged.get("type") or "").lower()
+        new_type = (candidate.get("type") or "").lower()
+        if priority_order.get(new_type, 0) > priority_order.get(cur_type, 0):
+            merged["type"] = candidate.get("type")
+
+        return merged
     
     def refresh_todo_list(self, show_reasoning: bool = False) -> None:
         """TODO 리스트 새로고침
@@ -788,6 +1010,15 @@ class TodoPanel(QWidget):
                 self._rebuild_from_rows([])
                 return
 
+        # DB에서 로드한 기존 TODO는 모두 viewed로 처리 (새로고침 시)
+        viewed_count = 0
+        for row in rows:
+            todo_id = row.get("id")
+            if todo_id:
+                self._viewed_ids.add(todo_id)
+                viewed_count += 1
+        logger.info(f"[TodoPanel] refresh_todo_list: {viewed_count}개 TODO를 viewed로 처리")
+        
         self.update_project_tags(rows)
         self._rebuild_from_rows(rows, show_reasoning=show_reasoning)
     
@@ -883,6 +1114,7 @@ class TodoPanel(QWidget):
             rows: TODO 리스트
             show_reasoning: True면 Top3 선정이유 팝업 표시 (기본값: False)
         """
+        rows = self._deduplicate_todos(rows)
         if not rows:
             self._set_render_lists([], [], [])
             return
@@ -974,12 +1206,25 @@ class TodoPanel(QWidget):
             self.todo_list.addItem(header_item)
             self.todo_list.setItemWidget(header_item, header)
 
-            for todo in bucket:
+            unread_count = 0
+            for idx, todo in enumerate(bucket):
                 todo_id = todo.get("id")
-                already_viewed = todo.get("_viewed") or (todo_id in self._viewed_ids if todo_id else False)
-                if already_viewed:
+                
+                # unread 기능 비활성화 - 항상 읽음 상태로 표시
+                is_new_todo = False
+                unread = False
+                
+                if unread:
+                    unread_count += 1
+                
+                # 디버깅: 처음 3개 TODO 또는 unread TODO만 로그 출력
+                if idx < 3 or unread:
+                    logger.info(f"[TodoPanel] 렌더링 TODO #{idx+1}: id={todo_id}, is_new={is_new_todo}, unread={unread}, in_viewed_ids={todo_id in self._viewed_ids if todo_id else 'N/A'}")
+                
+                # viewed 상태 업데이트
+                if not is_new_todo:
                     todo["_viewed"] = True
-                unread = _is_unread(todo) and not already_viewed
+                
                 widget = BasicTodoItem(todo, parent=self, unread=unread)
                 widget.mark_done_clicked.connect(self._on_mark_done_clicked)
                 item = QListWidgetItem()
@@ -989,6 +1234,9 @@ class TodoPanel(QWidget):
                 self.todo_list.setItemWidget(item, widget)
                 if todo_id:
                     self._item_widgets[todo_id] = (item, widget)
+            
+            if unread_count > 0:
+                logger.info(f"[TodoPanel] {label} 섹션: {unread_count}개 unread TODO 발견!")
 
         if not any_items:
             self.todo_label.setVisible(False)

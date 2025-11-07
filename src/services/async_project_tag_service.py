@@ -220,13 +220,13 @@ class AsyncProjectTagService:
                     logger.debug(f"[AsyncProjectTag] {todo_id}: 영구 캐시 히트 - {cached['project_tag']}")
                     return cached['project_tag']
             
-            # 2. todos_cache.db에서 확인
+            # 2. todos_cache.db에서 확인 (컬럼명: project_tag)
             if hasattr(self.repository, 'db_path'):
                 import sqlite3
                 conn = sqlite3.connect(self.repository.db_path)
                 cur = conn.cursor()
                 
-                cur.execute("SELECT project FROM todos WHERE id = ? AND project IS NOT NULL AND project != ''", (todo_id,))
+                cur.execute("SELECT project_tag FROM todos WHERE id = ? AND project_tag IS NOT NULL AND project_tag != ''", (todo_id,))
                 result = cur.fetchone()
                 conn.close()
                 
@@ -338,9 +338,9 @@ class AsyncProjectTagService:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
             
-            # 프로젝트 태그 업데이트
+            # 프로젝트 태그 업데이트 (컬럼명: project_tag)
             cur.execute(
-                "UPDATE todos SET project = ?, updated_at = datetime('now') WHERE id = ?",
+                "UPDATE todos SET project_tag = ?, updated_at = datetime('now') WHERE id = ?",
                 (project, todo_id)
             )
             conn.commit()

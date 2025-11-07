@@ -617,16 +617,21 @@ class SmartAssistant:
 
         # 성능 개선: 상위 50개만 요약 (TODO 생성에 필요한 핵심 메시지만)
         # 참고: 전체 메시지는 수집되었으며, 우선순위가 높은 상위 50개만 상세 분석합니다
-        TOP_N = 50
-        top_msgs = [m for (m, _) in self.ranked_messages][:TOP_N]
+        SUMMARY_TOP_N = 70
+        ACTION_TOP_N = 200
+        summary_targets = [m for (m, _) in self.ranked_messages][:SUMMARY_TOP_N]
 
         # 2) 상위 N개 요약
-        logger.info(f"📝 우선순위 상위 {TOP_N}개 메시지 상세 분석 중... (전체 {len(self.collected_messages)}건 수집 완료)")
-        self.summaries = await self.summarizer.batch_summarize(top_msgs)
+        logger.info(
+            "📝 우선순위 상위 %d개 메시지 상세 분석 중... (전체 %d건 수집 완료)",
+            len(summary_targets),
+            len(self.collected_messages),
+        )
+        self.summaries = await self.summarizer.batch_summarize(summary_targets)
 
         # msg_id → summary 맵
         summary_by_id = {}
-        for m, s in zip(top_msgs, self.summaries):
+        for m, s in zip(summary_targets, self.summaries):
             if s and not getattr(s, "original_id", None):
                 s.original_id = m.get("msg_id")
             summary_by_id[m["msg_id"]] = s
@@ -634,7 +639,13 @@ class SmartAssistant:
         # 3) 액션 추출 (사용자 이메일 전달)
         logger.info("⚡ 액션 추출 중...")
         user_email = (self.user_profile or {}).get("email_address", "pm.1@quickchat.dev")
-        actions = await self.action_extractor.batch_extract_actions(top_msgs, user_email=user_email)
+        action_targets = [m for (m, _) in self.ranked_messages][:ACTION_TOP_N]
+        if len(action_targets) > len(summary_targets):
+            logger.info("⚡ 액션 추출 대상 확대: %d개 메시지", len(action_targets))
+        actions = await self.action_extractor.batch_extract_actions(
+            action_targets,
+            user_email=user_email,
+        )
         self.extracted_actions = actions
 
         actions_by_id = {}

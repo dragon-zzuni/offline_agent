@@ -91,6 +91,8 @@ class DataRefreshController:
 
         messages = result.get("messages", [])
         ui.collected_messages = list(messages)
+        if hasattr(ui, "_register_known_messages"):
+            ui._register_known_messages(messages)
 
         self._update_time_range(messages)
         ui._update_message_summaries("day")

@@ -21,6 +21,9 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_EMAIL_LIMIT = 1200
+DEFAULT_MESSENGER_LIMIT = 2200
+DEFAULT_OVERALL_LIMIT = 2800
 
 class AnalysisCacheController:
     """메시지 분석 및 캐시 관리를 담당하는 컨트롤러."""
@@ -28,6 +31,7 @@ class AnalysisCacheController:
     def __init__(self, ui: "SmartAssistantGUI") -> None:
         self.ui = ui
         self._collect_in_progress: bool = False
+        self._last_analysis_incremental: bool = False
 
     # ------------------------------------------------------------------
     # 공개 API
@@ -102,7 +106,11 @@ class AnalysisCacheController:
     # ------------------------------------------------------------------
     # 백그라운드 분석
     # ------------------------------------------------------------------
-    def _process_new_messages_async(self, new_messages: List[Dict[str, Any]]) -> None:
+    def _process_new_messages_async(
+        self,
+        new_messages: List[Dict[str, Any]],
+        incremental: bool = False,
+    ) -> None:
         """새 메시지를 비동기로 분석한다."""
         ui = self.ui
         try:
@@ -128,6 +136,7 @@ class AnalysisCacheController:
                 ui.worker_thread = WorkerThread(ui.assistant, dataset_config, collect_options)
                 ui.worker_thread.result_ready.connect(self._handle_background_analysis_result)
                 ui.worker_thread.error_occurred.connect(self._handle_background_analysis_error)
+                self._last_analysis_incremental = incremental
                 ui.worker_thread.start()
 
                 logger.info("✅ 백그라운드 분석 워커 스레드 시작됨")
@@ -180,10 +189,28 @@ class AnalysisCacheController:
                 todos = extract_todos_recursive(todo_list)
                 logger.info("🔍 추출된 TODO 개수: %d", len(todos))
 
+                incremental_mode = getattr(self, "_last_analysis_incremental", False)
+
                 if todos and hasattr(ui, "todo_panel"):
-                    ui.todo_panel.populate_from_items(todos)
+                    # 자연어 규칙이 있으면 선정이유 팝업 표시
+                    show_reasoning = False
+                    if hasattr(ui.todo_panel, "top3_service") and ui.todo_panel.top3_service:
+                        has_rules = bool(
+                            ui.todo_panel.top3_service.get_last_instruction() or
+                            ui.todo_panel.top3_service.get_entity_rules().get("requester") or
+                            ui.todo_panel.top3_service.get_entity_rules().get("keyword") or
+                            ui.todo_panel.top3_service.get_entity_rules().get("type")
+                        )
+                        show_reasoning = has_rules
+                    
+                    logger.info(f"[AnalysisCacheController] populate_from_items 호출: incremental={incremental_mode}, todos={len(todos)}개")
+                    ui.todo_panel.populate_from_items(todos, incremental=incremental_mode, show_reasoning=show_reasoning)
                     logger.info("✅ 백그라운드 분석 완료: %d개 TODO 생성", len(todos))
-                    self._update_cache_with_analysis_results(todos, [])
+                    self._update_cache_with_analysis_results(
+                        todos,
+                        [],
+                        incremental=incremental_mode,
+                    )
                 else:
                     logger.info("ℹ️ 백그라운드 분석 완료: 생성된 TODO 없음")
 
@@ -196,9 +223,19 @@ class AnalysisCacheController:
                             ui.collected_messages,
                         )
                     logger.info("✅ 분석 결과 업데이트: %d개", len(analysis_results))
+
+                if todos:
+                    self._update_cache_with_analysis_results(
+                        todos,
+                        analysis_results,
+                        incremental=incremental_mode,
+                    )
+
+                self._last_analysis_incremental = False
             else:
                 error_msg = result.get("error", "알 수 없는 오류")
                 logger.error("❌ 백그라운드 분석 실패: %s", error_msg)
+                self._last_analysis_incremental = False
         except Exception as exc:  # pragma: no cover
             logger.error("❌ 백그라운드 분석 결과 처리 오류: %s", exc, exc_info=True)
 
@@ -259,7 +296,9 @@ class AnalysisCacheController:
                     hasattr(ui, "todo_panel"),
                 )
                 if items and hasattr(ui, "todo_panel"):
-                    ui.todo_panel.populate_from_items(items)
+                    # 🔥 재분석도 증분 모드로 처리하여 기존 unread 상태 유지
+                    logger.info("🔄 재분석 결과를 증분 모드로 적용 (unread 상태 유지)")
+                    ui.todo_panel.populate_from_items(items, incremental=True)
                     logger.info("✅ TODO 업데이트 완료: %d개", len(items))
                 else:
                     logger.warning(
@@ -322,6 +361,8 @@ class AnalysisCacheController:
                 ui.collected_messages = cached_result.messages
                 if hasattr(ui.assistant, "collected_messages"):
                     ui.assistant.collected_messages = cached_result.messages
+                if hasattr(ui, "_register_known_messages"):
+                    ui._register_known_messages(cached_result.messages)
                 logger.info("📨 메시지 복원: %d개", len(cached_result.messages))
                 if hasattr(ui, "_message_summary_cache"):
                     ui._message_summary_cache.clear()
@@ -454,6 +495,8 @@ class AnalysisCacheController:
                 ui.collected_messages = messages
                 if hasattr(ui.assistant, "collected_messages"):
                     ui.assistant.collected_messages = messages
+                if hasattr(ui, "_register_known_messages"):
+                    ui._register_known_messages(messages)
                 logger.info("📨 캐시에서 메시지 복원: %d개", len(messages))
 
             cached_todos = cached_data.get("todos", [])
@@ -507,7 +550,24 @@ class AnalysisCacheController:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                collect_options: Dict[str, Any] = {"incremental": False}
+                collect_options: Dict[str, Any] = {"incremental": False, "parallel": True}
+                if getattr(ui, "data_source_type", None) == "virtualoffice":
+                    email_limit = getattr(ui, "quick_collect_email_limit", DEFAULT_EMAIL_LIMIT)
+                    messenger_limit = getattr(ui, "quick_collect_messenger_limit", DEFAULT_MESSENGER_LIMIT)
+                    overall_limit = getattr(ui, "quick_collect_overall_limit", DEFAULT_OVERALL_LIMIT)
+                    collect_options.update(
+                        {
+                            "email_limit": email_limit,
+                            "messenger_limit": messenger_limit,
+                            "overall_limit": overall_limit,
+                        }
+                    )
+                    logger.info(
+                        "📉 빠른 분석 수집 제한: email<=%s, messenger<=%s, total<=%s",
+                        email_limit,
+                        messenger_limit,
+                        overall_limit,
+                    )
                 if ui.time_filter_service.is_enabled:
                     time_params = ui.time_filter_service.get_collection_params()
                     if time_params.get("time_filter_enabled"):
@@ -525,6 +585,8 @@ class AnalysisCacheController:
                 ui.collected_messages = messages
                 if hasattr(ui.assistant, "collected_messages"):
                     ui.assistant.collected_messages = messages
+                if hasattr(ui, "_register_known_messages"):
+                    ui._register_known_messages(messages)
                 if hasattr(ui, "_message_summary_cache"):
                     ui._message_summary_cache.clear()
 
@@ -572,17 +634,35 @@ class AnalysisCacheController:
         self,
         todos: List[Dict[str, Any]],
         analysis_results: List[Dict[str, Any]],
+        incremental: bool = False,
     ) -> None:
         ui = self.ui
         try:
             persona_key = ui._current_persona_id
             if persona_key in ui._persona_cache:
                 cache_data = ui._persona_cache[persona_key]
-                cache_data["todos"] = todos
-                cache_data["analysis_results"] = analysis_results
+                existing_todos = cache_data.get("todos", [])
+                existing_analysis = cache_data.get("analysis_results", [])
+
+                merged_todos = (
+                    self._merge_todo_lists(existing_todos, todos)
+                    if incremental
+                    else list(todos or [])
+                )
+                merged_analysis = (
+                    self._merge_analysis_results(existing_analysis, analysis_results)
+                    if incremental
+                    else list(analysis_results or [])
+                )
+
+                cache_data["todos"] = merged_todos
+                cache_data["analysis_results"] = merged_analysis
                 ui._persona_cache[persona_key] = cache_data
                 ui._cache_valid_until[persona_key] = time.time() + 300
                 logger.info("💾 구 캐시 데이터 업데이트 완료: persona_key=%s", persona_key)
+            else:
+                merged_todos = list(todos or [])
+                merged_analysis = list(analysis_results or [])
 
             from src.services.persona_todo_cache_service import CachedAnalysisResult
 
@@ -590,11 +670,11 @@ class AnalysisCacheController:
             cached_result = CachedAnalysisResult(
                 cache_key=cache_key.to_hash(),
                 persona_id=ui._current_persona_id or "",
-                todo_list=todos,
+                todo_list=merged_todos,
                 messages=ui.collected_messages,
                 analysis_summary={
-                    "todo_count": len(todos),
-                    "analysis_count": len(analysis_results),
+                    "todo_count": len(merged_todos),
+                    "analysis_count": len(merged_analysis),
                 },
                 created_at=datetime.now(),
                 last_accessed_at=datetime.now(),
@@ -602,8 +682,8 @@ class AnalysisCacheController:
             ui._cache_service.put(cache_key, cached_result)
             logger.info(
                 "💾 신 캐시 데이터 업데이트 완료: TODO %d개, 분석 %d개",
-                len(todos),
-                len(analysis_results),
+                len(merged_todos),
+                len(merged_analysis),
             )
         except Exception as exc:  # pragma: no cover
             logger.error("❌ 캐시 업데이트 오류: %s", exc, exc_info=True)
@@ -743,7 +823,7 @@ class AnalysisCacheController:
         ui = self.ui
         try:
             todos: List[Dict[str, Any]] = []
-            analysis_count = min(len(messages), 50)
+            analysis_count = min(len(messages), 200)
             logger.info("📋 %d개 메시지 분석 시작", analysis_count)
 
             for i, msg in enumerate(messages[-analysis_count:]):
@@ -794,6 +874,9 @@ class AnalysisCacheController:
                 if msg.get("type") == "email" and not should_create_todo:
                     should_create_todo = True
                     matched_keyword = "이메일"
+                elif msg.get("type") == "messenger" and not should_create_todo and content:
+                    should_create_todo = True
+                    matched_keyword = "메신저"
 
                 if should_create_todo:
                     title = f"{matched_keyword}: {subject[:60]}" if subject else f"{matched_keyword}: {content[:60]}"
@@ -812,7 +895,9 @@ class AnalysisCacheController:
                     todos.append(todo)
 
             if todos and hasattr(ui, "todo_panel"):
-                ui.todo_panel.populate_from_items(todos)
+                # 빠른 분석은 전체 교체 모드로 동작 (incremental=False)
+                # 이때 생성된 모든 TODO는 viewed로 처리됨
+                ui.todo_panel.populate_from_items(todos, incremental=False, show_reasoning=False)
                 logger.info("✅ 빠른 분석 완료: %d개 TODO 생성", len(todos))
                 self._update_cache_with_analysis_results(todos, [])
             else:
@@ -857,6 +942,67 @@ class AnalysisCacheController:
                 logger.info("🔄 페르소나 변경으로 TODO 리스트 갱신 완료")
         except Exception as exc:  # pragma: no cover
             logger.error("TODO 갱신 오류: %s", exc)
+
+    def _merge_todo_lists(
+        self,
+        existing: List[Dict[str, Any]],
+        new_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """기존 TODO 리스트에 새 항목을 병합한다."""
+        if not existing:
+            return [dict(item) for item in new_items or []]
+
+        merged = [dict(item) for item in existing]
+        index_by_id: Dict[str, int] = {
+            item.get("id"): idx for idx, item in enumerate(merged) if item.get("id")
+        }
+
+        for item in new_items or []:
+            item_copy = dict(item)
+            todo_id = item_copy.get("id")
+            if not todo_id:
+                todo_id = item_copy["id"] = uuid.uuid4().hex
+
+            if todo_id in index_by_id:
+                idx = index_by_id[todo_id]
+                merged[idx] = {**merged[idx], **item_copy}
+            else:
+                index_by_id[todo_id] = len(merged)
+                merged.append(item_copy)
+
+        return merged
+
+    def _merge_analysis_results(
+        self,
+        existing: List[Dict[str, Any]],
+        new_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not existing:
+            return [dict(item) for item in new_items or []]
+
+        merged = [dict(item) for item in existing]
+        index_by_key: Dict[str, int] = {}
+        for idx, item in enumerate(merged):
+            key = self._analysis_result_key(item)
+            if key:
+                index_by_key[key] = idx
+
+        for item in new_items or []:
+            item_copy = dict(item)
+            key = self._analysis_result_key(item_copy)
+            if key and key in index_by_key:
+                idx = index_by_key[key]
+                merged[idx] = {**merged[idx], **item_copy}
+            else:
+                merged.append(item_copy)
+                if key:
+                    index_by_key[key] = len(merged) - 1
+
+        return merged
+
+    @staticmethod
+    def _analysis_result_key(item: Dict[str, Any]) -> Optional[str]:
+        return item.get("id") or item.get("title")
 
     def _restore_todos_from_cache(self, cached_todos: List[Dict[str, Any]]) -> None:
         ui = self.ui

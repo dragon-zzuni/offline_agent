@@ -7,7 +7,7 @@ VirtualOffice 연결 및 시뮬레이션 제어 컨트롤러
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
@@ -153,7 +153,7 @@ class VirtualOfficeConnectionController:
         # 즉시 분석 시작 (캐시 무시)
         if ui.selected_persona:
             logger.info(f"⚡ 즉시 분석 시작: {ui.selected_persona.name}")
-            QTimer.singleShot(500, lambda: ui.analysis_controller.start_quick_analysis(force=True))
+            QTimer.singleShot(500, self._kickoff_quick_analysis)
 
     def _update_connection_ui(self, personas) -> None:
         ui = self.ui
@@ -210,6 +210,43 @@ class VirtualOfficeConnectionController:
             "연결 오류",
             "VirtualOffice 서버 연결에 실패했습니다.\n\n오류: {0}".format(str(error)),
         )
+
+    def _kickoff_quick_analysis(self) -> None:
+        """연결 직후 빠른 분석을 안전하게 실행한다."""
+        ui = self.ui
+        controller = getattr(ui, "analysis_controller", None)
+        if not controller:
+            logger.warning("⚠️ analysis_controller가 없어 빠른 분석을 건너뜀")
+            return
+
+        starter = getattr(controller, "start_quick_analysis", None)
+        if callable(starter):
+            starter(force=True)
+            return
+
+        persona_key = self._resolve_persona_key()
+        if persona_key and hasattr(controller, "_collect_and_cache_data"):
+            logger.warning(
+                "⚠️ start_quick_analysis 미구현 - 직접 수집으로 대체(persona=%s)",
+                persona_key,
+            )
+            controller._collect_and_cache_data(persona_key)
+        else:
+            logger.warning("⚠️ 빠른 분석을 수행할 수 없어 요청을 건너뜀")
+
+    def _resolve_persona_key(self) -> Optional[str]:
+        """페르소나 캐시 키를 구성한다."""
+        ui = self.ui
+        persona = getattr(ui, "selected_persona", None)
+        if not persona:
+            return None
+        if getattr(ui, "_current_persona_id", None):
+            return ui._current_persona_id
+        email = getattr(persona, "email_address", "") or ""
+        handle = getattr(persona, "chat_handle", "") or ""
+        if email or handle:
+            return f"{email}_{handle}".strip("_")
+        return getattr(persona, "id", "") or getattr(persona, "name", None)
 
     def _setup_personas(self, personas) -> None:
         ui = self.ui

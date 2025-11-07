@@ -244,6 +244,9 @@ class VirtualOfficeDataSource(DataSource):
         incremental = options.get("incremental", False)
         parallel = options.get("parallel", True)
         time_range = options.get("time_range")
+        email_limit = options.get("email_limit")
+        messenger_limit = options.get("messenger_limit")
+        overall_limit = options.get("overall_limit")
         
         # 선택된 페르소나의 메일박스와 핸들
         mailbox = self.selected_persona.get("email_address")
@@ -269,12 +272,23 @@ class VirtualOfficeDataSource(DataSource):
         try:
             if parallel:
                 raw_emails, raw_messages = await self._collect_parallel(
-                    mailbox, normalized_handle, since_email_id, since_message_id
+                    mailbox,
+                    normalized_handle,
+                    since_email_id,
+                    since_message_id,
+                    email_limit,
+                    messenger_limit,
                 )
             else:
-                raw_emails = self.client.get_emails(mailbox, since_id=since_email_id)
+                raw_emails = self.client.get_emails(
+                    mailbox,
+                    since_id=since_email_id,
+                    limit=email_limit,
+                )
                 raw_messages = self.client.get_messages(
-                    normalized_handle, since_id=since_message_id
+                    normalized_handle,
+                    since_id=since_message_id,
+                    limit=messenger_limit,
                 )
         except Exception as e:
             logger.error(f"API 호출 실패: {e}")
@@ -344,6 +358,16 @@ class VirtualOfficeDataSource(DataSource):
         all_messages.sort(key=lambda m: m["date"])
         sort_time = time.time() - start_time
         logger.info(f"⏱️ 정렬 시간: {sort_time:.2f}초 ({len(all_messages)}개)")
+
+        if overall_limit and len(all_messages) > overall_limit:
+            trimmed = all_messages[-overall_limit:]
+            logger.info(
+                "📏 전체 메시지 제한 적용: %d개 → %d개 (limit=%d)",
+                len(all_messages),
+                len(trimmed),
+                overall_limit,
+            )
+            all_messages = trimmed
         
         # 시간 범위 필터링 적용 (옵션)
         if time_range:
@@ -358,11 +382,13 @@ class VirtualOfficeDataSource(DataSource):
         return all_messages
     
     async def _collect_parallel(
-        self, 
-        mailbox: str, 
-        handle: str, 
-        since_email_id: Optional[int], 
-        since_message_id: Optional[int]
+        self,
+        mailbox: str,
+        handle: str,
+        since_email_id: Optional[int],
+        since_message_id: Optional[int],
+        email_limit: Optional[int],
+        messenger_limit: Optional[int],
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         병렬로 이메일과 메시지 수집
@@ -378,10 +404,16 @@ class VirtualOfficeDataSource(DataSource):
         """
         # 비동기 태스크 생성
         email_task = asyncio.to_thread(
-            self.client.get_emails, mailbox, since_id=since_email_id
+            self.client.get_emails,
+            mailbox,
+            since_id=since_email_id,
+            limit=email_limit,
         )
         message_task = asyncio.to_thread(
-            self.client.get_messages, handle, since_id=since_message_id
+            self.client.get_messages,
+            handle,
+            since_id=since_message_id,
+            limit=messenger_limit,
         )
         
         # 병렬 실행

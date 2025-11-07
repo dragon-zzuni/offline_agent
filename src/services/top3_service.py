@@ -325,15 +325,15 @@ class Top3Service:
             logger.info("[Top3Service] 후보 TODO가 없습니다")
             return set()
         
-        # 2. 중복 제거 (같은 source_message는 1개만)
-        candidates = self._deduplicate_by_source(candidates)
+        # 2. 중복 제거는 TodoPanel에서 이미 처리됨 (제목 포함한 identity 기반)
+        # 여기서 추가 중복 제거를 하면 같은 메시지에서 나온 서로 다른 TODO들이 제거됨
+        # candidates = self._deduplicate_by_source(candidates)
         
-        if not candidates:
-            logger.info("[Top3Service] 중복 제거 후 후보 TODO가 없습니다")
-            return set()
+        logger.info(f"[Top3Service] 📊 Top3 후보: {len(candidates)}개 TODO")
         
-        # 2. 자연어 규칙 확인
+        # 2. 자연어 규칙 확인 (entity_rules 또는 last_instruction이 있으면 자연어 규칙 있음)
         has_natural_rules = bool(
+            self._last_instruction or  # 자연어 텍스트가 있으면 규칙 있음
             self._entity_rules.get("requester") or 
             self._entity_rules.get("keyword") or 
             self._entity_rules.get("type")

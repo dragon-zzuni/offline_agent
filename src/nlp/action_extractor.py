@@ -85,7 +85,7 @@ class ActionExtractor:
                 ]
             },
             "review": {
-                "keywords": ["검토", "review", "확인", "check", "피드백", "feedback"],
+                "keywords": ["검토", "review", "확인", "check", "피드백", "feedback", "업데이트"],
                 "patterns": [
                     r"(\w+).*?검토.*?부탁",
                     r"(\w+).*?확인.*?요청",
@@ -108,6 +108,27 @@ class ActionExtractor:
             "medium": ["중요", "important", "우선", "빠르게"],
             "low": ["여유", "편한", "시간"]
         }
+        self.generic_request_markers = [
+            # 한국어 요청 표현
+            "부탁", "요청", "주세요", "주시길", "해주세요", "해주세요.", "정리해줘",
+            "확인해줘", "확인 부탁", "지원 부탁", "도와줘", "도움", "협조",
+            "공유", "전달", "보내", "알려", "말씀", "드립니다", "드려요",
+            "필요합니다", "필요해요", "바랍니다", "바래요", "감사하겠습니다",
+            "부탁드립니다", "부탁드려요", "요청드립니다", "요청드려요",
+            "해주시면", "주시면", "주실", "해주실", "주시기", "해주시기",
+            "검토", "리뷰", "피드백", "의견", "코멘트", "승인", "결재",
+            "준비", "작성", "수정", "변경", "추가", "삭제", "업데이트",
+            # 영어 요청 표현
+            "can you", "could you", "please", "pls", "plz", 
+            "let me know", "share", "update", "send", "provide",
+            "check", "review", "follow up", "후속", "feedback",
+            "need", "require", "request", "ask", "would you",
+            "kindly", "appreciate", "thanks", "thank you",
+        ]
+        self.meeting_markers = ["콜", "sync", "standup", "huddle", "회의", "미팅", "meeting", "call", "conference"]
+        self.deadline_markers = ["까지", "마감", "deadline", "제출", "due", "완료", "납기", "기한"]
+        self.response_markers = ["답장", "답변", "회신", "reply", "response", "응답", "피드백"]
+        self._bullet_pattern = re.compile(r"^[\-\*\•\·\d\)\(]+\s*")
     
     def extract_actions(self, message_data: Dict, user_email: str = "pm.1@quickchat.dev") -> List[ActionItem]:
         """메시지에서 액션 추출
@@ -140,6 +161,7 @@ class ActionExtractor:
             return []
         
         actions = []
+        combined_text = f"{subject} {content}".strip()
         
         # 각 액션 타입별로 추출
         for action_type, config in self.action_patterns.items():
@@ -148,6 +170,12 @@ class ActionExtractor:
             )
             actions.extend(extracted_actions)
         
+        # 문장 단위의 일반 요청 추출 (키워드가 없어도 요청 표현 감지)
+        if combined_text:
+            actions.extend(
+                self._extract_generic_requests(combined_text, sender, msg_id)
+            )
+
         # 중복 제거 및 정리
         actions = self._deduplicate_actions(actions)
         
@@ -181,6 +209,90 @@ class ActionExtractor:
                     actions.append(action)
         
         return actions
+
+    def _extract_generic_requests(self, text: str, sender: str, msg_id: str) -> List[ActionItem]:
+        """명시적 키워드가 없어도 요청 어조를 감지해 액션을 생성한다."""
+        actions: List[ActionItem] = []
+        for sentence in self._split_sentences(text):
+            normalized = sentence.strip()
+            # 최소 길이를 8자로 낮춤 (더 짧은 요청도 감지)
+            if len(normalized) < 8:
+                continue
+            lowered = normalized.lower()
+            if not self._looks_like_request(lowered):
+                continue
+            inferred_type = self._infer_action_type_from_sentence(lowered)
+            priority = self._determine_priority(normalized)
+            actions.append(
+                ActionItem(
+                    action_id=f"{inferred_type}_{uuid.uuid4().hex[:12]}",
+                    action_type=inferred_type,
+                    title=self._generate_action_title(inferred_type, normalized),
+                    description=normalized,
+                    deadline=self._extract_deadline(normalized),
+                    priority=priority,
+                    assignee="나",
+                    requester=sender,
+                    source_message_id=msg_id,
+                    context={"extracted_from": "generic_sentence"},
+                )
+            )
+
+        # 글머리표나 리스트 형태의 요청도 액션으로 변환
+        for bullet in self._extract_bullet_requests(text.splitlines(), sender, msg_id):
+            actions.append(bullet)
+        return actions
+
+    def _extract_bullet_requests(
+        self, lines: List[str], sender: str, msg_id: str
+    ) -> List[ActionItem]:
+        actions: List[ActionItem] = []
+        for raw_line in lines:
+            line = self._bullet_pattern.sub("", raw_line or "").strip()
+            # 최소 길이를 5자로 낮춤 (짧은 리스트 항목도 감지)
+            if len(line) < 5:
+                continue
+            lowered = line.lower()
+            if not self._looks_like_request(lowered):
+                continue
+            inferred_type = self._infer_action_type_from_sentence(lowered)
+            actions.append(
+                ActionItem(
+                    action_id=f"{inferred_type}_{uuid.uuid4().hex[:12]}",
+                    action_type=inferred_type,
+                    title=self._generate_action_title(inferred_type, line),
+                    description=line,
+                    deadline=self._extract_deadline(line),
+                    priority=self._determine_priority(line),
+                    assignee="나",
+                    requester=sender,
+                    source_message_id=msg_id,
+                    context={"extracted_from": "bullet"},
+                )
+            )
+        return actions
+
+    def _split_sentences(self, text: str) -> List[str]:
+        """간단한 문장 분할 - 더 세밀하게 분할하여 더 많은 요청 감지"""
+        if not text:
+            return []
+        # 다양한 문장 종결 패턴으로 분할
+        fragments = re.split(r"[.!?\n]+\s*|니다[\s,]|요[\s,]|습니다[\s,]|ㅂ니다[\s,]", text)
+        return [frag.strip() for frag in fragments if frag and frag.strip()]
+
+    def _looks_like_request(self, lowered: str) -> bool:
+        return any(marker in lowered for marker in self.generic_request_markers)
+
+    def _infer_action_type_from_sentence(self, lowered: str) -> str:
+        if any(marker in lowered for marker in self.meeting_markers):
+            return "meeting"
+        if any(marker in lowered for marker in self.deadline_markers):
+            return "deadline"
+        if any(marker in lowered for marker in self.response_markers):
+            return "response"
+        if any(term in lowered for term in self.action_patterns["review"]["keywords"]):
+            return "review"
+        return "task"
     
     def _create_action_from_keyword(self, text: str, keyword: str, action_type: str, 
                                   sender: str, msg_id: str) -> Optional[ActionItem]:
@@ -273,7 +385,7 @@ class ActionExtractor:
         return context
     
     def _generate_action_title(self, action_type: str, context: str) -> str:
-        """액션 제목 생성 - 한 단어로 간결하게"""
+        """액션 제목 생성 - 간결한 타입별 제목"""
         titles = {
             "meeting": "미팅참석",
             "task": "업무처리",
@@ -282,7 +394,7 @@ class ActionExtractor:
             "response": "답변작성"
         }
         
-        # 한 단어로 간결하게 반환
+        # 간결한 제목 반환 (중복 제거는 description 기반으로 처리)
         return titles.get(action_type, "액션수행")
     
     def _determine_priority(self, text: str) -> str:

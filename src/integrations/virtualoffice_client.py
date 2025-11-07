@@ -199,7 +199,10 @@ class VirtualOfficeClient:
     def get_emails(
         self,
         mailbox: str,
-        since_id: Optional[int] = None
+        since_id: Optional[int] = None,
+        since_timestamp: Optional[str] = None,
+        before_id: Optional[int] = None,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """메일 수집
         
@@ -209,6 +212,9 @@ class VirtualOfficeClient:
         Args:
             mailbox: 메일박스 주소 (예: "pm.1@multiproject.dev")
             since_id: 마지막 조회한 메일 ID (None이면 전체 조회)
+            since_timestamp: 지정 시 해당 ISO 시간 이후 메일만 조회
+            before_id: 지정 시 해당 ID 미만의 메일만 조회
+            limit: 최대 반환 개수 (최신 순)
         
         Returns:
             List[Dict[str, Any]]: 메일 데이터 리스트
@@ -236,10 +242,15 @@ class VirtualOfficeClient:
         """
         try:
             url = f"{self.email_url}/mailboxes/{mailbox}/emails"
-            params = {}
-            
+            params: Dict[str, Any] = {}
             if since_id is not None:
                 params["since_id"] = since_id
+            if since_timestamp:
+                params["since_timestamp"] = since_timestamp
+            if before_id is not None:
+                params["before_id"] = before_id
+            if limit is not None:
+                params["limit"] = limit
             
             response = self.session.get(
                 url,
@@ -284,7 +295,9 @@ class VirtualOfficeClient:
     def get_messages(
         self,
         handle: str,
-        since_id: Optional[int] = None
+        since_id: Optional[int] = None,
+        since_timestamp: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """채팅 메시지 수집
         
@@ -294,6 +307,8 @@ class VirtualOfficeClient:
         Args:
             handle: 사용자 채팅 핸들 (예: "pm")
             since_id: 마지막 조회한 메시지 ID (None이면 전체 조회)
+            since_timestamp: 지정 시 해당 ISO 시간 이후 메시지만 조회
+            limit: 최대 반환 개수
         
         Returns:
             List[Dict[str, Any]]: 메시지 데이터 리스트
@@ -317,10 +332,13 @@ class VirtualOfficeClient:
         """
         try:
             url = f"{self.chat_url}/users/{handle}/dms"
-            params = {}
-            
+            params: Dict[str, Any] = {}
             if since_id is not None:
                 params["since_id"] = since_id
+            if since_timestamp:
+                params["since_timestamp"] = since_timestamp
+            if limit is not None:
+                params["limit"] = limit
             
             response = self.session.get(
                 url,

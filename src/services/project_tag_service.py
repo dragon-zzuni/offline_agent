@@ -177,6 +177,16 @@ class ProjectTagService:
             logger.info(f"✅ VDOS에서 {len(self.project_tags)}개 프로젝트 로드 완료")
             logger.info(f"✅ {len(self.person_project_mapping)}개 사람-프로젝트 매핑 생성")
             
+            # "미분류" 태그는 항상 추가 (프로젝트 특정 불가 시 사용)
+            if "미분류" not in self.project_tags:
+                self.project_tags["미분류"] = ProjectTag(
+                    code="미분류",
+                    name="미분류",
+                    color="#9CA3AF",  # 회색
+                    description="프로젝트를 특정할 수 없는 TODO"
+                )
+                logger.info("✅ '미분류' 태그 추가 완료")
+            
             # VDOS 프로젝트만 사용 (기본 프로젝트 추가 비활성화)
             # self._ensure_all_projects_loaded()
             
@@ -237,6 +247,15 @@ class ProjectTagService:
         실제 프로젝트는 VDOS DB에서 동적으로 로드됩니다.
         """
         self.project_tags = {}
+        
+        # "미분류" 태그는 항상 추가 (프로젝트 특정 불가 시 사용)
+        self.project_tags["미분류"] = ProjectTag(
+            code="미분류",
+            name="미분류",
+            color="#9CA3AF",  # 회색
+            description="프로젝트를 특정할 수 없는 TODO"
+        )
+        
         logger.warning("⚠️ VDOS DB를 찾을 수 없어 빈 프로젝트 목록으로 시작합니다.")
         logger.info("프로젝트는 TODO 분석 시 동적으로 생성됩니다.")
     
@@ -340,8 +359,11 @@ class ProjectTagService:
                     self.tag_cache.save_tag(todo_id, sender_project, 'sender', 'sender_fallback', reason)
                 return sender_project
             
-            logger.debug("[프로젝트 태그] 프로젝트를 식별할 수 없음")
-            return None
+            # 5. 최종 폴백: "미분류" 태그 부여 (프로젝트를 전혀 식별할 수 없는 경우)
+            logger.info("[프로젝트 태그] 최종 폴백: 미분류")
+            if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
+                self.tag_cache.save_tag(todo_id, "미분류", 'fallback', 'unclassified', "프로젝트 특정 불가")
+            return "미분류"
             
         except Exception as e:
             logger.error(f"프로젝트 추출 오류: {e}")
@@ -432,23 +454,156 @@ class ProjectTagService:
         return keywords
     
     def _extract_project_by_sender(self, message: Dict) -> Optional[str]:
-        """발신자 정보로 프로젝트 추출"""
+        """발신자 정보로 프로젝트 추출 (스마트 폴백)
+        
+        여러 프로젝트에 참여하는 발신자의 경우:
+        1. 메시지 시간대와 프로젝트 기간 비교
+        2. 메시지 내용과 프로젝트 키워드 매칭
+        3. 최근 활동 프로젝트 우선
+        """
         sender_email = message.get("sender_email", "") or message.get("sender", "")
         sender_name = message.get("sender_name", "")
         
-        # 이메일로 프로젝트 찾기
+        # 발신자의 프로젝트 목록 가져오기
+        projects = []
         if sender_email and sender_email in self.person_project_mapping:
             projects = self.person_project_mapping[sender_email]
-            if projects:
-                return projects[0]  # 첫 번째 프로젝트 반환
-        
-        # 이름으로 프로젝트 찾기
-        if sender_name and sender_name in self.person_project_mapping:
+        elif sender_name and sender_name in self.person_project_mapping:
             projects = self.person_project_mapping[sender_name]
-            if projects:
-                return projects[0]
+        
+        if not projects:
+            return None
+        
+        # 프로젝트가 1개면 바로 반환
+        if len(projects) == 1:
+            return projects[0]
+        
+        # 여러 프로젝트인 경우 스마트 선택
+        return self._smart_project_selection(message, projects, sender_email or sender_name)
+    
+    def _smart_project_selection(self, message: Dict, projects: List[str], sender_id: str) -> Optional[str]:
+        """여러 프로젝트 중 가장 적합한 프로젝트 선택
+        
+        점수 기반 선택:
+        - 시간대 일치: +50점
+        - 키워드 매칭: +30점 (키워드당 +10점)
+        - 최근 활동: +20점
+        """
+        from datetime import datetime
+        
+        project_scores = {}
+        
+        # 메시지 시간 추출
+        message_time = None
+        timestamp = message.get("timestamp") or message.get("created_at")
+        if timestamp:
+            try:
+                if isinstance(timestamp, str):
+                    message_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                elif isinstance(timestamp, datetime):
+                    message_time = timestamp
+            except:
+                pass
+        
+        # 메시지 내용
+        content = message.get("content", "")
+        subject = message.get("subject", "")
+        full_text = f"{subject} {content}".lower()
+        
+        for project_code in projects:
+            score = 0
+            
+            # 1. 시간대 일치 확인 (프로젝트 기간 내인지)
+            if message_time and project_code in self.project_periods:
+                period = self.project_periods[project_code]
+                start_date = period.get("start_date")
+                end_date = period.get("end_date")
+                
+                if start_date and end_date:
+                    try:
+                        start = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+                        end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                        
+                        if start <= message_time <= end:
+                            score += 50
+                            logger.debug(f"[스마트폴백] {project_code}: 시간대 일치 (+50)")
+                    except:
+                        pass
+            
+            # 2. 키워드 매칭 (프로젝트 이름, 설명에서 키워드 추출)
+            if project_code in self.project_tags:
+                project_tag = self.project_tags[project_code]
+                project_name = project_tag.name.lower()
+                project_desc = project_tag.description.lower()
+                
+                # 프로젝트 이름이 메시지에 포함되어 있으면
+                if project_name and project_name in full_text:
+                    score += 30
+                    logger.debug(f"[스마트폴백] {project_code}: 프로젝트명 매칭 (+30)")
+                
+                # 프로젝트 코드가 메시지에 포함되어 있으면
+                if project_code.lower() in full_text:
+                    score += 20
+                    logger.debug(f"[스마트폴백] {project_code}: 코드 매칭 (+20)")
+                
+                # 설명에서 키워드 추출하여 매칭
+                if project_desc:
+                    keywords = self._extract_keywords_from_description(project_desc)
+                    matched_keywords = sum(1 for kw in keywords if kw in full_text)
+                    if matched_keywords > 0:
+                        keyword_score = min(matched_keywords * 10, 30)
+                        score += keyword_score
+                        logger.debug(f"[스마트폴백] {project_code}: 키워드 {matched_keywords}개 매칭 (+{keyword_score})")
+            
+            # 3. 최근 활동 프로젝트 우선 (프로젝트 종료일이 가까운 순)
+            if project_code in self.project_periods:
+                period = self.project_periods[project_code]
+                end_date = period.get("end_date")
+                
+                if end_date and message_time:
+                    try:
+                        end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                        days_diff = abs((end - message_time).days)
+                        
+                        # 종료일이 가까울수록 높은 점수 (최대 20점)
+                        if days_diff < 30:
+                            recency_score = max(20 - days_diff // 2, 0)
+                            score += recency_score
+                            logger.debug(f"[스마트폴백] {project_code}: 최근 활동 (+{recency_score})")
+                    except:
+                        pass
+            
+            project_scores[project_code] = score
+        
+        # 점수가 가장 높은 프로젝트 선택
+        if project_scores:
+            best_project = max(project_scores.items(), key=lambda x: x[1])
+            project_code, score = best_project
+            
+            logger.info(f"[스마트폴백] {sender_id}: {project_code} 선택 (점수: {score})")
+            logger.debug(f"[스마트폴백] 전체 점수: {project_scores}")
+            
+            # 점수가 0보다 크면 반환 (어느 정도 근거가 있는 경우)
+            if score > 0:
+                return project_code
+            
+            # 점수가 모두 0이면 첫 번째 프로젝트 반환 (기본 폴백)
+            logger.info(f"[스마트폴백] 점수 없음 → 첫 번째 프로젝트 반환: {projects[0]}")
+            return projects[0]
         
         return None
+    
+    def _extract_keywords_from_description(self, description: str) -> List[str]:
+        """프로젝트 설명에서 키워드 추출"""
+        # 간단한 키워드 추출 (3글자 이상 단어)
+        import re
+        words = re.findall(r'\b\w{3,}\b', description.lower())
+        
+        # 불용어 제거
+        stopwords = {'the', 'and', 'for', 'with', 'this', 'that', 'from', 'have', 'will', 'are', 'was', 'were'}
+        keywords = [w for w in words if w not in stopwords]
+        
+        return keywords[:10]  # 최대 10개
     
     def _extract_project_by_advanced_analysis(self, message: Dict) -> Optional[Tuple[str, str]]:
         """고급 분석: 채팅 메시지 처리 + 프로젝트 기간, 설명, 발신자 종합 분석
@@ -869,12 +1024,17 @@ class ProjectTagService:
 메시지 내용을 분석하여 가장 관련성이 높은 프로젝트 코드를 선택하세요.
 
 규칙:
-1. 메시지 제목이나 내용에 프로젝트명이 명시되어 있으면 해당 프로젝트를 우선 선택
-2. 발신자가 특정 프로젝트에만 참여하고 있다면 해당 프로젝트 고려
-3. 메시지 내용의 키워드와 프로젝트 설명을 매칭하여 판단
-4. 확실하지 않으면 'UNKNOWN' 반환
+1. **메시지 제목이나 내용에 프로젝트명이 명시**되어 있으면 해당 프로젝트를 우선 선택
+2. **발신자가 특정 프로젝트에만 참여**하고 있다면 해당 프로젝트 선택
+3. **메시지 내용의 키워드와 프로젝트 설명을 매칭**하여 판단
+4. **발신자가 여러 프로젝트에 참여하는 경우**:
+   - 메시지 내용의 키워드 (예: "디자인", "개발", "데이터", "캠페인" 등)를 분석
+   - 프로젝트 설명과 가장 관련성이 높은 프로젝트 선택
+   - 업무 유형 (디자인, 개발, 마케팅 등)을 고려하여 추론
+5. **시간대나 문맥을 고려**하여 프로젝트 유추
+6. **정말 판단할 수 없는 경우에만** 'UNKNOWN' 반환 (최후의 수단)
 
-응답 형식: "프로젝트코드|분류근거" (예: "PV|제목에 VERTEX 명시" 또는 "UNKNOWN|프로젝트 특정 불가")
+응답 형식: "프로젝트코드|분류근거" (예: "PV|디자인 작업 언급" 또는 "UNKNOWN|프로젝트 특정 불가")
 분류근거는 10단어 이내로 간단히 작성하세요."""
 
             user_prompt = f"""다음 메시지를 분석하여 관련 프로젝트를 분류해주세요:
