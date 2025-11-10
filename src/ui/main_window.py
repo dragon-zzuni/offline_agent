@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Any, Set
 from pathlib import Path
 
 from datetime import datetime, timezone, timedelta
-from collections import Counter
+from collections import Counter, defaultdict
 import uuid, json, sqlite3
 
 # 로거 초기화
@@ -888,6 +888,7 @@ class SmartAssistantGUI(QMainWindow):
         self.message_summary_panel = MessageSummaryPanel()
         self.message_summary_panel.summary_unit_changed.connect(self._on_summary_unit_changed)
         self.message_summary_panel.summary_card_clicked.connect(self._on_summary_card_clicked)
+        self.message_summary_panel.sender_badge_clicked.connect(self._on_summary_sender_clicked)
         layout.addWidget(self.message_summary_panel)
         
         return tab
@@ -1165,113 +1166,128 @@ class SmartAssistantGUI(QMainWindow):
         self.status_message.setText(f"{unit_name_kr} 요약 표시 완료")
     
     def _on_summary_card_clicked(self, summary: Dict):
-        """요약 카드 클릭 핸들러
-        
-        MessageSummaryPanel에서 요약 카드가 클릭되면 호출됩니다.
-        클릭된 그룹의 원본 메시지를 조회하여 MessageDetailDialog를 표시합니다.
-        
-        Args:
-            summary: 클릭된 요약 그룹 데이터
-        """
+        """요약 카드 클릭 시 전체 메시지 표시"""
+        message_ids = summary.get("message_ids", [])
+        self._show_summary_messages(summary, message_ids)
+
+    def _on_summary_sender_clicked(self, summary: Dict, sender: str):
+        """발신자 배지 클릭 시 해당 발신자 메시지만 표시"""
+        sender_map = summary.get("sender_message_map") or {}
+        message_ids = sender_map.get(sender) or summary.get("message_ids", [])
+        self._show_summary_messages(summary, message_ids, filter_sender=sender)
+
+    def _show_summary_messages(self, summary: Dict, message_ids: List[str], filter_sender: Optional[str] = None):
+        """공통 메시지 상세 다이얼로그 오픈 로직"""
         try:
-            # message_ids 추출
-            message_ids = summary.get("message_ids", [])
-            
-            logger.info(f"요약 카드 클릭: message_ids 수 = {len(message_ids)}, 전체 메시지 수 = {len(self.collected_messages)}")
-            
+            logger.info(
+                "📨 메시지 상세 보기 요청: ids=%d, filter=%s",
+                len(message_ids),
+                filter_sender or "전체"
+            )
             if not message_ids:
-                logger.warning("요약 그룹에 message_ids가 없습니다")
-                logger.debug(f"summary 내용: {summary}")
-                QMessageBox.warning(
-                    self,
-                    "메시지 없음",
-                    "이 그룹에 메시지가 없습니다."
-                )
+                QMessageBox.warning(self, "메시지 없음", "이 그룹에 메시지가 없습니다.")
                 return
-            
-            # 원본 메시지 조회
-            messages = []
-            for msg in self.collected_messages:
-                # 다양한 ID 필드 시도 (msg_id가 주요 필드)
-                msg_id = msg.get("msg_id") or msg.get("id") or msg.get("message_id") or msg.get("_id")
-                if msg_id and str(msg_id) in message_ids:
-                    messages.append(msg)
-            
-            logger.info(f"조회된 메시지 수: {len(messages)}/{len(message_ids)}")
-            
+
+            messages = self._collect_messages_for_summary(message_ids, filter_sender)
             if not messages:
-                logger.warning(f"message_ids에 해당하는 메시지를 찾을 수 없습니다")
-                logger.debug(f"찾으려는 message_ids (처음 3개): {message_ids[:3]}")
-                
-                # 디버깅: 실제 메시지의 ID 필드 확인
-                if self.collected_messages:
-                    sample_msg = self.collected_messages[0]
-                    logger.debug(f"샘플 메시지 ID 필드: msg_id={sample_msg.get('msg_id')}, id={sample_msg.get('id')}, message_id={sample_msg.get('message_id')}")
-                
                 QMessageBox.warning(
                     self,
                     "메시지 조회 실패",
                     "메시지를 불러올 수 없습니다. 다시 시도해주세요."
                 )
                 return
-            
-            # 기간 라벨 생성
-            period_start = summary.get("period_start")
-            period_end = summary.get("period_end")
-            unit = summary.get("unit", "daily")
-            
-            if isinstance(period_start, str):
-                try:
-                    period_start_dt = datetime.fromisoformat(period_start.replace("Z", "+00:00"))
-                except Exception:
-                    period_start_dt = None
-            else:
-                period_start_dt = period_start
-            
-            if period_start_dt:
-                if unit == "daily":
-                    period_label = period_start_dt.strftime("%Y년 %m월 %d일")
-                elif unit == "weekly":
-                    if isinstance(period_end, str):
-                        try:
-                            period_end_dt = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
-                            actual_end = period_end_dt - timedelta(days=1)
-                            period_label = f"{period_start_dt.strftime('%Y년 %m/%d')} ~ {actual_end.strftime('%m/%d')}"
-                        except Exception:
-                            period_label = period_start_dt.strftime("%Y년 %W주차")
-                    else:
-                        period_label = period_start_dt.strftime("%Y년 %W주차")
-                elif unit == "monthly":
-                    period_label = period_start_dt.strftime("%Y년 %m월")
-                else:
-                    period_label = period_start_dt.strftime("%Y-%m-%d")
-            else:
-                period_label = "메시지 상세"
-            
-            # summary에 period_label 추가
+
             summary_with_label = summary.copy()
-            summary_with_label["period_label"] = period_label
-            
-            # 통계 정보 추가
-            stats_summary = summary.get("statistics_summary", "")
-            if not stats_summary:
-                total = summary.get("total_messages", len(messages))
-                email_count = summary.get("email_count", 0)
-                messenger_count = summary.get("messenger_count", 0)
-                stats_summary = f"총 {total}건 | 이메일 {email_count}건, 메신저 {messenger_count}건"
-            summary_with_label["statistics_summary"] = stats_summary
-            
-            # MessageDetailDialog 생성 및 표시
+            summary_with_label["period_label"] = self._format_summary_period_label(summary)
+            summary_with_label["statistics_summary"] = self._compose_statistics_text(messages, filter_sender)
+
             dialog = MessageDetailDialog(summary_with_label, messages, self)
             dialog.exec()
-            
+
         except Exception as e:
-            logger.error(f"요약 카드 클릭 처리 오류: {e}", exc_info=True)
-            QMessageBox.critical(
-                self,
-                "오류",
-                f"메시지를 표시하는 중 오류가 발생했습니다:\n{str(e)}"
+            logger.error("요약 메시지 표시 실패: %s", e, exc_info=True)
+            QMessageBox.critical(self, "오류", f"메시지를 표시하는 중 오류가 발생했습니다:\n{str(e)}")
+
+    def _collect_messages_for_summary(self, message_ids: List[str], sender_filter: Optional[str]) -> List[Dict]:
+        """요약 카드에서 필요한 메시지를 원본 풀에서 추출"""
+        id_set = {str(mid) for mid in message_ids}
+        messages: List[Dict] = []
+        for msg in self.collected_messages:
+            msg_id = msg.get("msg_id") or msg.get("id") or msg.get("message_id") or msg.get("_id")
+            if not msg_id:
+                continue
+            if not self._is_messenger_message(msg):
+                continue
+            if str(msg_id) not in id_set:
+                continue
+            if not self._is_message_visible_to_persona(msg):
+                continue
+            messages.append(msg)
+        if sender_filter:
+            normalized = sender_filter.strip().lower()
+            filtered = [
+                msg for msg in messages
+                if str(msg.get("sender", "")).strip().lower() == normalized
+            ]
+            if filtered:
+                logger.info(
+                    "✅ 메시지 조회 완료(발신자 필터 적용): %d/%d",
+                    len(filtered),
+                    len(message_ids),
+                )
+                return filtered
+            logger.warning(
+                "⚠️ 발신자 '%s'와 일치하는 메시지를 찾지 못했습니다. 전체 %d건으로 대체합니다.",
+                sender_filter,
+                len(messages),
             )
+        logger.info("✅ 메시지 조회 완료: %d/%d", len(messages), len(message_ids))
+        return messages
+
+    def _format_summary_period_label(self, summary: Dict) -> str:
+        """요약 카드용 기간 라벨 생성"""
+        period_start = summary.get("period_start")
+        period_end = summary.get("period_end")
+        unit = summary.get("unit", "daily")
+
+        if isinstance(period_start, str):
+            try:
+                period_start_dt = datetime.fromisoformat(period_start.replace("Z", "+00:00"))
+            except Exception:
+                period_start_dt = None
+        else:
+            period_start_dt = period_start
+
+        if not period_start_dt:
+            return "메시지 상세"
+
+        if unit == "daily":
+            return period_start_dt.strftime("%Y년 %m월 %d일")
+        if unit == "weekly":
+            try:
+                if isinstance(period_end, str):
+                    period_end_dt = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
+                else:
+                    period_end_dt = period_end
+                if period_end_dt:
+                    actual_end = period_end_dt - timedelta(days=1)
+                    return f"{period_start_dt.strftime('%Y년 %m/%d')} ~ {actual_end.strftime('%m/%d')}"
+            except Exception:
+                pass
+            return period_start_dt.strftime("%Y년 %W주차")
+        if unit == "monthly":
+            return period_start_dt.strftime("%Y년 %m월")
+        return period_start_dt.strftime("%Y-%m-%d")
+
+    def _compose_statistics_text(self, messages: List[Dict], sender_filter: Optional[str]) -> str:
+        """필터 조건에 맞는 통계 문자열 생성"""
+        total = len(messages)
+        email_count = sum(1 for m in messages if m.get("type") == "email")
+        messenger_count = total - email_count
+        base = f"총 {total}건 | 이메일 {email_count}건, 메신저 {messenger_count}건"
+        if sender_filter:
+            return f"{sender_filter} 발신 {total}건 · {base}"
+        return base
     
     def _update_message_summaries(self, unit: str = "day"):
         """메시지 그룹화 및 요약 생성
@@ -1291,11 +1307,25 @@ class SmartAssistantGUI(QMainWindow):
         if not hasattr(self, "_message_summary_cache"):
             self._message_summary_cache = {}
 
+        messenger_messages = [m for m in self.collected_messages if self._is_messenger_message(m)]
+        email_count = len(self.collected_messages) - len(messenger_messages)
+
+        messenger_messages = [
+            m for m in messenger_messages
+            if self._is_message_visible_to_persona(m)
+        ]
+
+        if not messenger_messages:
+            logger.info("ℹ️ 메신저 메시지가 없어 요약을 생성하지 않습니다. (이메일 %d건)", email_count)
+            if hasattr(self, "message_summary_panel"):
+                self.message_summary_panel.show_message_count(0, email_count)
+            return
+
         cache_key = (
             self._current_persona_id or "unknown",
             unit,
             getattr(self, "_current_data_version", "0"),
-            len(self.collected_messages),
+            len(messenger_messages),
         )
         cached_summaries = self._message_summary_cache.get(cache_key)
         if cached_summaries:
@@ -1305,18 +1335,18 @@ class SmartAssistantGUI(QMainWindow):
             return
 
         from nlp.message_grouping import group_by_day, group_by_week, group_by_month
-        from nlp.grouped_summary import GroupedSummary
+        from nlp.grouped_summary import GroupedSummary, generate_improved_summary
         
         # 단위에 따라 메시지 그룹화
         if unit == "day":
-            groups = group_by_day(self.collected_messages)
+            groups = group_by_day(messenger_messages)
         elif unit == "week":
-            groups = group_by_week(self.collected_messages)
+            groups = group_by_week(messenger_messages)
         elif unit == "month":
-            groups = group_by_month(self.collected_messages)
+            groups = group_by_month(messenger_messages)
         else:
             # 기본값: 일별 그룹화
-            groups = group_by_day(self.collected_messages)
+            groups = group_by_day(messenger_messages)
 
         # 메시지 ID -> 우선순위 매핑 미리 계산
         priority_lookup: Dict[str, str] = {}
@@ -1365,6 +1395,8 @@ class SmartAssistantGUI(QMainWindow):
             if not period_start:
                 continue
             
+            sender_message_map = self._build_sender_message_map(messages)
+
             # GroupedSummary.from_messages 사용
             summary = GroupedSummary.from_messages(
                 messages=messages,
@@ -1378,8 +1410,12 @@ class SmartAssistantGUI(QMainWindow):
             # sender_priority_map을 summary 딕셔너리에 추가
             summary_dict = summary.to_dict()
             summary_dict["sender_priority_map"] = sender_priority_map
-            summary_dict["brief_summary"] = brief_summary  # brief_summary도 추가
-            
+            summary_dict["brief_summary"] = brief_summary
+            rich_summary = generate_improved_summary(messages)
+            summary_dict["rich_summary"] = self._enhance_rich_summary(rich_summary, key_points)
+            summary_dict["sender_message_map"] = sender_message_map
+            summary_dict["sender_highlights"] = self._build_sender_highlights(messages, sender_priority_map, sender_message_map)
+
             summaries.append(summary_dict)
         
         self._message_summary_cache[cache_key] = summaries
@@ -1410,9 +1446,19 @@ class SmartAssistantGUI(QMainWindow):
                 highlights = " · ".join(cleaned_points[:2])
                 summary_text += f" | {highlights}"
                 return summary_text
-
+    
         return f"{summary_text} | 주요 발신자: {top_sender[0]} ({top_sender[1]}건)"
     
+    def _enhance_rich_summary(self, base_summary: str, key_points: Optional[List[str]]) -> str:
+        """토픽 기반 요약 텍스트에 핵심 포인트를 결합"""
+        if not key_points:
+            return base_summary
+        cleaned = [kp.strip() for kp in key_points if kp and kp.strip()]
+        if not cleaned:
+            return base_summary
+        highlights = " / ".join(cleaned[:3])
+        return f"{base_summary}. 핵심: {highlights}"
+
     def _extract_key_points(self, messages: List[Dict]) -> List[str]:
         """주요 포인트 추출 (최대 3개)
 
@@ -1501,8 +1547,192 @@ class SmartAssistantGUI(QMainWindow):
 
         if any(keyword in text_lower for keyword in self._GENERIC_REQUEST_KEYWORDS):
             return "요청 사항"
-
+    
         return None
+    
+    def _build_sender_message_map(self, messages: List[Dict]) -> Dict[str, List[str]]:
+        """발신자별 메시지 ID 매핑"""
+        sender_map: Dict[str, List[str]] = defaultdict(list)
+        for msg in messages:
+            sender = msg.get("sender", "Unknown")
+            msg_id = msg.get("msg_id") or msg.get("id") or msg.get("message_id") or msg.get("_id")
+            if not msg_id:
+                continue
+            sender_map[sender].append(str(msg_id))
+        return dict(sender_map)
+
+    def _build_sender_highlights(
+        self,
+        messages: List[Dict],
+        sender_priority_map: Dict[str, str],
+        sender_message_map: Dict[str, List[str]]
+    ) -> List[Dict]:
+        """발신자별 하이라이트 데이터"""
+        highlights: List[Dict] = []
+        id_lookup = {
+            str(msg.get("msg_id") or msg.get("id") or msg.get("message_id") or msg.get("_id")): msg
+            for msg in messages
+        }
+        for sender, msg_ids in sender_message_map.items():
+            sender_msgs = [id_lookup.get(msg_id) for msg_id in msg_ids]
+            sender_msgs = [msg for msg in sender_msgs if msg]
+            if not sender_msgs:
+                continue
+            snippet = self._summarize_sender_messages(sender_msgs)
+            highlights.append({
+                "name": sender,
+                "count": len(sender_msgs),
+                "snippet": snippet,
+                "priority": sender_priority_map.get(sender, "low")
+            })
+        highlights.sort(key=lambda item: item["count"], reverse=True)
+        return highlights[:5]
+
+    def _summarize_sender_messages(self, messages: List[Dict]) -> str:
+        """발신자 단위 요약 문장 생성"""
+        points = self._extract_key_points(messages)
+        if points:
+            return points[0]
+        preview = self._extract_message_preview(messages[0])
+        return preview
+
+    def _extract_message_preview(self, message: Dict) -> str:
+        """본문/제목 기반 미리보기 문자열"""
+        content = message.get("content") or message.get("body") or ""
+        if isinstance(content, dict):
+            content = content.get("text") or content.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(str(item) for item in content if isinstance(item, str))
+        if not isinstance(content, str):
+            content = str(content or "")
+        content = content.strip()
+        if not content:
+            content = str(message.get("subject") or message.get("title") or "").strip()
+        if not content:
+            return "메시지 내용 없음"
+        return content[:90] + ("..." if len(content) > 90 else "")
+
+    def _is_messenger_message(self, message: Dict) -> bool:
+        """메신저 메시지 여부 판별"""
+        msg_type = str(message.get("type") or message.get("source_type") or "").lower()
+        if "email" in msg_type:
+            return False
+        if msg_type in {"messenger", "chat", "message"}:
+            return True
+
+        # type 정보가 없으면 메신저로 간주하되, 명시적 이메일 필드를 확인
+        if message.get("subject") and message.get("recipients"):
+            return False
+        return True
+
+    def _is_message_visible_to_persona(self, message: Dict) -> bool:
+        """선택된 페르소나가 볼 수 있는 메시지인지 판별"""
+        persona = getattr(self, "selected_persona", None)
+        if not persona:
+            return True
+
+        persona_handle = self._normalize_handle(persona.chat_handle)
+        persona_email = (persona.email_address or "").lower()
+
+        msg_type = str(message.get("type") or message.get("source_type") or "").lower()
+
+        # 이메일: 수신자 목록에 포함되는지 확인
+        if "email" in msg_type:
+            if not persona_email:
+                return False
+            recipients = self._collect_email_recipients(message)
+            return persona_email in recipients
+
+        # 메신저: 동일 인물이 보낸 메시지는 제외
+        if persona_handle:
+            sender_handle = self._normalize_handle(message.get("sender"))
+            if sender_handle == persona_handle:
+                return False
+
+            participants = self._extract_message_participants(message)
+            if participants and persona_handle in participants:
+                return True
+
+            room_slug = str(message.get("room_slug") or message.get("room_name") or "").lower()
+            if room_slug and persona_handle in room_slug:
+                return True
+
+        # 페르소나 정보가 부족하면 기본적으로 포함
+        return True
+
+    def _collect_email_recipients(self, message: Dict) -> set[str]:
+        """이메일 메시지의 모든 수신자 주소 집합"""
+        recipients: set[str] = set()
+
+        def _add(value):
+            if not value:
+                return
+            if isinstance(value, str):
+                for entry in value.split(","):
+                    entry = entry.strip()
+                    if entry:
+                        recipients.add(entry.lower())
+            elif isinstance(value, dict):
+                email = value.get("email") or value.get("address") or value.get("value")
+                if email:
+                    recipients.add(str(email).strip().lower())
+            elif isinstance(value, (list, tuple, set)):
+                for item in value:
+                    _add(item)
+            else:
+                recipients.add(str(value).strip().lower())
+
+        for field in ("recipients_list", "recipients", "to", "cc", "bcc"):
+            _add(message.get(field))
+
+        return {r for r in recipients if r}
+
+    def _extract_message_participants(self, message: Dict) -> List[str]:
+        """채팅 메시지의 참여자 핸들 목록 추출"""
+        participants_raw = (
+            message.get("room_members")
+            or message.get("participants")
+            or message.get("handles")
+            or message.get("members")
+        )
+
+        participants: List[str] = []
+
+        def _append(value):
+            norm = self._normalize_handle(value)
+            if norm:
+                participants.append(norm)
+
+        if isinstance(participants_raw, (list, tuple, set)):
+            for entry in participants_raw:
+                if isinstance(entry, dict):
+                    _append(entry.get("handle") or entry.get("name"))
+                else:
+                    _append(entry)
+        elif isinstance(participants_raw, dict):
+            _append(participants_raw.get("handle") or participants_raw.get("name"))
+        else:
+            _append(participants_raw)
+
+        room_slug = message.get("room_slug")
+        if room_slug:
+            slug = str(room_slug).lower()
+            if slug.startswith("dm:"):
+                slug = slug[3:]
+            for token in slug.split(":"):
+                token = token.strip()
+                if token and token != "dm":
+                    _append(token)
+
+        return list(dict.fromkeys(participants))  # de-duplicate while preserving order
+
+    def _normalize_handle(self, value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        handle = str(value).strip().lower()
+        if handle.startswith("@"):
+            handle = handle[1:]
+        return handle or None
     
     def start_collection(self):
         """메시지 수집 시작"""

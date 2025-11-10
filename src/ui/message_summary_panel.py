@@ -5,11 +5,11 @@ MessageSummaryPanel - 메시지 요약 패널
 메시지 탭에서 요약 단위를 선택하고 그룹화된 요약을 표시하는 컴포넌트입니다.
 """
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QRadioButton, QButtonGroup, QScrollArea, QFrame
 )
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -24,6 +24,19 @@ from .styles import (
 )
 
 
+class SenderBadgeLabel(QLabel):
+    """클릭 가능한 발신자 배지"""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class MessageSummaryPanel(QWidget):
     """메시지 요약 패널
     
@@ -36,6 +49,7 @@ class MessageSummaryPanel(QWidget):
     
     summary_unit_changed = pyqtSignal(str)
     summary_card_clicked = pyqtSignal(dict)
+    sender_badge_clicked = pyqtSignal(dict, str)
     
     def __init__(self, parent=None):
         """
@@ -318,13 +332,13 @@ class MessageSummaryPanel(QWidget):
         top_senders = summary.get("top_senders", [])
         sender_priority_map = summary.get("sender_priority_map", {})
         if top_senders:
-            sender_badges = self._create_sender_badges(top_senders, sender_priority_map)
+            sender_badges = self._create_sender_badges(summary, top_senders, sender_priority_map)
             layout.addWidget(sender_badges)
         
         # 핵심 요약 (1-2줄)
-        brief_summary = summary.get("brief_summary", "")
-        if brief_summary:
-            summary_label = QLabel(brief_summary)
+        summary_text = summary.get("rich_summary") or summary.get("brief_summary", "")
+        if summary_text:
+            summary_label = QLabel(summary_text)
             summary_label.setWordWrap(True)
             summary_label.setStyleSheet(f"""
                 QLabel {{
@@ -336,6 +350,16 @@ class MessageSummaryPanel(QWidget):
                 }}
             """)
             layout.addWidget(summary_label)
+
+        # 발신자별 하이라이트
+        sender_highlights = summary.get("sender_highlights") or []
+        if sender_highlights:
+            layout.addWidget(self._create_sender_highlights(sender_highlights))
+
+        # 주요 포인트
+        key_points = summary.get("key_points") or []
+        if key_points:
+            layout.addWidget(self._create_key_points(key_points))
         
         return card
     
@@ -485,7 +509,7 @@ class MessageSummaryPanel(QWidget):
         
         return container
     
-    def _create_sender_badges(self, top_senders: List[tuple], priority_map: Dict[str, str]) -> QWidget:
+    def _create_sender_badges(self, summary: Dict, top_senders: List[tuple], priority_map: Dict[str, str]) -> QWidget:
         """발신자 배지 생성 (우선순위 해시태그 포함)"""
         container = QWidget()
         layout = QHBoxLayout(container)
@@ -502,20 +526,80 @@ class MessageSummaryPanel(QWidget):
             
             badge_text = f"{sender}({count}건){priority_tag}"
             
-            badge = QLabel(badge_text)
+            badge = SenderBadgeLabel(badge_text)
             badge.setStyleSheet(f"""
                 QLabel {{
-                    background-color: {bg_color};
+                    background-color: {Colors.BG_PRIMARY};
                     color: {text_color};
+                    border: 1px solid {bg_color};
                     padding: 4px 10px;
                     border-radius: 12px;
                     font-size: {FontSizes.XS};
                     font-weight: {FontWeights.SEMIBOLD};
                 }}
             """)
+            badge.setCursor(Qt.CursorShape.PointingHandCursor)
+            badge.clicked.connect(lambda _=False, s=sender: self.sender_badge_clicked.emit(summary, s))
             layout.addWidget(badge)
         
         layout.addStretch()
+        return container
+
+    def _create_sender_highlights(self, highlights: List[Dict[str, Any]]) -> QWidget:
+        """발신자별 하이라이트 섹션"""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, Spacing.XS, 0, 0)
+        layout.setSpacing(Spacing.XS)
+
+        title = QLabel("발신자 하이라이트")
+        title.setStyleSheet(f"""
+            QLabel {{
+                font-weight: {FontWeights.SEMIBOLD};
+                color: {Colors.TEXT_PRIMARY};
+                font-size: {FontSizes.SM};
+            }}
+        """)
+        layout.addWidget(title)
+
+        for highlight in highlights[:4]:
+            sender = highlight.get("name", "Unknown")
+            count = highlight.get("count", 0)
+            snippet = highlight.get("snippet", "")
+            priority = highlight.get("priority", "")
+            colors = get_priority_colors(priority)
+            badge = QLabel(f"{get_priority_icon(priority)} {sender} · {count}건")
+            badge.setStyleSheet(f"""
+                QLabel {{
+                    background-color: {Colors.BG_SECONDARY};
+                    color: {Colors.TEXT_PRIMARY};
+                    border: 1px solid {colors[0]};
+                    padding: 2px 8px;
+                    border-radius: 999px;
+                    font-size: {FontSizes.XS};
+                    font-weight: {FontWeights.SEMIBOLD};
+                }}
+            """)
+
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(Spacing.SM)
+            row.addWidget(badge, 0)
+
+            snippet_label = QLabel(snippet)
+            snippet_label.setWordWrap(True)
+            snippet_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {Colors.TEXT_SECONDARY};
+                    font-size: {FontSizes.XS};
+                }}
+            """)
+            row.addWidget(snippet_label, 1)
+
+            row_container = QWidget()
+            row_container.setLayout(row)
+            layout.addWidget(row_container)
+
         return container
     
     def _create_stat_item(self, icon: str, text: str) -> QLabel:

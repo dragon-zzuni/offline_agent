@@ -1025,10 +1025,14 @@ class AnalysisCacheController:
     def _show_visual_notification(self) -> None:
         ui = self.ui
         try:
-            central_widget = ui.centralWidget()
-            if central_widget:
-                ui.notification_manager.register_widget(central_widget, "flash")
-                ui.notification_manager.show_notification(central_widget, interval_ms=250)
+            targets = []
+            if hasattr(ui, "message_summary_panel"):
+                targets.append(ui.message_summary_panel)
+            if hasattr(ui, "email_panel"):
+                targets.append(ui.email_panel)
+            for widget in targets:
+                ui.notification_manager.register_widget(widget, "visual")
+                ui.notification_manager.show_notification(widget, duration_ms=250)
         except Exception as exc:  # pragma: no cover
             logger.error("시각적 알림 표시 오류: %s", exc)
 
