@@ -206,6 +206,11 @@ class AnalysisCacheController:
                     logger.info(f"[AnalysisCacheController] populate_from_items 호출: incremental={incremental_mode}, todos={len(todos)}개")
                     ui.todo_panel.populate_from_items(todos, incremental=incremental_mode, show_reasoning=show_reasoning)
                     logger.info("✅ 백그라운드 분석 완료: %d개 TODO 생성", len(todos))
+                    
+                    # 증분 모드일 때만 TODO 생성 알림 표시
+                    if incremental_mode and len(todos) > 0:
+                        self._show_todo_creation_notification(len(todos))
+                    
                     self._update_cache_with_analysis_results(
                         todos,
                         [],
@@ -422,6 +427,77 @@ class AnalysisCacheController:
             logger.info("💾 캐시 저장 완료: TODO %d개, 메시지 %d개", len(todo_list), len(messages))
         except Exception as exc:  # pragma: no cover
             logger.error("❌ 캐시 저장 오류: %s", exc, exc_info=True)
+    
+    def _show_todo_creation_notification(self, todo_count: int):
+        """TODO 생성 완료 알림 표시
+        
+        Args:
+            todo_count: 생성된 TODO 개수
+        """
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            from PyQt6.QtCore import QTimer
+            
+            ui = self.ui
+            
+            # 메시지 구성
+            title = "✅ TODO 생성 완료"
+            message = f"""
+<div style='font-size: 14px;'>
+<p><b>새로운 TODO가 생성되었습니다!</b></p>
+<br>
+<table style='width: 100%;'>
+<tr>
+    <td style='padding: 5px;'>📋 생성된 TODO:</td>
+    <td style='padding: 5px; text-align: right;'><b style='color: #4CAF50; font-size: 16px;'>{todo_count}개</b></td>
+</tr>
+</table>
+<br>
+<p style='color: #666; font-size: 12px;'>
+※ TODO 리스트에서 확인하세요
+</p>
+</div>
+"""
+            
+            # 팝업 생성
+            msg_box = QMessageBox(ui)
+            msg_box.setWindowTitle(title)
+            msg_box.setText(message)
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            
+            # 스타일 적용
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: white;
+                }
+                QLabel {
+                    color: #333;
+                    min-width: 300px;
+                }
+                QPushButton {
+                    background-color: #4CAF50;
+                    color: white;
+                    border: none;
+                    padding: 8px 20px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #45a049;
+                }
+            """)
+            
+            # 3초 후 자동 닫기
+            QTimer.singleShot(3000, msg_box.close)
+            
+            # 비모달로 표시 (백그라운드 작업 방해하지 않음)
+            msg_box.show()
+            
+            logger.info(f"✅ TODO 생성 알림 표시: {todo_count}개")
+            
+        except Exception as e:
+            logger.error(f"TODO 생성 알림 표시 오류: {e}")
 
     def _should_use_cache(self, persona_key: str) -> bool:
         ui = self.ui

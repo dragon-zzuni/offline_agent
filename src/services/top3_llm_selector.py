@@ -158,6 +158,11 @@ class Top3LLMSelector:
             logger.warning("[Top3LLM] 유효한 TODO ID가 없습니다 (검증 실패)")
             return None
         
+        # 규칙 준수 검증 및 설명 개선
+        reasoning = self._validate_and_explain_selection(
+            valid_ids, candidates, natural_rule, reasoning
+        )
+        
         # 캐시 저장
         self.cache_manager.set(original_todos, valid_ids, entity_rules, natural_rule)
         
@@ -332,13 +337,18 @@ TODO 리스트 ({len(todos)}개):
    - 조건을 완벽히 만족하는 TODO가 3개 이상이면 → 그 중 3개 선정
    - 조건을 완벽히 만족하는 TODO가 3개 미만이면:
      a) 먼저 완벽히 만족하는 TODO를 모두 선정
-     b) 부족한 개수만큼 조건을 **순서대로** 완화하여 추가 선정:
-        - 유형 조건은 **절대 완화하지 마세요** (가장 중요!)
-        - 수신방법 조건은 **절대 완화하지 마세요** (두 번째로 중요!)
-        - 요청자 조건을 먼저 완화 (같은 프로젝트의 다른 요청자)
-        - 프로젝트 조건을 마지막으로 완화 (같은 요청자의 다른 프로젝트)
+     b) 부족한 개수만큼 조건을 **통일성 있게** 완화하여 추가 선정:
+        - **유형 조건은 절대 완화하지 마세요** (가장 중요!)
+        - **수신방법 조건은 절대 완화하지 마세요** (두 번째로 중요!)
+        - **통일성 원칙**: 같은 방식으로 조건을 완화하세요
+          * 예: 요청자만 다른 TODO 2개를 추가한다면, 둘 다 같은 프로젝트여야 함
+          * 예: 프로젝트만 다른 TODO 2개를 추가한다면, 둘 다 같은 요청자여야 함
+        - 완화 우선순위:
+          1. 요청자 조건 완화 (같은 프로젝트 + 같은 유형 + 같은 수신방법)
+          2. 프로젝트 조건 완화 (같은 요청자 + 같은 유형 + 같은 수신방법)
      c) reasoning에 어떤 조건을 완화했는지 명확히 설명
-   - 예: "프로젝트와 요청자 조건을 만족하는 메시지로 수신한 업무처리 TODO 2개를 선정하고, 프로젝트 조건만 만족하는 메시지로 수신한 업무처리 TODO 1개를 추가로 선정했습니다."
+   - 예시 1: "PN 프로젝트의 전형우가 요청한 업무처리 TODO 1개를 선정하고, PN 프로젝트의 다른 요청자(임호규)가 요청한 업무처리 TODO 2개를 추가로 선정했습니다. (요청자 조건만 완화, 프로젝트와 유형은 통일)"
+   - 예시 2: "완벽히 일치하는 TODO가 없어서, 전형우가 요청한 업무처리 TODO 3개를 선정했습니다. (프로젝트 조건 완화, 요청자와 유형은 통일)"
 
 7. **매우 중요**: 
    - selected_ids에는 반드시 위 TODO 리스트의 "ID:" 필드에 있는 **정확한 ID**만 사용하세요
@@ -468,3 +478,141 @@ TODO 리스트 ({len(todos)}개):
             logger.warning(f"[Top3LLM] 유효하지 않은 ID: {invalid_ids}")
         
         return valid_ids
+    
+    def _validate_and_explain_selection(
+        self,
+        selected_ids: Set[str],
+        todos: List[Dict],
+        natural_rule: str,
+        original_reasoning: str
+    ) -> str:
+        """선정 결과 검증 및 설명 개선
+        
+        Args:
+            selected_ids: 선정된 TODO ID 집합
+            todos: 전체 TODO 리스트
+            natural_rule: 자연어 규칙
+            original_reasoning: LLM이 생성한 원본 설명
+            
+        Returns:
+            개선된 설명
+        """
+        try:
+            # 선정된 TODO 가져오기
+            selected_todos = [t for t in todos if t.get("id") in selected_ids]
+            
+            if not selected_todos:
+                return original_reasoning
+            
+            # 규칙에서 조건 추출
+            rule_lower = natural_rule.lower()
+            
+            # 프로젝트 조건 추출
+            expected_project = None
+            for todo in todos:
+                project = todo.get("project", "")
+                project_fullname = todo.get("project_full_name", "")
+                if project and (project.lower() in rule_lower or (project_fullname and project_fullname.lower() in rule_lower)):
+                    expected_project = project
+                    break
+            
+            # 요청자 조건 추출
+            expected_requester = None
+            person_mapping = self._get_person_mapping()
+            for email, name in person_mapping.items():
+                if name and name in natural_rule:
+                    expected_requester = name
+                    break
+            
+            # 유형 조건 추출
+            type_mapping = {
+                "업무처리": "task",
+                "문서검토": "review",
+                "미팅": "meeting",
+                "마감작업": "deadline"
+            }
+            expected_type = None
+            for korean, english in type_mapping.items():
+                if korean in natural_rule:
+                    expected_type = english
+                    break
+            
+            # 선정된 TODO 분석
+            violations = []
+            perfect_matches = []
+            partial_matches = []
+            
+            for todo in selected_todos:
+                todo_id = todo.get("id", "")
+                project = todo.get("project", "")
+                requester = todo.get("requester", "")
+                requester_name = person_mapping.get(requester, requester)
+                todo_type = todo.get("type", "")
+                
+                issues = []
+                
+                # 프로젝트 검증
+                if expected_project and project != expected_project:
+                    issues.append(f"프로젝트 불일치 (기대: {expected_project}, 실제: {project})")
+                
+                # 요청자 검증
+                if expected_requester and requester_name != expected_requester:
+                    issues.append(f"요청자 불일치 (기대: {expected_requester}, 실제: {requester_name})")
+                
+                # 유형 검증
+                if expected_type and todo_type != expected_type:
+                    issues.append(f"유형 불일치 (기대: {expected_type}, 실제: {todo_type})")
+                
+                if issues:
+                    violations.append({
+                        "id": todo_id,
+                        "issues": issues,
+                        "todo": todo
+                    })
+                    partial_matches.append(todo)
+                else:
+                    perfect_matches.append(todo)
+            
+            # 설명 개선
+            if violations:
+                # 규칙 위반이 있는 경우 명확한 설명 추가
+                explanation_parts = [original_reasoning, "\n\n⚠️ 선정 결과 분석:"]
+                
+                if perfect_matches:
+                    explanation_parts.append(f"\n✅ 완벽히 일치: {len(perfect_matches)}개")
+                    for todo in perfect_matches:
+                        explanation_parts.append(
+                            f"  - {todo.get('id')}: "
+                            f"프로젝트={todo.get('project')}, "
+                            f"요청자={person_mapping.get(todo.get('requester'), todo.get('requester'))}, "
+                            f"유형={todo.get('type')}"
+                        )
+                
+                if partial_matches:
+                    explanation_parts.append(f"\n⚠️ 부분 일치: {len(partial_matches)}개")
+                    for violation in violations:
+                        todo = violation["todo"]
+                        explanation_parts.append(
+                            f"  - {violation['id']}: "
+                            f"프로젝트={todo.get('project')}, "
+                            f"요청자={person_mapping.get(todo.get('requester'), todo.get('requester'))}, "
+                            f"유형={todo.get('type')}"
+                        )
+                        for issue in violation["issues"]:
+                            explanation_parts.append(f"    → {issue}")
+                
+                # 완화된 조건 설명
+                if len(perfect_matches) < 3:
+                    explanation_parts.append(
+                        f"\n📝 조건 완화: 규칙을 완벽히 만족하는 TODO가 {len(perfect_matches)}개뿐이어서, "
+                        f"부분적으로 일치하는 TODO {len(partial_matches)}개를 추가로 선정했습니다."
+                    )
+                
+                return "".join(explanation_parts)
+            
+            # 모두 완벽히 일치하는 경우
+            return original_reasoning
+            
+        except Exception as e:
+            logger.error(f"[Top3LLM] 선정 결과 검증 오류: {e}")
+            return original_reasoning

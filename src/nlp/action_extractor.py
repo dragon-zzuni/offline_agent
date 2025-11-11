@@ -148,6 +148,11 @@ class ActionExtractor:
         subject = message_data.get("subject", "")
         sender = message_data.get("sender", "")
         sender_email = message_data.get("sender_email", "")
+        
+        # 단순 인사/확인 메시지 필터링 (TODO 생성 안 함)
+        if self._is_simple_acknowledgment(content, subject):
+            logger.debug(f"단순 확인 메시지 필터링: {content[:50]}...")
+            return []
         msg_id = message_data.get("msg_id", f"msg_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         
         # ✅ 중요: 사용자(PM)가 보낸 메시지는 TODO로 만들지 않음
@@ -499,6 +504,86 @@ class ActionExtractor:
             logger.error(f"시간 파싱 오류: {e}")
         
         return None
+    
+    def _is_simple_acknowledgment(self, content: str, subject: str = "") -> bool:
+        """단순 인사/확인 메시지 판별
+        
+        Args:
+            content: 메시지 본문
+            subject: 메시지 제목
+            
+        Returns:
+            True if 단순 확인 메시지, False otherwise
+        """
+        # 전체 텍스트
+        full_text = f"{subject} {content}".strip()
+        content_clean = content.strip()
+        
+        # 1. 너무 짧은 메시지 (100자 미만) - 단순 확인 패턴
+        if len(content_clean) < 100:
+            simple_patterns = [
+                r"^.*안녕하세요.*확인했습니다\.?$",
+                r"^.*안녕하세요.*알겠습니다\.?$",
+                r"^.*확인했습니다\.?$",
+                r"^.*알겠습니다\.?$",
+                r"^.*네,?\s*감사합니다\.?$",
+                r"^.*네,?\s*알겠습니다\.?$",
+                r"^.*감사합니다\.?$",
+                r"^.*고맙습니다\.?$",
+                r"^.*수고하세요\.?$",
+                r"^.*작업 중입니다\.?$",
+                r"^.*진행 중입니다\.?$",
+                r"^.*확인했어요\.?$",
+                r"^.*알았어요\.?$",
+                r"^.*처리하겠습니다\.?$",
+                r"^.*진행하겠습니다\.?$",
+                r"^.*ok\.?$",
+                r"^.*okay\.?$",
+                r"^.*got it\.?$",
+                r"^.*understood\.?$",
+                r"^.*thanks\.?$",
+                r"^.*thank you\.?$",
+            ]
+            
+            for pattern in simple_patterns:
+                if re.match(pattern, content_clean, re.IGNORECASE | re.DOTALL):
+                    logger.debug(f"단순 확인 메시지 필터링 (패턴 매칭): {content_clean[:50]}...")
+                    return True
+        
+        # 2. 인사만 있는 메시지
+        greeting_only_patterns = [
+            r"^안녕하세요[,.]?\s*$",
+            r"^안녕하세요[,.]?\s+[가-힣]+입니다[.]?\s*$",
+            r"^hi[,.]?\s*$",
+            r"^hello[,.]?\s*$",
+            r"^good morning[,.]?\s*$",
+            r"^good afternoon[,.]?\s*$",
+        ]
+        
+        for pattern in greeting_only_patterns:
+            if re.match(pattern, full_text.strip(), re.IGNORECASE):
+                logger.debug(f"인사만 있는 메시지 필터링: {full_text[:50]}...")
+                return True
+        
+        # 3. 단순 상태 보고 (요청 없음) - 매우 짧은 메시지만
+        if len(content_clean) < 80:  # 80자 미만만 체크
+            status_report_patterns = [
+                r"^.*오늘의?\s*(작업|업무)\s*보고\s*드립니다\.?$",
+                r"^.*진행\s*상황\s*공유\s*드립니다\.?$",
+                r"^.*작업\s*완료\s*보고\s*드립니다\.?$",
+            ]
+            
+            # 요청 키워드가 없으면 단순 보고로 판단
+            request_keywords = ["부탁", "요청", "주세요", "해주", "필요", "바랍니다", "검토", "확인", "피드백", "의견"]
+            has_request = any(keyword in content_clean for keyword in request_keywords)
+            
+            if not has_request:
+                for pattern in status_report_patterns:
+                    if re.match(pattern, content_clean, re.IGNORECASE | re.DOTALL):
+                        logger.debug(f"단순 상태 보고 필터링: {content_clean[:50]}...")
+                        return True
+        
+        return False
     
     def _deduplicate_actions(self, actions: List[ActionItem]) -> List[ActionItem]:
         """중복 액션 제거"""

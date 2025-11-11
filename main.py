@@ -615,10 +615,11 @@ class SmartAssistant:
         logger.info("🎯 우선순위 분류 중...")
         self.ranked_messages = await self.priority_ranker.rank_messages(self.collected_messages)
 
-        # 성능 개선: 상위 50개만 요약 (TODO 생성에 필요한 핵심 메시지만)
-        # 참고: 전체 메시지는 수집되었으며, 우선순위가 높은 상위 50개만 상세 분석합니다
-        SUMMARY_TOP_N = 70
-        ACTION_TOP_N = 200
+        # 2단계 TODO 생성 전략:
+        # 1단계: 키워드 기반으로 많은 TODO 생성 (빠름, ACTION_TOP_N)
+        # 2단계: LLM으로 상위 N개만 정제 (느림, SUMMARY_TOP_N)
+        SUMMARY_TOP_N = 70   # LLM 상세 분석 (비용/시간 고려)
+        ACTION_TOP_N = 500   # 키워드 기반 TODO 생성 (빠른 1차 필터링)
         summary_targets = [m for (m, _) in self.ranked_messages][:SUMMARY_TOP_N]
 
         # 2) 상위 N개 요약
@@ -805,7 +806,7 @@ class SmartAssistant:
                     )
 
                 # ❷ Evidence chips / deadline confidence (result 컨텍스트 기반)
-                reasons = (pr.get("reasons") or [])[:3]
+                reasons = (pr.get("reasoning") or [])[:3]
                 todo_item["evidence"] = json.dumps(reasons, ensure_ascii=False)
                 todo_item["deadline_confidence"] = result.get("deadline_confidence", "mid")
 
@@ -866,13 +867,26 @@ class SmartAssistant:
 
             high_cut, low_cut = boundaries
             high_priority_count = medium_priority_count = low_priority_count = 0
-            for idx, (_, item) in enumerate(scored_items):
+            for idx, (score, item) in enumerate(scored_items):
+                # 원래 우선순위 저장
+                original_priority = item.get("priority", "low")
+                
                 if idx < high_cut:
-                    item["priority"] = "high"
-                    high_priority_count += 1
+                    # 원래 LOW였고 점수도 낮으면 MEDIUM까지만
+                    if original_priority == "low" and score < 2.0:
+                        item["priority"] = "medium"
+                        medium_priority_count += 1
+                    else:
+                        item["priority"] = "high"
+                        high_priority_count += 1
                 elif idx >= low_cut:
-                    item["priority"] = "low"
-                    low_priority_count += 1
+                    # 원래 HIGH였으면 MEDIUM까지만
+                    if original_priority == "high":
+                        item["priority"] = "medium"
+                        medium_priority_count += 1
+                    else:
+                        item["priority"] = "low"
+                        low_priority_count += 1
                 else:
                     item["priority"] = "medium"
                     medium_priority_count += 1

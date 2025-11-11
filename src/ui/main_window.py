@@ -1915,6 +1915,11 @@ class SmartAssistantGUI(QMainWindow):
             show_progress = total_new_unique > 50
             self._process_new_data(unique_emails, unique_chats, unique_messages, show_progress)
             self._update_ui_for_new_data(unique_emails, unique_chats, show_progress)
+            
+            # TODO 생성 개수 계산 및 팝업 표시
+            new_todo_count = self._count_new_todos(unique_messages)
+            self._show_new_data_notification(total_new_unique, new_todo_count)
+            
             self._finalize_new_data_processing(unique_messages, total_new_unique, timestamp)
             
         except Exception as e:
@@ -2125,6 +2130,115 @@ class SmartAssistantGUI(QMainWindow):
     def _handle_reanalysis_result(self, result):
         """재분석 결과 처리"""
         self.analysis_controller._handle_reanalysis_result(result)
+    
+    def _count_new_todos(self, messages: list) -> int:
+        """새 메시지에서 생성될 TODO 개수 추정
+        
+        Args:
+            messages: 새로 수집된 메시지 리스트
+            
+        Returns:
+            예상 TODO 개수
+        """
+        try:
+            # 우선순위 HIGH/MEDIUM 메시지 개수로 추정
+            # 실제로는 LLM 분석 후 action_required=true인 것만 TODO가 됨
+            # 여기서는 간단히 키워드 기반으로 추정
+            
+            action_keywords = [
+                "요청", "부탁", "검토", "확인", "회신", "답변", 
+                "피드백", "의견", "승인", "결재", "미팅", "회의"
+            ]
+            
+            estimated_todos = 0
+            for msg in messages:
+                content = (msg.get("body", "") or msg.get("content", "")).lower()
+                subject = (msg.get("subject", "") or "").lower()
+                text = f"{subject} {content}"
+                
+                # 액션 키워드가 있으면 TODO 후보로 간주
+                if any(keyword in text for keyword in action_keywords):
+                    estimated_todos += 1
+            
+            return estimated_todos
+            
+        except Exception as e:
+            logger.error(f"TODO 개수 추정 오류: {e}")
+            return 0
+    
+    def _show_new_data_notification(self, total_messages: int, estimated_todos: int):
+        """새 데이터 수집 알림 팝업 표시
+        
+        Args:
+            total_messages: 총 새 메시지 개수
+            estimated_todos: 예상 TODO 개수
+        """
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            from PyQt6.QtCore import QTimer
+            
+            # 메시지 구성
+            title = "📬 새 데이터 수집"
+            message = f"""
+<div style='font-size: 14px;'>
+<p><b>새로운 메시지가 수집되었습니다!</b></p>
+<br>
+<table style='width: 100%;'>
+<tr>
+    <td style='padding: 5px;'>📧 총 메시지:</td>
+    <td style='padding: 5px; text-align: right;'><b>{total_messages}개</b></td>
+</tr>
+<tr>
+    <td style='padding: 5px;'>✅ 예상 TODO:</td>
+    <td style='padding: 5px; text-align: right;'><b>{estimated_todos}개</b></td>
+</tr>
+</table>
+<br>
+<p style='color: #666; font-size: 12px;'>
+※ TODO는 LLM 분석 후 자동으로 생성됩니다
+</p>
+</div>
+"""
+            
+            # 팝업 생성
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle(title)
+            msg_box.setText(message)
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            
+            # 스타일 적용
+            msg_box.setStyleSheet("""
+                QMessageBox {
+                    background-color: white;
+                }
+                QLabel {
+                    color: #333;
+                    min-width: 300px;
+                }
+                QPushButton {
+                    background-color: #4CAF50;
+                    color: white;
+                    border: none;
+                    padding: 8px 20px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #45a049;
+                }
+            """)
+            
+            # 3초 후 자동 닫기
+            QTimer.singleShot(3000, msg_box.close)
+            
+            # 비모달로 표시 (백그라운드 작업 방해하지 않음)
+            msg_box.show()
+            
+            logger.info(f"📬 알림 표시: 메시지 {total_messages}개, TODO {estimated_todos}개")
+            
+        except Exception as e:
+            logger.error(f"알림 표시 오류: {e}")
     
     def _build_cache_key(self) -> 'CacheKey':
         """현재 상태로 캐시 키 생성
