@@ -327,28 +327,28 @@ class VirtualOfficeDataSource(DataSource):
         # 통합 및 정렬
         all_messages = emails + messages
         
-        # msg_id 기준 중복 제거 (TO/CC 중복 수신 처리) - 성능 측정
+        # 메시지 필터링 적용 - 성능 측정
         start_time = time.time()
-        seen_msg_ids = set()
-        unique_messages = []
-        for msg in all_messages:
-            msg_id = msg.get("msg_id")
-            if msg_id and msg_id not in seen_msg_ids:
-                seen_msg_ids.add(msg_id)
-                unique_messages.append(msg)
-            elif not msg_id:
-                # msg_id가 없는 경우는 그대로 추가
-                unique_messages.append(msg)
+        from utils.message_filters import apply_all_filters
+        all_messages, filter_stats = apply_all_filters(all_messages)
+        filter_time = time.time() - start_time
         
-        dedup_time = time.time() - start_time
-        
-        if len(all_messages) != len(unique_messages):
-            logger.info(
-                f"🔍 중복 메시지 제거: {len(all_messages)}개 → {len(unique_messages)}개 "
-                f"({len(all_messages) - len(unique_messages)}개 중복) - {dedup_time:.2f}초"
-            )
-        
-        all_messages = unique_messages
+        logger.info(
+            f"🔍 메시지 필터링 완료: {filter_stats['original_count']}개 → {filter_stats['filtered_count']}개 "
+            f"({filter_stats['removed_count']}개 제거) - {filter_time:.2f}초"
+        )
+        logger.info(
+            f"  - 본문 중복: {filter_stats['content_duplicate']}개"
+        )
+        logger.info(
+            f"  - 짧은 메시지: {filter_stats['too_short']}개, "
+            f"단순 인사: {filter_stats['simple_greeting']}개, "
+            f"단순 업데이트: {filter_stats['simple_update']}개"
+        )
+        logger.info(
+            f"  - TO/CC/BCC 중복: {filter_stats['recipient_type_removed']}개 "
+            f"(TO {filter_stats['to_kept']}개, CC {filter_stats['cc_kept']}개, BCC {filter_stats['bcc_kept']}개 유지)"
+        )
 
         # 시뮬레이션 시간 메타데이터 주입
         self._annotate_simulation_timestamps(all_messages)
@@ -477,24 +477,20 @@ class VirtualOfficeDataSource(DataSource):
                 for m in raw_messages
             ]
             
-            # msg_id 기준 중복 제거 (TO/CC 중복 수신 처리)
-            seen_msg_ids = set()
-            unique_emails = []
-            for email in emails:
-                msg_id = email.get("msg_id")
-                if msg_id and msg_id not in seen_msg_ids:
-                    seen_msg_ids.add(msg_id)
-                    unique_emails.append(email)
-                elif not msg_id:
-                    unique_emails.append(email)
+            # 메시지 필터링 적용
+            from utils.message_filters import apply_all_filters
+            all_new_messages = emails + messages
+            all_new_messages, filter_stats = apply_all_filters(all_new_messages)
             
-            if len(emails) != len(unique_emails):
+            # 필터링 후 이메일과 메시지 분리
+            emails = [m for m in all_new_messages if m.get("platform") == "email"]
+            messages = [m for m in all_new_messages if m.get("platform") != "email"]
+            
+            if filter_stats["removed_count"] > 0:
                 logger.info(
-                    f"🔍 중복 이메일 제거: {len(emails)}개 → {len(unique_emails)}개 "
-                    f"({len(emails) - len(unique_emails)}개 중복)"
+                    f"🔍 배치 수집 필터링: {filter_stats['original_count']}개 → {filter_stats['filtered_count']}개 "
+                    f"({filter_stats['removed_count']}개 제거)"
                 )
-            
-            emails = unique_emails
             
             # last_id 업데이트
             if raw_emails:

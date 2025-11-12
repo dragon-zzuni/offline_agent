@@ -166,28 +166,42 @@ class AnalysisCacheController:
                         other_count,
                     )
 
-                def extract_todos_recursive(data: Any, depth: int = 0) -> List[Dict[str, Any]]:
-                    if depth > 3:
-                        return []
+                # todo_list가 이미 리스트면 그대로 사용, dict면 추출
+                if isinstance(todo_list, list):
+                    todos = todo_list
+                    logger.info("🔍 TODO 리스트 직접 사용: %d개", len(todos))
+                elif isinstance(todo_list, dict):
+                    # main.py의 generate_todo_list가 반환하는 형식: {"summary": {...}, "items": [...]}
+                    if "items" in todo_list:
+                        todos = todo_list["items"]
+                        logger.info("🔍 TODO 리스트 'items' 키에서 추출: %d개", len(todos))
+                    else:
+                        # 레거시 형식 지원: 재귀적으로 TODO 아이템 찾기
+                        def extract_todos_recursive(data: Any, depth: int = 0) -> List[Dict[str, Any]]:
+                            if depth > 3:
+                                return []
 
-                    extracted: List[Dict[str, Any]] = []
+                            extracted: List[Dict[str, Any]] = []
 
-                    if isinstance(data, dict):
-                        if any(key in data for key in ["title", "description", "priority", "deadline"]):
-                            if "id" not in data:
-                                data["id"] = uuid.uuid4().hex
-                            extracted.append(data)
-                        else:
-                            for value in data.values():
-                                extracted.extend(extract_todos_recursive(value, depth + 1))
-                    elif isinstance(data, list):
-                        for item in data:
-                            extracted.extend(extract_todos_recursive(item, depth + 1))
+                            if isinstance(data, dict):
+                                if any(key in data for key in ["title", "description", "priority", "deadline"]):
+                                    if "id" not in data:
+                                        data["id"] = uuid.uuid4().hex
+                                    extracted.append(data)
+                                else:
+                                    for value in data.values():
+                                        extracted.extend(extract_todos_recursive(value, depth + 1))
+                            elif isinstance(data, list):
+                                for item in data:
+                                    extracted.extend(extract_todos_recursive(item, depth + 1))
 
-                    return extracted
+                            return extracted
 
-                todos = extract_todos_recursive(todo_list)
-                logger.info("🔍 추출된 TODO 개수: %d", len(todos))
+                        todos = extract_todos_recursive(todo_list)
+                        logger.info("🔍 추출된 TODO 개수 (재귀): %d", len(todos))
+                else:
+                    logger.warning("⚠️ 예상치 못한 TODO 리스트 타입: %s", type(todo_list))
+                    todos = []
 
                 incremental_mode = getattr(self, "_last_analysis_incremental", False)
 

@@ -110,7 +110,7 @@ class ActionExtractor:
         }
         self.generic_request_markers = [
             # 한국어 요청 표현
-            "부탁", "요청", "주세요", "주시길", "해주세요", "해주세요.", "정리해줘",
+            "부탁", "주세요", "주시길", "해주세요", "해주세요.", "정리해줘",
             "확인해줘", "확인 부탁", "지원 부탁", "도와줘", "도움", "협조",
             "공유", "전달", "보내", "알려", "말씀", "드립니다", "드려요",
             "필요합니다", "필요해요", "바랍니다", "바래요", "감사하겠습니다",
@@ -286,6 +286,53 @@ class ActionExtractor:
         return [frag.strip() for frag in fragments if frag and frag.strip()]
 
     def _looks_like_request(self, lowered: str) -> bool:
+        """요청 표현인지 판단 (정보 공유/과거형/조건부 제안 제외)"""
+        # 정보 공유 표현 (액션 아님) - 강화
+        info_sharing_patterns = [
+            "공유드립니다", "공유합니다", "안내드립니다", "안내합니다",
+            "알려드립니다", "알립니다", "전달드립니다", "전달합니다",
+            "보고드립니다", "보고합니다", "말씀드립니다",
+            "공유 드립니다", "안내 드립니다", "알려 드립니다",
+            "업데이트드립니다", "업데이트 드립니다",
+            "for your information", "fyi", "just letting you know",
+            "update you", "inform you", "share with you",
+            # 일정 공유 패턴 추가
+            "오늘의 일정", "오늘의 계획", "오늘의 주요", "오늘의 목표",
+            "일정을 공유", "계획을 공유", "일정에 따라", "계획에 따라",
+            "다음과 같이 진행", "아래와 같이 진행", "다음과 같이 업무",
+            "현재 집중 작업", "현재 작업", "진행 상황 공유",
+            "작업 계획", "업무 계획", "일정 정리", "계획 정리"
+        ]
+        
+        # 과거형/완료형 표현 (액션 아님)
+        past_tense_patterns = [
+            "했습니다", "했어요", "했네요", "했음", "했다",
+            "완료했", "진행했", "처리했", "확인했", "검토했",
+            "보냈습니다", "전달했", "공유했", "작성했",
+            "completed", "finished", "done", "sent", "shared"
+        ]
+        
+        # 조건부 제안 표현 (액션 아님)
+        conditional_offer_patterns = [
+            "필요하시면", "필요하면", "원하시면", "원하면",
+            "궁금하시면", "궁금하면", "관심있으시면",
+            "언제든", "언제든지", "편하실 때", "시간되실 때",
+            "if you need", "if needed", "if you want", "anytime", "whenever"
+        ]
+        
+        # 정보 공유 표현이면 요청 아님
+        if any(pattern in lowered for pattern in info_sharing_patterns):
+            return False
+        
+        # 과거형 표현이면 요청 아님
+        if any(pattern in lowered for pattern in past_tense_patterns):
+            return False
+        
+        # 조건부 제안 표현이면 요청 아님
+        if any(pattern in lowered for pattern in conditional_offer_patterns):
+            return False
+        
+        # 요청 마커 체크
         return any(marker in lowered for marker in self.generic_request_markers)
 
     def _infer_action_type_from_sentence(self, lowered: str) -> str:
@@ -306,6 +353,12 @@ class ActionExtractor:
         context = self._extract_context_around_keyword(text, keyword)
         
         if not context:
+            return None
+        
+        # 문맥이 요청 표현인지 체크 (과거형/정보 공유 제외)
+        context_lower = context.lower()
+        if not self._looks_like_request(context_lower):
+            logger.debug(f"키워드 '{keyword}' 주변 문맥이 요청 표현이 아님: {context[:50]}...")
             return None
         
         # 액션 제목 생성
@@ -339,6 +392,12 @@ class ActionExtractor:
         context = self._extract_context_around_match(text, match_text)
         
         if not context:
+            return None
+        
+        # 문맥이 요청 표현인지 체크 (과거형/정보 공유 제외)
+        context_lower = context.lower()
+        if not self._looks_like_request(context_lower):
+            logger.debug(f"패턴 매칭 문맥이 요청 표현이 아님: {context[:50]}...")
             return None
         
         # 액션 제목 생성

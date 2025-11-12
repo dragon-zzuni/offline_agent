@@ -242,13 +242,29 @@ class MessageSummarizer:
             resp.raise_for_status()
             return resp.json()
 
-        try:
-            data = await asyncio.to_thread(_request)
-            logger.debug("[Summarizer][LLM] response=%s", json.dumps(data, ensure_ascii=False)[:500])
-            return data
-        except Exception as exc:
-            logger.warning("[Summarizer][LLM] request error: %s", exc)
-            return None
+        # Retry logic with exponential backoff for 429 errors
+        max_retries = 3
+        base_delay = 2  # seconds - Rate limit 발생 시 재시도 대기 시간
+        
+        for attempt in range(max_retries):
+            try:
+                data = await asyncio.to_thread(_request)
+                logger.debug("[Summarizer][LLM] response=%s", json.dumps(data, ensure_ascii=False)[:500])
+                return data
+            except Exception as exc:
+                error_str = str(exc)
+                
+                # Check if it's a 429 (Too Many Requests) error
+                if "429" in error_str and attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff: 5s, 10s, 20s
+                    logger.warning(f"[Summarizer][LLM] 429 Rate Limit - 재시도 {attempt + 1}/{max_retries} (대기: {delay}초)")
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.warning("[Summarizer][LLM] request error: %s", exc)
+                    return None
+        
+        return None
 
     async def summarize_message(self, content: str, sender: str = "", subject: str = "") -> MessageSummary:
         if self.is_available and self.chat_url:
@@ -265,7 +281,7 @@ class MessageSummarizer:
 
 발신자: {sender}
 제목: {subject}
-내용: {content[:2000]}  # 내용이 길면 앞부분만
+내용: {content[:2000]}
 
 다음 형식으로 분석해주세요:
 {{
@@ -277,9 +293,89 @@ class MessageSummarizer:
     "suggested_response": "권장 응답 내용 (선택사항)"
 }}
 
-분석 기준:
+## action_required 판단 기준 (매우 중요!)
+
+이 메시지가 **수신자(PM)에게 구체적인 행동을 요구하는지** 신중하게 판단하세요.
+
+### ✅ action_required = true (TODO 생성)
+
+**1. 명확한 요청 동사가 있는 경우**
+- "검토해 주세요", "확인 부탁드립니다", "피드백 주세요"
+- "참석해 주세요", "제출해 주세요", "승인 부탁드립니다"
+- "답변 부탁드립니다", "회신 부탁드립니다"
+
+**2. 미래 일정에 대한 참석/준비 요청**
+- "내일 미팅에 참석해 주세요"
+- "다음 주 발표 준비 부탁드립니다"
+- "금요일까지 보고서 제출 바랍니다"
+
+**3. 의사결정이나 승인 요청**
+- "이 안건에 대해 결정 부탁드립니다"
+- "예산 승인 요청드립니다"
+
+**4. 구체적인 작업 할당**
+- "이 태스크를 담당해 주세요"
+- "코드 리뷰 부탁드립니다"
+
+### ❌ action_required = false (TODO 생성 안 함)
+
+**1. 정보 공유 목적**
+- "공유드립니다", "안내드립니다", "알려드립니다"
+- "업데이트 드립니다", "보고드립니다"
+- "for your information", "FYI", "just letting you know"
+- **판단 기준**: 발신자가 일방적으로 정보를 전달하는 경우
+
+**2. 과거 사건 보고**
+- "미팅에서 논의했습니다", "작업을 완료했습니다"
+- "검토를 진행했습니다", "확인했습니다"
+- "completed", "finished", "done"
+- **판단 기준**: 이미 끝난 일에 대한 보고
+
+**3. 조건부 제안 (선택적)**
+- "필요하시면 말씀해 주세요", "궁금하시면 연락 주세요"
+- "원하시면 도와드리겠습니다", "언제든 말씀해 주세요"
+- "if you need", "if you want", "anytime"
+- **판단 기준**: 수신자가 원할 때만 행동하면 되는 경우
+
+**4. 단순 인사/확인**
+- "확인했습니다", "알겠습니다", "감사합니다"
+- "수고하셨습니다", "잘 부탁드립니다"
+- **판단 기준**: 구체적인 행동 요구가 없는 경우
+
+**5. 진행 상황 공유 (요청 없음)**
+- "현재 작업 중입니다", "진행 상황 공유드립니다"
+- "오늘의 일정을 공유합니다", "작업 계획을 안내드립니다"
+- **판단 기준**: 발신자의 계획/상태를 알리는 것뿐
+
+**6. 빈 내용이나 템플릿**
+- 표만 있고 내용이 없는 경우
+- "안녕하세요, [이름]입니다" 같은 인사만 있는 경우
+- **판단 기준**: 실질적인 내용이 없는 경우
+
+### 🔍 애매한 경우 판단 방법
+
+**질문 1**: 수신자가 이 메시지를 읽고 **반드시 해야 할 구체적인 행동**이 있는가?
+- YES → action_required = true
+- NO → action_required = false
+
+**질문 2**: 발신자가 **수신자의 응답이나 행동을 기대**하는가?
+- YES → action_required = true
+- NO → action_required = false
+
+**질문 3**: 이 메시지의 주요 목적이 **정보 전달**인가, **행동 요청**인가?
+- 정보 전달 → action_required = false
+- 행동 요청 → action_required = true
+
+### 📝 추가 판단 기준
+
+- **"요청:" 섹션 헤더**만 있고 실제 요청 내용이 없으면 → false
+- **과거형 + 정보 공유**가 함께 있으면 → false
+- **조건부 표현 + 선택적 제안**이면 → false
+- **미래 일정 + 명확한 요청**이면 → true
+
+## 기타 분석 기준
+
 - urgency_level: 긴급 키워드(긴급, urgent, asap, 즉시, 오늘까지, deadline)가 있으면 high
-- action_required: 구체적인 요청, 미팅, 보고서 제출 등이 있으면 true
 - sentiment: 긍정적/부정적/중립적 톤 분석
 """
         return prompt
@@ -380,8 +476,8 @@ class MessageSummarizer:
         if not messages:
             return []
 
-        # 동시 실행 상한 (리밋/속도 균형용)
-        CONCURRENCY = 5
+        # 동시 실행 상한 (리밋/속도 균형용) - Rate limit 발생 시 자동 재시도
+        CONCURRENCY = 3
         sem = asyncio.Semaphore(CONCURRENCY)
 
         results: List[MessageSummary] = [None] * len(messages)  # 입력 순서 유지용
@@ -401,6 +497,10 @@ class MessageSummarizer:
 
             try:
                 async with sem:
+                    # Rate limit 회피를 위한 요청 간 지연 (0.2초) - 429 발생 시 자동 재시도
+                    if i > 0:
+                        await asyncio.sleep(0.2)
+                    
                     s = await self.summarize_message(content, sender, subject)
                     # ✅ 요약 객체에 원본 메시지 ID 연결 (핵심)
                     s.original_id = m.get("msg_id") or s.original_id

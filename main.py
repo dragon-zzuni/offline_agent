@@ -611,50 +611,363 @@ class SmartAssistant:
 
         logger.info("🔍 메시지 분석 시작...")
 
+        # 0) TO/CC/BCC 중복 제거 (같은 이메일을 TO, CC, BCC로 받았을 때 TO만 유지)
+        logger.info("🔄 TO/CC/BCC 중복 제거 중...")
+        email_groups = {}  # (sender, subject, timestamp) -> [messages]
+        
+        for msg in self.collected_messages:
+            if msg.get("platform") == "email" or msg.get("type") == "email":
+                sender = msg.get("sender", "")
+                subject = msg.get("subject", "")
+                timestamp = msg.get("date") or msg.get("timestamp") or msg.get("datetime") or ""
+                
+                # 같은 발신자, 제목, 시간의 이메일을 그룹화
+                key = (sender, subject, timestamp)
+                if key not in email_groups:
+                    email_groups[key] = []
+                email_groups[key].append(msg)
+        
+        # TO > CC > BCC 우선순위로 중복 제거
+        deduplicated_messages = []
+        to_cc_bcc_removed = 0
+        
+        for key, msgs in email_groups.items():
+            if len(msgs) == 1:
+                deduplicated_messages.extend(msgs)
+            else:
+                # TO, CC, BCC로 분류
+                to_msgs = [m for m in msgs if m.get("recipient_type", "to").lower() == "to"]
+                cc_msgs = [m for m in msgs if m.get("recipient_type", "").lower() == "cc"]
+                bcc_msgs = [m for m in msgs if m.get("recipient_type", "").lower() == "bcc"]
+                
+                # TO가 있으면 TO만, 없으면 CC, 그것도 없으면 BCC
+                if to_msgs:
+                    deduplicated_messages.extend(to_msgs)
+                    to_cc_bcc_removed += len(cc_msgs) + len(bcc_msgs)
+                    if len(msgs) > 1:
+                        sender, subject, _ = key
+                        logger.debug(f"TO/CC/BCC 중복: {sender} - {subject[:30]} (TO {len(to_msgs)}개 유지, CC {len(cc_msgs)}개 + BCC {len(bcc_msgs)}개 제거)")
+                elif cc_msgs:
+                    deduplicated_messages.extend(cc_msgs)
+                    to_cc_bcc_removed += len(bcc_msgs)
+                else:
+                    deduplicated_messages.extend(bcc_msgs)
+        
+        # 메신저 메시지는 그대로 추가
+        for msg in self.collected_messages:
+            if msg.get("platform") != "email" and msg.get("type") != "email":
+                deduplicated_messages.append(msg)
+        
+        if to_cc_bcc_removed > 0:
+            logger.info(f"🔄 TO/CC/BCC 중복 제거: {to_cc_bcc_removed}개 제거 ({len(self.collected_messages)}개 → {len(deduplicated_messages)}개)")
+        
+        # 중복 제거된 메시지로 교체
+        self.collected_messages = deduplicated_messages
+
         # 1) 우선순위 분류
         logger.info("🎯 우선순위 분류 중...")
         self.ranked_messages = await self.priority_ranker.rank_messages(self.collected_messages)
 
-        # 2단계 TODO 생성 전략:
-        # 1단계: 키워드 기반으로 많은 TODO 생성 (빠름, ACTION_TOP_N)
-        # 2단계: LLM으로 상위 N개만 정제 (느림, SUMMARY_TOP_N)
-        SUMMARY_TOP_N = 70   # LLM 상세 분석 (비용/시간 고려)
-        ACTION_TOP_N = 500   # 키워드 기반 TODO 생성 (빠른 1차 필터링)
-        summary_targets = [m for (m, _) in self.ranked_messages][:SUMMARY_TOP_N]
-
-        # 2) 상위 N개 요약
-        logger.info(
-            "📝 우선순위 상위 %d개 메시지 상세 분석 중... (전체 %d건 수집 완료)",
-            len(summary_targets),
-            len(self.collected_messages),
+        # 2단계 TODO 생성 전략 (개선):
+        # 1단계: 키워드 기반으로 임시 TODO 생성 (빠름, 제한 없음)
+        # 2단계: 생성된 모든 임시 TODO의 원본 메시지를 LLM으로 분석
+        # 3단계: LLM이 action_required=true로 판단한 것만 최종 TODO로
+        
+        # 1) 키워드 기반 임시 TODO 생성 (제한 없음)
+        logger.info("⚡ 1단계: 키워드 기반 임시 TODO 생성 중...")
+        logger.info("   → 모든 메시지에서 키워드 패턴으로 TODO 후보 추출 (빠르지만 정확도 낮음)")
+        user_email = (self.user_profile or {}).get("email_address", "pm.1@quickchat.dev")
+        all_messages = [m for (m, _) in self.ranked_messages]
+        
+        # 1-1) 사전 필터링: 너무 짧거나 단순 인사 메시지 제외
+        filtered_messages = []
+        too_short_count = 0
+        greeting_count = 0
+        simple_update_count = 0
+        
+        # 단순 인사 패턴
+        greeting_only_patterns = [
+            "안녕하세요", "안녕하십니까", "수고하세요", "수고하십시오", "감사합니다", "고맙습니다",
+            "hello", "hi there", "good morning", "good afternoon", "good evening",
+            "좋은 하루 되세요", "좋은 하루", "화이팅", "파이팅"
+        ]
+        
+        # 간단 업데이트 패턴 (의미 없는 상태 공유) - 제목이나 내용에 포함
+        simple_update_patterns = [
+            "간단 업데이트", "업무 공유", "현재 작업 상황", "작업 상황 공유", "오늘의 일정",
+            "현재 집중 작업", "작업자:", "업데이트:", "진행 상황", "상황 공유",
+            "simple update", "status update", "quick update", "daily update", "work update"
+        ]
+        
+        for msg in all_messages:
+            content = (msg.get("content") or msg.get("body") or "").strip()
+            subject = (msg.get("subject") or "").strip()
+            combined = f"{subject} {content}".lower()
+            
+            # 너무 짧은 메시지 (15자 미만)
+            if len(content) < 15:
+                too_short_count += 1
+                continue
+            
+            # 단순 인사만 있는 메시지 (40자 미만)
+            if len(content) < 40:
+                content_clean = content.lower().strip().replace("!", "").replace(".", "").replace("~", "").replace(",", "").strip()
+                is_greeting_only = any(pattern in content_clean for pattern in [p.lower() for p in greeting_only_patterns])
+                
+                # 구체적인 내용이 없으면 제외
+                if is_greeting_only:
+                    greeting_count += 1
+                    logger.debug(f"[1차 필터링] 단순 인사 제외: {content[:30]}")
+                    continue
+            
+            # 간단 업데이트 메시지 (200자 미만이면서 간단 업데이트 패턴 포함하고 액션 키워드 없음)
+            if len(content) < 200:
+                has_simple_update = any(pattern in combined for pattern in simple_update_patterns)
+                
+                if has_simple_update:
+                    # 구체적인 액션 키워드가 있는지 확인
+                    action_keywords = [
+                        "요청", "부탁", "확인해", "검토해", "제출", "보고서", "회의", "미팅", "마감", "완료해",
+                        "필요", "해주", "드립니다", "바랍니다",
+                        "request", "please", "check", "review", "submit", "report", "meeting", "deadline", "need"
+                    ]
+                    has_action = any(keyword in combined for keyword in action_keywords)
+                    
+                    if not has_action:
+                        simple_update_count += 1
+                        logger.debug(f"[1차 필터링] 간단 업데이트 제외: {subject[:30]} - {content[:50]}")
+                        continue
+            
+            filtered_messages.append(msg)
+        
+        if too_short_count > 0 or greeting_count > 0 or simple_update_count > 0:
+            logger.info(f"🔍 1차 필터링: 짧은 메시지 {too_short_count}개, 단순 인사 {greeting_count}개, 간단 업데이트 {simple_update_count}개 제외")
+            logger.info(f"   → {len(all_messages)}개 → {len(filtered_messages)}개 메시지로 TODO 후보 추출")
+        
+        # 모든 메시지에서 키워드 기반 액션 추출
+        temp_actions = await self.action_extractor.batch_extract_actions(
+            filtered_messages,
+            user_email=user_email,
         )
-        self.summaries = await self.summarizer.batch_summarize(summary_targets)
-
+        logger.info(f"⚡ 1단계 완료: 키워드 기반 임시 TODO {len(temp_actions)}개 생성")
+        
+        # 1-0) 생성된 TODO 중 의미 없는 것만 필터링 (제목 길이는 상관없음)
+        filtered_actions = []
+        meaningless_count = 0
+        
+        for action in temp_actions:
+            description = (action.description if hasattr(action, 'description') else action.get('description', '')).strip()
+            
+            # description이 비어있거나 너무 짧으면 (10자 미만) 제외
+            if len(description) < 10:
+                meaningless_count += 1
+                title = (action.title if hasattr(action, 'title') else action.get('title', ''))
+                logger.debug(f"[TODO 필터링] description 너무 짧음: {title[:50]}")
+                continue
+            
+            # 통과한 TODO 추가
+            filtered_actions.append(action)
+        
+        if meaningless_count > 0:
+            logger.info(f"🔍 TODO 필터링: 의미 없음 {meaningless_count}개 제외 ({len(temp_actions)}개 → {len(filtered_actions)}개)")
+        
+        temp_actions = filtered_actions
+        
+        # 1-1) 임시 TODO 중복 제거 (내용 기반, 90% 이상 유사도)
+        if temp_actions:
+            def _calculate_similarity(text1: str, text2: str) -> float:
+                """두 텍스트의 유사도 계산 (0.0 ~ 1.0)"""
+                if not text1 or not text2:
+                    return 0.0
+                
+                # 간단한 단어 기반 유사도 (Jaccard similarity)
+                words1 = set(text1.lower().split())
+                words2 = set(text2.lower().split())
+                
+                if not words1 or not words2:
+                    return 0.0
+                
+                intersection = words1 & words2
+                union = words1 | words2
+                
+                return len(intersection) / len(union) if union else 0.0
+            
+            # 같은 source_message_id로 그룹화
+            from collections import defaultdict
+            message_groups = defaultdict(list)
+            for action in temp_actions:
+                msg_id = action.source_message_id if hasattr(action, 'source_message_id') else None
+                if msg_id:
+                    message_groups[msg_id].append(action)
+            
+            # 각 그룹에서 중복 제거
+            filtered_actions = []
+            duplicate_count = 0
+            
+            for msg_id, actions in message_groups.items():
+                if len(actions) == 1:
+                    # 그룹에 액션이 1개면 그대로 추가
+                    filtered_actions.extend(actions)
+                else:
+                    # 여러 개면 내용 유사도 기반 중복 제거 (90% 이상)
+                    kept_actions = []
+                    
+                    for action in actions:
+                        is_duplicate = False
+                        action_desc = action.description if hasattr(action, 'description') else ""
+                        
+                        # 이미 유지하기로 한 액션들과 비교
+                        for kept in kept_actions:
+                            kept_desc = kept.description if hasattr(kept, 'description') else ""
+                            similarity = _calculate_similarity(action_desc, kept_desc)
+                            
+                            # 유사도 90% 이상이면 중복으로 간주
+                            if similarity >= 0.9:
+                                is_duplicate = True
+                                # 유형 우선순위: meeting > deadline > review > task > response
+                                type_priority = {
+                                    "meeting": 5,
+                                    "deadline": 4,
+                                    "review": 3,
+                                    "task": 2,
+                                    "response": 1
+                                }
+                                
+                                current_type = action.action_type if hasattr(action, 'action_type') else ""
+                                kept_type = kept.action_type if hasattr(kept, 'action_type') else ""
+                                
+                                current_type_priority = type_priority.get(current_type, 0)
+                                kept_type_priority = type_priority.get(kept_type, 0)
+                                
+                                # 현재 액션이 더 높은 우선순위 유형이면 교체
+                                if current_type_priority > kept_type_priority:
+                                    kept_actions.remove(kept)
+                                    kept_actions.append(action)
+                                    logger.debug(f"[임시TODO 중복제거] {kept_type} → {current_type} 교체 (유사도: {similarity:.2f})")
+                                else:
+                                    logger.debug(f"[임시TODO 중복제거] {current_type} 제거 (유사도: {similarity:.2f}, 유지: {kept_type})")
+                                
+                                duplicate_count += 1
+                                break
+                        
+                        if not is_duplicate:
+                            kept_actions.append(action)
+                    
+                    filtered_actions.extend(kept_actions)
+            
+            # 메시지 ID가 없는 액션들도 추가
+            for action in temp_actions:
+                msg_id = action.source_message_id if hasattr(action, 'source_message_id') else None
+                if not msg_id:
+                    filtered_actions.append(action)
+            
+            if duplicate_count > 0:
+                logger.info(f"🔄 임시 TODO 중복 제거: {duplicate_count}개 제거 ({len(temp_actions)}개 → {len(filtered_actions)}개)")
+            
+            temp_actions = filtered_actions
+        
+        # 2) 임시 TODO가 생성된 메시지만 LLM 분석
+        # 임시 TODO의 source_message_id로 원본 메시지 찾기
+        temp_action_msg_ids = set()
+        for action in temp_actions:
+            # ActionItem은 dataclass이므로 속성으로 접근
+            msg_id = action.source_message_id if hasattr(action, 'source_message_id') else None
+            if msg_id:
+                temp_action_msg_ids.add(msg_id)
+        
+        # 원본 메시지 찾기
+        msg_by_id = {m.get("msg_id"): m for m in all_messages}
+        all_messages_to_analyze = [msg_by_id[msg_id] for msg_id in temp_action_msg_ids if msg_id in msg_by_id]
+        
+        # 정보 공유 필터링 제거: 모든 메시지를 LLM이 판단하도록 변경
+        # - 배치 처리 + Rate Limit 회피가 구현되어 있음
+        # - LLM이 action_required를 정확하게 판단
+        logger.info(f"📝 {len(all_messages_to_analyze)}개 메시지 LLM 분석 준비 (필터링 없음)")
+        
+        # Rate Limit 방지: 배치로 나누어 분석
+        BATCH_SIZE = 50  # 배치당 메시지 수 (50개씩)
+        
+        # 우선순위가 높은 메시지 우선 (ranked_messages 순서 활용)
+        # 전체 메시지를 우선순위 순으로 정렬
+        ranked_msg_ids = [m.get("msg_id") for m, _ in self.ranked_messages]
+        messages_to_analyze = []
+        
+        # 우선순위 순서대로 추가
+        for msg_id in ranked_msg_ids:
+            msg = next((m for m in all_messages_to_analyze if m.get("msg_id") == msg_id), None)
+            if msg:
+                messages_to_analyze.append(msg)
+        
+        # ranked_messages에 없는 메시지도 추가
+        for msg in all_messages_to_analyze:
+            if msg not in messages_to_analyze:
+                messages_to_analyze.append(msg)
+        
+        total_to_analyze = len(messages_to_analyze)
+        logger.info(f"📝 2단계: LLM으로 {total_to_analyze}개 메시지 배치 분석 시작...")
+        logger.info(f"   → 임시 TODO가 생성된 {len(temp_action_msg_ids)}개 메시지 중 {total_to_analyze}개 분석 (배치 크기: {BATCH_SIZE}개)")
+        
+        # 배치로 나누어 분석
+        all_summaries = []
+        num_batches = (total_to_analyze + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * BATCH_SIZE
+            end_idx = min(start_idx + BATCH_SIZE, total_to_analyze)
+            batch_messages = messages_to_analyze[start_idx:end_idx]
+            
+            logger.info(f"   📦 배치 {batch_idx + 1}/{num_batches}: {len(batch_messages)}개 메시지 분석 중...")
+            
+            # 배치 분석
+            batch_summaries = await self.summarizer.batch_summarize(batch_messages)
+            all_summaries.extend(batch_summaries)
+            
+            logger.info(f"   ✅ 배치 {batch_idx + 1}/{num_batches} 완료 (누적: {len(all_summaries)}/{total_to_analyze}개)")
+        
+        self.summaries = all_summaries
+        logger.info(f"✅ 전체 LLM 분석 완료: {len(self.summaries)}개 메시지")
+        
         # msg_id → summary 맵
         summary_by_id = {}
-        for m, s in zip(summary_targets, self.summaries):
+        for m, s in zip(messages_to_analyze, self.summaries):
             if s and not getattr(s, "original_id", None):
                 s.original_id = m.get("msg_id")
             summary_by_id[m["msg_id"]] = s
+        
+        # 3) LLM이 action_required=true로 판단한 메시지의 액션만 유지
+        filtered_actions = []
+        filtered_out_count = 0
+        
+        for action in temp_actions:
+            # ActionItem은 dataclass이므로 속성으로 접근
+            msg_id = action.source_message_id if hasattr(action, 'source_message_id') else None
+            summary = summary_by_id.get(msg_id)
+            
+            if summary and hasattr(summary, "action_required"):
+                if summary.action_required:
+                    filtered_actions.append(action)
+                else:
+                    filtered_out_count += 1
+                    action_title = action.title if hasattr(action, 'title') else 'Unknown'
+                    logger.debug(f"LLM 필터링: {action_title} (action_required=false)")
+            else:
+                # LLM 분석 실패 시 키워드 기반 결과 유지
+                filtered_actions.append(action)
+        
+        logger.info(f"✅ 3단계: LLM 필터링 완료")
+        logger.info(f"   → 키워드 기반 {len(temp_actions)}개 → LLM 검증 후 {len(filtered_actions)}개 최종 선정 ({filtered_out_count}개 제외)")
+        logger.info(f"   → LLM 미분석 메시지의 TODO는 키워드 기반 결과 유지 ({len(temp_action_msg_ids) - len(messages_to_analyze)}개 메시지)")
+        self.extracted_actions = filtered_actions
 
-        # 3) 액션 추출 (사용자 이메일 전달)
-        logger.info("⚡ 액션 추출 중...")
-        user_email = (self.user_profile or {}).get("email_address", "pm.1@quickchat.dev")
-        action_targets = [m for (m, _) in self.ranked_messages][:ACTION_TOP_N]
-        if len(action_targets) > len(summary_targets):
-            logger.info("⚡ 액션 추출 대상 확대: %d개 메시지", len(action_targets))
-        actions = await self.action_extractor.batch_extract_actions(
-            action_targets,
-            user_email=user_email,
-        )
-        self.extracted_actions = actions
-
+        # filtered_actions를 사용해야 함 (LLM 필터링 후)
         actions_by_id = {}
-        for a in actions:
+        for a in filtered_actions:  # actions가 아니라 filtered_actions 사용
             src = getattr(a, "source_message_id", None) or (a.get("source_message_id") if isinstance(a, dict) else None)
             if not src:
                 continue
             actions_by_id.setdefault(src, []).append(a)
+
+        logger.info(f"🔍 [DEBUG] actions_by_id 생성: {len(actions_by_id)}개 메시지에 액션 있음")
 
         # 4) 결과 병합 (전체 랭킹 순서 보존)
         results = []
@@ -713,6 +1026,56 @@ class SmartAssistant:
     async def generate_todo_list(self, analysis_results: List[Dict]) -> Dict:
         """TODO 리스트 생성"""
         logger.info("📋 TODO 리스트 생성 중...")
+        logger.info(f"🔍 [DEBUG] analysis_results 개수: {len(analysis_results or [])}")
+
+        # 1단계: TO/CC/BCC 중복 제거 (같은 이메일을 TO, CC, BCC로 받았을 때 TO만 유지)
+        email_groups = {}  # email_id -> [results]
+        for result in analysis_results or []:
+            message = result.get("message", {})
+            if message.get("platform") == "email":
+                # 이메일의 고유 ID (thread_id나 subject+sender 조합)
+                email_id = message.get("thread_id") or f"{message.get('subject')}_{message.get('sender')}"
+                if email_id:
+                    if email_id not in email_groups:
+                        email_groups[email_id] = []
+                    email_groups[email_id].append(result)
+        
+        # TO > CC > BCC 우선순위로 중복 제거
+        filtered_results = []
+        to_cc_bcc_removed = 0
+        
+        for email_id, results in email_groups.items():
+            if len(results) == 1:
+                filtered_results.extend(results)
+            else:
+                # TO, CC, BCC로 분류
+                to_results = [r for r in results if r.get("message", {}).get("recipient_type", "to").lower() == "to"]
+                cc_results = [r for r in results if r.get("message", {}).get("recipient_type", "").lower() == "cc"]
+                bcc_results = [r for r in results if r.get("message", {}).get("recipient_type", "").lower() == "bcc"]
+                
+                # TO가 있으면 TO만, 없으면 CC, 그것도 없으면 BCC
+                if to_results:
+                    filtered_results.extend(to_results)
+                    to_cc_bcc_removed += len(cc_results) + len(bcc_results)
+                    if cc_results or bcc_results:
+                        logger.debug(f"TO/CC/BCC 중복 제거: {email_id[:50]} - TO {len(to_results)}개 유지, CC {len(cc_results)}개 + BCC {len(bcc_results)}개 제거")
+                elif cc_results:
+                    filtered_results.extend(cc_results)
+                    to_cc_bcc_removed += len(bcc_results)
+                else:
+                    filtered_results.extend(bcc_results)
+        
+        # 메신저 메시지는 그대로 추가
+        for result in analysis_results or []:
+            message = result.get("message", {})
+            if message.get("platform") != "email":
+                filtered_results.append(result)
+        
+        if to_cc_bcc_removed > 0:
+            logger.info(f"🔄 TO/CC/BCC 중복 제거: {to_cc_bcc_removed}개 제거 ({len(analysis_results)}개 → {len(filtered_results)}개)")
+        
+        # 필터링된 결과로 교체
+        analysis_results = filtered_results
 
         todo_items: List[Dict] = []
         high_priority_count = 0
@@ -733,7 +1096,12 @@ class SmartAssistant:
             except Exception:
                 return datetime.max.replace(tzinfo=timezone.utc)
 
+        total_actions = 0
         for result in analysis_results or []:
+            actions_count = len(result.get('actions', []))
+            total_actions += actions_count
+            if actions_count > 0:
+                logger.debug(f"🔍 [DEBUG] result actions: {actions_count}")
             pr = (result.get("priority") or {})
             priority_level = pr.get("priority_level", "low")
 
@@ -750,11 +1118,15 @@ class SmartAssistant:
                 # 원본 메시지에서 recipient_type 가져오기
                 source_msg = result.get("message") or {}
                 recipient_type = source_msg.get("recipient_type", "to")
+                platform = source_msg.get("platform", "")
                 
                 # 소스 타입 결정 (메일/메시지)
-                source_type = "메일" if source_msg.get("platform") == "email" else "메시지"
+                source_type = "메일" if platform == "email" else "메시지"
                 
-                if recipient_type != "to":
+                # 이메일의 경우에만 TO/CC/BCC 필터링 적용
+                # 메신저 메시지는 recipient_type이 없거나 다른 값이므로 필터링하지 않음
+                if platform == "email" and recipient_type != "to":
+                    logger.debug(f"🔍 [DEBUG] 이메일 CC/BCC 필터링: recipient_type={recipient_type}")
                     continue
                 
                 # 페르소나 이름 결정: 메시지의 주 수신자(TO)를 기준으로 설정
@@ -821,6 +1193,97 @@ class SmartAssistant:
 
         # ❹ 정렬: 우선순위 내림차순, 마감 오름차순
         todo_items.sort(key=lambda x: (-x["_priority_val"], x["_deadline_dt"]))
+        
+        # ❹-0 중복 제거: 같은 메시지에서 생성된 TODO 중 내용이 유사한 것 제거
+        if todo_items:
+            def _calculate_similarity(text1: str, text2: str) -> float:
+                """두 텍스트의 유사도 계산 (0.0 ~ 1.0)"""
+                if not text1 or not text2:
+                    return 0.0
+                
+                # 간단한 단어 기반 유사도 (Jaccard similarity)
+                words1 = set(text1.lower().split())
+                words2 = set(text2.lower().split())
+                
+                if not words1 or not words2:
+                    return 0.0
+                
+                intersection = words1 & words2
+                union = words1 | words2
+                
+                return len(intersection) / len(union) if union else 0.0
+            
+            # 같은 source_message_id로 그룹화
+            from collections import defaultdict
+            message_groups = defaultdict(list)
+            for todo in todo_items:
+                msg_id = todo.get("source_message", {}).get("id")
+                if msg_id:
+                    message_groups[msg_id].append(todo)
+            
+            # 각 그룹에서 중복 제거
+            filtered_todos = []
+            duplicate_count = 0
+            
+            for msg_id, todos in message_groups.items():
+                if len(todos) == 1:
+                    # 그룹에 TODO가 1개면 그대로 추가
+                    filtered_todos.extend(todos)
+                else:
+                    # 여러 개면 내용 유사도 기반 중복 제거
+                    kept_todos = []
+                    
+                    for todo in todos:
+                        is_duplicate = False
+                        todo_desc = todo.get("description", "")
+                        
+                        # 이미 유지하기로 한 TODO들과 비교
+                        for kept in kept_todos:
+                            kept_desc = kept.get("description", "")
+                            similarity = _calculate_similarity(todo_desc, kept_desc)
+                            
+                            # 유사도 70% 이상이면 중복으로 간주
+                            if similarity >= 0.7:
+                                is_duplicate = True
+                                # 유형 우선순위: meeting > deadline > review > task > response
+                                type_priority = {
+                                    "meeting": 5,
+                                    "deadline": 4,
+                                    "review": 3,
+                                    "task": 2,
+                                    "response": 1
+                                }
+                                
+                                current_type_priority = type_priority.get(todo.get("type"), 0)
+                                kept_type_priority = type_priority.get(kept.get("type"), 0)
+                                
+                                # 현재 TODO가 더 높은 우선순위 유형이면 교체
+                                if current_type_priority > kept_type_priority:
+                                    kept_todos.remove(kept)
+                                    kept_todos.append(todo)
+                                    logger.info(f"[중복제거] {kept.get('type')} → {todo.get('type')} 교체 (유사도: {similarity:.2f})")
+                                else:
+                                    logger.info(f"[중복제거] {todo.get('type')} 제거 (유사도: {similarity:.2f}, 유지: {kept.get('type')})")
+                                
+                                duplicate_count += 1
+                                break
+                        
+                        if not is_duplicate:
+                            kept_todos.append(todo)
+                    
+                    filtered_todos.extend(kept_todos)
+            
+            # 메시지 ID가 없는 TODO들도 추가
+            for todo in todo_items:
+                if not todo.get("source_message", {}).get("id"):
+                    filtered_todos.append(todo)
+            
+            if duplicate_count > 0:
+                logger.info(f"🔄 중복 TODO {duplicate_count}개 제거 ({len(todo_items)}개 → {len(filtered_todos)}개)")
+            
+            todo_items = filtered_todos
+            # 다시 정렬
+            todo_items.sort(key=lambda x: (-x["_priority_val"], x["_deadline_dt"]))
 
         # ❹-1 우선순위 재보정(편중 완화)
         if todo_items:
@@ -908,6 +1371,7 @@ class SmartAssistant:
             },
             "items": todo_items,
         }
+        logger.info(f"🔍 [DEBUG] 전체 actions: {total_actions}개, 최종 TODO: {len(todo_items)}개")
         return todo_list
         
     async def cleanup(self):

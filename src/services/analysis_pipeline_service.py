@@ -277,14 +277,26 @@ class AnalysisPipelineService:
         logger.debug(f"우선순위 분류 완료: {len(ranked)}개")
         return ranked
     
+
     async def _summarize_messages(
         self,
         messages: List[Dict[str, Any]]
     ) -> List[Any]:
-        """메시지 요약"""
-        logger.info(f"📝 상위 {len(messages)}개 메시지 상세 분석 중...")
+        """메시지 요약 (모든 메시지를 LLM이 판단)
+        
+        이전에는 정보 공유 메시지를 사전 필터링했지만,
+        배치 처리 + Rate Limit 회피가 구현되어 있으므로
+        모든 메시지를 LLM에게 판단시키는 것이 더 정확합니다.
+        """
+        logger.info(f"📝 {len(messages)}개 메시지 LLM 분석 시작 (배치 처리)...")
+        
+        # 모든 메시지를 LLM에게 분석시킴
+        # - 배치 40개씩 처리
+        # - Rate limit 회피 (0.2초 지연 + 자동 재시도)
+        # - LLM이 action_required를 정확하게 판단
         summaries = await self._summarizer.batch_summarize(messages)
-        logger.debug(f"메시지 요약 완료: {len(summaries)}개")
+        
+        logger.info(f"✅ 메시지 요약 완료: {len(summaries)}개")
         return summaries
     
     async def _extract_actions(
@@ -371,6 +383,7 @@ class AnalysisPipelineService:
         total_actions = 0
         created_count = 0
         prevented_count = 0
+        to_cc_duplicates_removed = 0
         
         def _parse_deadline(d: str | None) -> datetime:
             if not d:
@@ -380,7 +393,50 @@ class AnalysisPipelineService:
             except Exception:
                 return datetime.max.replace(tzinfo=timezone.utc)
         
+        # 1단계: TO/CC 중복 제거를 위한 메시지 그룹화
+        # 같은 이메일을 TO와 CC로 받았을 때, TO만 유지
+        message_groups = {}  # email_id -> [results]
+        
         for result in analysis_results:
+            message = result.get("message", {})
+            email_id = message.get("email_id")  # 이메일 고유 ID
+            
+            if email_id:
+                if email_id not in message_groups:
+                    message_groups[email_id] = []
+                message_groups[email_id].append(result)
+        
+        # TO/CC 중복 제거: 같은 email_id에 TO와 CC가 있으면 TO만 유지
+        filtered_results = []
+        for email_id, results in message_groups.items():
+            if len(results) == 1:
+                # 중복 없음
+                filtered_results.extend(results)
+            else:
+                # 중복 있음: TO 우선
+                to_results = [r for r in results if (r.get("message", {}).get("recipient_type") or "to").lower() == "to"]
+                cc_results = [r for r in results if (r.get("message", {}).get("recipient_type") or "to").lower() == "cc"]
+                
+                if to_results:
+                    # TO가 있으면 TO만 유지
+                    filtered_results.extend(to_results)
+                    to_cc_duplicates_removed += len(cc_results)
+                    if cc_results:
+                        logger.debug(f"TO/CC 중복 제거: email_id={email_id}, TO={len(to_results)}개 유지, CC={len(cc_results)}개 제거")
+                else:
+                    # TO가 없으면 CC 유지
+                    filtered_results.extend(cc_results)
+        
+        # email_id가 없는 메시지 (채팅 등)도 추가
+        for result in analysis_results:
+            message = result.get("message", {})
+            if not message.get("email_id"):
+                filtered_results.append(result)
+        
+        logger.info(f"TO/CC 중복 제거: {to_cc_duplicates_removed}개 CC 메시지 제거")
+        
+        # 2단계: TODO 생성
+        for result in filtered_results:
             actions = result.get("actions") or []
             priority_obj = result.get("priority") or {}
             priority_level = (
@@ -396,9 +452,6 @@ class AnalysisPipelineService:
             source_type = "메일" if message.get("platform") == "email" else "메시지"
             
             for action in actions:
-                if recipient_type != "to":
-                    continue
-
                 total_actions += 1
                 
                 # 액션에서 정보 추출
@@ -474,6 +527,7 @@ class AnalysisPipelineService:
         # 통계 업데이트
         self._stats["todos_created"] = created_count
         self._stats["todos_prevented"] = prevented_count
+        self._stats["to_cc_duplicates_removed"] = to_cc_duplicates_removed
         
         # 추출률 계산
         if total_actions > 0:
@@ -482,7 +536,8 @@ class AnalysisPipelineService:
             
             logger.info(
                 f"📋 TODO 리스트 생성 완료: {created_count}개 생성, "
-                f"{prevented_count}개 중복 방지 (추출률: {extraction_rate:.1f}%)"
+                f"{prevented_count}개 중복 방지, {to_cc_duplicates_removed}개 TO/CC 중복 제거 "
+                f"(추출률: {extraction_rate:.1f}%)"
             )
             
             # 추출률이 너무 낮으면 경고

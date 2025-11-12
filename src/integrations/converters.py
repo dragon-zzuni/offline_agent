@@ -104,6 +104,7 @@ def convert_email_to_internal_format(
     # 내부 포맷으로 변환
     return {
         "msg_id": f"email_{email.get('id')}",
+        "email_id": email.get("id"),  # 필터링용 (최상위 레벨)
         "sender": sender_name,
         "sender_email": sender_email or None,
         "sender_handle": sender_persona.get("chat_handle"),
