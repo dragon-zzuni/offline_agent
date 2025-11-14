@@ -8,6 +8,7 @@
 import asyncio
 import logging
 import threading
+import sqlite3
 from typing import List, Dict, Optional, Callable
 from queue import Queue, PriorityQueue
 from dataclasses import dataclass
@@ -49,6 +50,8 @@ class AsyncProjectTagService:
         # VDOS DB와 같은 경로의 todos_cache.db 사용
         self.db_path = self._get_vdos_todos_db_path()
         logger.info(f"[AsyncProjectTag] DB 경로: {self.db_path}")
+        if self.db_path:
+            self._ensure_todo_table(self.db_path)
         
         # 프로젝트 태그 영구 캐시 서비스 초기화
         self.cache_service = None
@@ -329,13 +332,13 @@ class AsyncProjectTagService:
     
     def _save_project_to_db_thread_safe(self, todo_id: str, project: str):
         """스레드 안전한 방식으로 프로젝트 태그를 DB에 저장 (todos_cache.db + 캐시 DB)"""
-        import sqlite3
         from datetime import datetime
         import os
         
         # 1. todos_cache.db에 저장
         try:
             conn = sqlite3.connect(self.db_path)
+            self._ensure_todo_table(self.db_path, connection=conn)
             cur = conn.cursor()
             
             # 프로젝트 태그 업데이트 (컬럼명: project_tag)
@@ -455,6 +458,44 @@ class AsyncProjectTagService:
             except:
                 break
         logger.info("🧹 프로젝트 태그 분석 큐 비움")
+
+    def _ensure_todo_table(self, db_path: str, connection: Optional[sqlite3.Connection] = None) -> None:
+        """필요 시 todos 테이블 생성 (다른 스레드에서도 사용)."""
+        conn_provided = connection is not None
+        conn = connection or sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS todos (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                description TEXT,
+                priority TEXT,
+                deadline TEXT,
+                deadline_ts TEXT,
+                requester TEXT,
+                type TEXT,
+                status TEXT DEFAULT 'pending',
+                source_message TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                snooze_until TEXT,
+                is_top3 INTEGER DEFAULT 0,
+                draft_subject TEXT,
+                draft_body TEXT,
+                evidence TEXT,
+                project_tag TEXT DEFAULT '미분류',
+                deadline_confidence TEXT,
+                recipient_type TEXT DEFAULT 'to',
+                source_type TEXT DEFAULT '메시지',
+                persona_name TEXT,
+                project_full_name TEXT
+            )
+            """
+        )
+        conn.commit()
+        if not conn_provided:
+            conn.close()
 
 
 # 전역 인스턴스 (싱글톤 패턴)

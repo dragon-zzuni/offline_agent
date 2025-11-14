@@ -8,6 +8,7 @@ import re
 import logging
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
+from utils.project_fullname_mapper import generate_project_code
 
 logger = logging.getLogger(__name__)
 
@@ -195,30 +196,7 @@ class ProjectTagService:
     
     def _extract_project_code_from_name(self, project_name: str) -> str:
         """프로젝트 이름에서 실제 프로젝트 코드 추출 (동적 생성)"""
-        # 기본 약어 생성 로직 사용 (하드코딩 제거)
-        return self._generate_project_code(project_name)
-    
-    def _generate_project_code(self, project_name: str) -> str:
-        """프로젝트 이름에서 약어 생성"""
-        # 영어 단어들 추출
-        import re
-        english_words = re.findall(r'[A-Za-z]+', project_name)
-        
-        if len(english_words) >= 2:
-            # 첫 두 단어의 첫 글자
-            return ''.join(word[0].upper() for word in english_words[:2])
-        elif len(english_words) == 1:
-            # 한 단어면 첫 4글자
-            return english_words[0][:4].upper()
-        else:
-            # 영어가 없으면 한글에서 추출
-            korean_words = re.findall(r'[가-힣]+', project_name)
-            if korean_words:
-                # 첫 번째 한글 단어의 첫 2글자
-                return korean_words[0][:2].upper()
-            else:
-                # 그것도 없으면 숫자 기반
-                return f"P{hash(project_name) % 1000:03d}"
+        return generate_project_code(project_name)
     
     def _get_project_color(self, project_code: str) -> str:
         """프로젝트 코드에 따른 색상 반환 (동적 생성)"""
@@ -1344,7 +1322,7 @@ class ProjectTagService:
         Returns:
             생성된 프로젝트 코드
         """
-        project_code = self._generate_project_code(project_name)
+        project_code = generate_project_code(project_name)
         
         # 이미 존재하는 코드면 숫자 추가
         original_code = project_code

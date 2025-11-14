@@ -8,6 +8,7 @@ import logging
 import sys
 import os
 import json
+import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
@@ -38,6 +39,40 @@ DEFAULT_DATASET_ROOT = None  # VirtualOffice 전용
 from nlp.summarize import MessageSummarizer
 from nlp.priority_ranker import PriorityRanker
 from nlp.action_extractor import ActionExtractor
+
+def _ensure_todo_table(conn: sqlite3.Connection) -> None:
+    """todos_cache.db에 todos 테이블이 없으면 생성한다."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS todos (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            description TEXT,
+            priority TEXT,
+            deadline TEXT,
+            deadline_ts TEXT,
+            requester TEXT,
+            type TEXT,
+            status TEXT DEFAULT 'pending',
+            source_message TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            snooze_until TEXT,
+            is_top3 INTEGER DEFAULT 0,
+            draft_subject TEXT,
+            draft_body TEXT,
+            evidence TEXT,
+            project_tag TEXT DEFAULT '미분류',
+            deadline_confidence TEXT,
+            recipient_type TEXT DEFAULT 'to',
+            source_type TEXT DEFAULT '메시지',
+            persona_name TEXT,
+            project_full_name TEXT
+        )
+        """
+    )
+    conn.commit()
 
 
 
@@ -1011,6 +1046,7 @@ class SmartAssistant:
                         
                         conn = sqlite3.connect(str(db_path))
                         cur = conn.cursor()
+                        _ensure_todo_table(conn)
                         
                         for todo in batch_todos:
                             cur.execute("""

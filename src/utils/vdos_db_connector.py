@@ -65,12 +65,19 @@ class VDOSDBConnector:
             # 현재 작업 디렉토리 기준으로 여러 경로 시도
             current_dir = Path.cwd()
             possible_paths = [
+                current_dir / "virtualoffice" / "src" / "virtualoffice" / "vdossnapshot.db",
                 current_dir / "virtualoffice" / "src" / "virtualoffice" / "vdos.db",
+                current_dir / ".." / "virtualoffice" / "src" / "virtualoffice" / "vdossnapshot.db",
                 current_dir / ".." / "virtualoffice" / "src" / "virtualoffice" / "vdos.db",
+                current_dir / ".." / ".." / "virtualoffice" / "src" / "virtualoffice" / "vdossnapshot.db",
                 current_dir / ".." / ".." / "virtualoffice" / "src" / "virtualoffice" / "vdos.db",
+                Path("virtualoffice/src/virtualoffice/vdossnapshot.db"),
                 Path("virtualoffice/src/virtualoffice/vdos.db"),
+                Path("../virtualoffice/src/virtualoffice/vdossnapshot.db"),
                 Path("../virtualoffice/src/virtualoffice/vdos.db"),
+                Path("../../virtualoffice/src/virtualoffice/vdossnapshot.db"),
                 Path("../../virtualoffice/src/virtualoffice/vdos.db"),
+                Path("virtualoffice/vdossnapshot.db"),
                 Path("virtualoffice/vdos.db")
             ]
         

@@ -3,16 +3,8 @@
 """
 import sqlite3
 import os
+import re
 from typing import Dict, Optional
-
-# 프로젝트 코드 → ID 매핑 (VDOS DB 기준)
-PROJECT_CODE_TO_ID = {
-    "CC": 20,
-    "HA": 21,
-    "WELL": 22,
-    "WI": 23,
-    "CI": 24
-}
 
 # 캐시
 _project_fullname_cache: Optional[Dict[str, str]] = None
@@ -46,19 +38,20 @@ def _load_project_fullnames() -> Dict[str, str]:
         conn = sqlite3.connect(vdos_db_path)
         cursor = conn.cursor()
         
-        # 프로젝트 정보 가져오기
-        cursor.execute("SELECT id, project_name FROM project_plans")
+        # 프로젝트 정보 가져오기 (동적으로 코드 생성)
+        cursor.execute("SELECT project_name FROM project_plans")
         projects = cursor.fetchall()
         
-        # 코드 → 풀네임 매핑 생성
-        mapping = {}
-        for proj_id, name in projects:
-            # ID로 코드 찾기
-            for code, pid in PROJECT_CODE_TO_ID.items():
-                if pid == proj_id:
-                    mapping[code] = name
-                    break
-        
+        mapping: Dict[str, str] = {}
+        for (project_name,) in projects:
+            if not project_name:
+                continue
+            code = generate_project_code(project_name)
+            # 동일 코드가 여러 번 등장할 수 있으므로 가장 긴 이름을 유지
+            existing = mapping.get(code)
+            if not existing or len(project_name) > len(existing):
+                mapping[code] = project_name
+
         conn.close()
         return mapping
         
@@ -83,6 +76,29 @@ def _find_vdos_db() -> Optional[str]:
             return abs_path
     
     return None
+
+
+def generate_project_code(project_name: str) -> str:
+    """프로젝트 이름에서 약어 생성 (ProjectTagService와 동일 로직)"""
+    if not project_name:
+        return "UNK"
+    
+    english_words = re.findall(r'[A-Za-z]+', project_name)
+    
+    if len(english_words) >= 2:
+        return ''.join(word[0].upper() for word in english_words[:2])
+    elif len(english_words) == 1:
+        return english_words[0][:4].upper()
+    
+    korean_words = re.findall(r'[가-힣]+', project_name)
+    if korean_words:
+        return korean_words[0][:2].upper()
+    
+    numbers = re.findall(r'\d+', project_name)
+    if numbers:
+        return f"P{numbers[0][:3]}"
+    
+    return f"P{abs(hash(project_name)) % 1000:03d}"
 
 
 # 초기화 시 캐시 로드

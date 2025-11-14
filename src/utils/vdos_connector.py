@@ -35,9 +35,13 @@ class VDOSConnector:
         """VDOS 데이터베이스 자동 탐지"""
         # 가능한 경로들
         possible_paths = [
+            "virtualoffice/src/virtualoffice/vdossnapshot.db",
             "virtualoffice/src/virtualoffice/vdos.db",
+            "../virtualoffice/src/virtualoffice/vdossnapshot.db",
             "../virtualoffice/src/virtualoffice/vdos.db",
+            "../../virtualoffice/src/virtualoffice/vdossnapshot.db",
             "../../virtualoffice/src/virtualoffice/vdos.db",
+            os.path.expanduser("~/virtualoffice/src/virtualoffice/vdossnapshot.db"),
             os.path.expanduser("~/virtualoffice/src/virtualoffice/vdos.db"),
         ]
         
@@ -45,7 +49,9 @@ class VDOSConnector:
         current_dir = Path(__file__).parent
         project_root = current_dir.parent.parent.parent  # offline_agent/src/utils -> project_root
         vdos_path = project_root / "virtualoffice" / "src" / "virtualoffice" / "vdos.db"
+        snapshot_path = vdos_path.with_name("vdossnapshot.db")
         possible_paths.insert(0, str(vdos_path))
+        possible_paths.insert(0, str(snapshot_path))
         
         for path in possible_paths:
             if os.path.exists(path):
