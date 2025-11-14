@@ -21,9 +21,9 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EMAIL_LIMIT = 1200
-DEFAULT_MESSENGER_LIMIT = 2200
-DEFAULT_OVERALL_LIMIT = 2800
+DEFAULT_EMAIL_LIMIT = None  # 제한 없음
+DEFAULT_MESSENGER_LIMIT = None  # 제한 없음
+DEFAULT_OVERALL_LIMIT = None  # 제한 없음
 
 class AnalysisCacheController:
     """메시지 분석 및 캐시 관리를 담당하는 컨트롤러."""
@@ -372,25 +372,78 @@ class AnalysisCacheController:
         try:
             logger.info("📂 캐시된 결과 표시 중 (생성 시간: %s)", cached_result.created_at)
 
-            if cached_result.todo_list and hasattr(ui, "todo_panel"):
-                logger.info("📋 TODO 업데이트: %d개", len(cached_result.todo_list))
-                ui.todo_panel.populate_from_items(cached_result.todo_list)
-
+            # 1. 메시지 복원 (먼저 복원하여 다른 패널에서 사용 가능하도록)
             if cached_result.messages:
                 ui.collected_messages = cached_result.messages
                 if hasattr(ui.assistant, "collected_messages"):
                     ui.assistant.collected_messages = cached_result.messages
-                if hasattr(ui, "_register_known_messages"):
-                    ui._register_known_messages(cached_result.messages)
                 logger.info("📨 메시지 복원: %d개", len(cached_result.messages))
-                if hasattr(ui, "_message_summary_cache"):
-                    ui._message_summary_cache.clear()
+                # 메시지 요약 캐시는 클리어하지 않음 (페르소나별로 캐시되므로)
+                # 대신 페르소나가 변경되었으므로 새로운 캐시 키로 생성됨
 
-            if cached_result.analysis_summary and hasattr(ui, "analysis_result_panel"):
-                logger.info("📊 분석 결과 표시")
+            # 2. TODO 복원 (DB에 저장 및 UI 표시)
+            if cached_result.todo_list and hasattr(ui, "todo_panel"):
+                logger.info("📋 TODO 복원: %d개", len(cached_result.todo_list))
+                # incremental=False로 호출하여 전체 교체 (DB에 저장됨)
+                # populate_from_items는 DB에 저장하고 UI도 업데이트함
+                ui.todo_panel.populate_from_items(cached_result.todo_list, incremental=False)
+                logger.info("✅ TODO DB 저장 및 UI 표시 완료")
+                
+                # 페르소나 필터가 적용된 TODO만 표시되도록 리프레시 (populate_from_items 후 자동으로 필터링됨)
+                # populate_from_items 내부에서 _rebuild_from_rows가 호출되므로 별도 refresh 불필요
+                # 하지만 페르소나 필터가 변경되었을 수 있으므로 한 번 더 확인
+                current_persona = None
+                if hasattr(ui, 'selected_persona') and ui.selected_persona:
+                    current_persona = ui.selected_persona.name
+                logger.info(f"📋 캐시 복원된 TODO 개수: {len(cached_result.todo_list)}, 현재 페르소나: {current_persona}")
 
-            todo_count = len(cached_result.todo_list)
-            msg_count = len(cached_result.messages)
+            # 3. 분석 결과 복원
+            if cached_result.analysis_results:
+                ui.analysis_results = cached_result.analysis_results
+                logger.info("📊 분석 결과 복원: %d개", len(cached_result.analysis_results))
+
+            # 4. UI 패널 업데이트 (메시지 요약, 이메일, 분석 결과)
+            # 메시지 요약 패널 업데이트 (collected_messages가 설정된 후)
+            if cached_result.messages and hasattr(ui, "message_summary_panel"):
+                logger.info(f"📝 메시지 요약 패널 업데이트 시작 (메시지 {len(cached_result.messages)}개)")
+                # collected_messages가 설정되었는지 확인
+                if hasattr(ui, "collected_messages") and ui.collected_messages:
+                    ui._update_message_summaries("day")
+                    logger.info("📝 메시지 요약 패널 업데이트 완료")
+                else:
+                    logger.warning("⚠️ collected_messages가 설정되지 않아 메시지 요약 패널 업데이트 건너뜀")
+            
+            # 이메일 패널 업데이트
+            if cached_result.messages and hasattr(ui, "email_panel"):
+                email_messages = [m for m in cached_result.messages if m.get("type") == "email"]
+                # TODO 아이템 가져오기 (필터링된 TODO)
+                todo_items = []
+                if hasattr(ui, "todo_panel") and hasattr(ui.todo_panel, "controller"):
+                    try:
+                        todo_items = ui.todo_panel.controller.load_active_items()
+                    except Exception as e:
+                        logger.warning(f"TODO 아이템 가져오기 실패: {e}")
+                ui.email_panel.update_emails(email_messages, todo_items)
+                logger.info("📧 이메일 패널 업데이트 완료: %d개", len(email_messages))
+            
+            # 분석 결과 패널 업데이트
+            if hasattr(ui, "analysis_result_panel"):
+                # analysis_results가 설정되었는지 확인
+                analysis_results = getattr(ui, "analysis_results", None) or []
+                if analysis_results:
+                    ui.analysis_result_panel.update_analysis(analysis_results, cached_result.messages or [])
+                    logger.info(f"📊 분석 결과 패널 업데이트 완료: {len(analysis_results)}개")
+                else:
+                    logger.warning("⚠️ analysis_results가 없어 분석 결과 패널을 빈 상태로 표시")
+                    ui.analysis_result_panel.update_analysis([], cached_result.messages or [])
+            
+            # 타임라인 업데이트
+            if cached_result.messages and hasattr(ui, "timeline_list"):
+                ui._update_timeline_with_badges()
+                logger.info("⏰ 타임라인 업데이트 완료")
+
+            todo_count = len(cached_result.todo_list) if cached_result.todo_list else 0
+            msg_count = len(cached_result.messages) if cached_result.messages else 0
             ui.statusBar().showMessage(
                 "✅ 캐시에서 로드 완료: TODO {0}개, 메시지 {1}개 (생성: {2})".format(
                     todo_count,
@@ -399,6 +452,7 @@ class AnalysisCacheController:
                 ),
                 5000,
             )
+            logger.info("✅ 캐시 복원 완료: TODO %d개, 메시지 %d개", todo_count, msg_count)
         except Exception as exc:  # pragma: no cover
             logger.error("❌ 캐시된 결과 표시 오류: %s", exc, exc_info=True)
 
@@ -1028,7 +1082,7 @@ class AnalysisCacheController:
         try:
             if hasattr(ui, "todo_panel") and ui.todo_panel:
                 # DB는 삭제하지 않고, UI만 갱신 (필터링은 controller에서 자동 적용)
-                ui.todo_panel.refresh_todo_list()
+                ui.todo_panel.refresh_todo_list(preserve_existing_on_empty=False)
                 logger.info("🔄 페르소나 변경으로 TODO 리스트 갱신 완료")
         except Exception as exc:  # pragma: no cover
             logger.error("TODO 갱신 오류: %s", exc)

@@ -425,7 +425,7 @@ class MessageDetailDialog(QDialog):
             separator.setFixedHeight(1)
             separator.setStyleSheet(f"background-color: {Colors.BORDER_LIGHT};")
             self.detail_layout.addWidget(separator)
-            ㄱ
+            
             # 메시지 내용 섹션
             content_widget = self._create_content_section(message)
             self.detail_layout.addWidget(content_widget)

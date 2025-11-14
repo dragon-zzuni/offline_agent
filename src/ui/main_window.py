@@ -1307,13 +1307,19 @@ class SmartAssistantGUI(QMainWindow):
         if not hasattr(self, "_message_summary_cache"):
             self._message_summary_cache = {}
 
+        logger.info(f"📊 전체 메시지: {len(self.collected_messages)}개")
+        
         messenger_messages = [m for m in self.collected_messages if self._is_messenger_message(m)]
         email_count = len(self.collected_messages) - len(messenger_messages)
+        
+        logger.info(f"📊 메신저 메시지 (필터 전): {len(messenger_messages)}개")
 
         messenger_messages = [
             m for m in messenger_messages
             if self._is_message_visible_to_persona(m)
         ]
+        
+        logger.info(f"📊 메신저 메시지 (필터 후): {len(messenger_messages)}개")
 
         if not messenger_messages:
             logger.info("ℹ️ 메신저 메시지가 없어 요약을 생성하지 않습니다. (이메일 %d건)", email_count)
@@ -1321,11 +1327,20 @@ class SmartAssistantGUI(QMainWindow):
                 self.message_summary_panel.show_message_count(0, email_count)
             return
 
+        # virtual_dates.json 파일 수정 시간을 캐시 키에 포함
+        import os
+        virtual_dates_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "multi_project_8week_ko", "virtual_dates.json"
+        )
+        virtual_dates_mtime = os.path.getmtime(virtual_dates_file) if os.path.exists(virtual_dates_file) else 0
+        
         cache_key = (
             self._current_persona_id or "unknown",
             unit,
             getattr(self, "_current_data_version", "0"),
             len(messenger_messages),
+            virtual_dates_mtime,  # 가상 날짜 파일 수정 시간 추가
         )
         cached_summaries = self._message_summary_cache.get(cache_key)
         if cached_summaries:
@@ -1811,14 +1826,21 @@ class SmartAssistantGUI(QMainWindow):
             self.selected_persona = persona
             persona_key = f"{persona.email_address}_{persona.chat_handle}"
             logger.info(f"페르소나 변경: {persona.name} ({persona.email_address})")
+
+            # 페르소나 변경 시 기존 메시지 상태 초기화
+            self._reset_message_state_for_persona_change()
             
             # 현재 페르소나 ID 업데이트
             self._current_persona_id = persona.email_address or persona.chat_handle
             
-            # TODO 컨트롤러에 페르소나 필터 설정
+            # TODO 컨트롤러에 페르소나 필터 설정 (이메일, 핸들도 전달)
             if hasattr(self, 'todo_panel') and self.todo_panel:
-                self.todo_panel.controller.set_persona_filter(persona.name)
-                logger.info(f"👤 TODO 페르소나 필터 설정: {persona.name}")
+                self.todo_panel.controller.set_persona_filter(
+                    persona_name=persona.name,
+                    persona_email=persona.email_address,
+                    persona_handle=persona.chat_handle
+                )
+                logger.info(f"👤 TODO 페르소나 필터 설정: {persona.name} (이메일: {persona.email_address}, 핸들: {persona.chat_handle})")
             
             # 데이터 소스 업데이트 (VirtualOffice 모드인 경우에만)
             if self.data_source_type == "virtualoffice":
@@ -1831,11 +1853,17 @@ class SmartAssistantGUI(QMainWindow):
                     logger.info(f"✅ 캐시 히트: {persona.name} - 즉시 표시")
                     self.status_message.setText(f"캐시에서 로드 중: {persona.name}...")
                     
-                    # ✅ 캐시 히트 시: TODO DB 초기화 후 캐시 복원
-                    logger.info(f"🗑️ 이전 페르소나의 TODO 초기화 중...")
-                    self._clear_todos_for_persona_change()
+                    # ✅ 캐시 히트 시: TODO DB 초기화는 하지 않음 (캐시 복원 시 populate_from_items가 처리)
+                    # 대신 페르소나 필터만 설정하고 캐시 복원
+                    logger.info(f"🔄 페르소나 필터 설정 후 캐시 복원 중...")
                     
+                    # 캐시 복원 (TODO, 메시지, UI 패널 모두 복원)
                     self._display_cached_result(cached_result)
+                    
+                    # 페르소나 필터가 적용된 TODO만 표시되도록 리프레시
+                    if hasattr(self, 'todo_panel') and self.todo_panel:
+                        self.todo_panel.refresh_todo_list(preserve_existing_on_empty=False)
+                    
                     self.status_message.setText(f"페르소나 변경됨 (캐시): {persona.name}")
                     
                     # ✅ 캐시 히트 시: 폴링 워커만 업데이트 (즉시 폴링 안 함)
@@ -1890,11 +1918,16 @@ class SmartAssistantGUI(QMainWindow):
             logger.info(f"📬 새 데이터 수신: 메일 {len(emails)}개, 메시지 {len(messages)}개")
             
             # 시간 필터링 적용
-            emails, messages, all_messages, total_new = self._apply_time_filtering_to_new_data(
-                emails, messages, all_messages
-            )
+            (
+                emails,
+                messages,
+                all_messages,
+                total_new,
+                original_all_messages,
+                original_total,
+            ) = self._apply_time_filtering_to_new_data(emails, messages, all_messages)
             
-            if total_new == 0:
+            if total_new == 0 and original_total == 0:
                 return
             
             # 중복 제거 후 실제 신규 데이터 계산
@@ -1906,15 +1939,25 @@ class SmartAssistantGUI(QMainWindow):
             unique_emails = [m for m in unique_messages if _msg_type(m) == "email"]
             unique_chats = [m for m in unique_messages if _msg_type(m) == "messenger"]
             total_new_unique = len(unique_emails) + len(unique_chats)
-
-            if total_new_unique == 0:
-                logger.info("📭 중복 메시지로 새로 분석할 데이터가 없어 건너뜁니다.")
-                return
-
+            
             # 데이터 처리 및 UI 업데이트
             show_progress = total_new_unique > 50
-            self._process_new_data(unique_emails, unique_chats, unique_messages, show_progress)
-            self._update_ui_for_new_data(unique_emails, unique_chats, show_progress)
+            self._process_new_data(
+                unique_emails,
+                unique_chats,
+                unique_messages,
+                show_progress,
+                original_messages=original_all_messages,
+            )
+            self._update_ui_for_new_data(
+                unique_emails,
+                unique_chats,
+                show_progress if total_new_unique > 0 else False,
+            )
+            
+            if total_new_unique == 0:
+                logger.info("📭 필터링 또는 중복으로 분석 대상이 없어 메시지 탭만 갱신했습니다.")
+                return
             
             # TODO 생성 개수 계산 및 팝업 표시
             new_todo_count = self._count_new_todos(unique_messages)
@@ -1935,6 +1978,9 @@ class SmartAssistantGUI(QMainWindow):
     
     def _apply_time_filtering_to_new_data(self, emails, messages, all_messages):
         """새 데이터에 시간 필터링 적용"""
+        original_all_messages = list(all_messages or [])
+        original_total = len(original_all_messages)
+        
         if self.time_filter_service.is_enabled:
             original_count = len(all_messages)
             all_messages = self.time_filter_service.filter_messages(all_messages)
@@ -1946,10 +1992,19 @@ class SmartAssistantGUI(QMainWindow):
                 logger.info(f"⏰ 새 데이터 시간 필터링: {original_count}개 → {filtered_count}개")
                 total_new = len(emails) + len(messages)
                 
-                if total_new == 0:
-                    logger.info("⏰ 시간 필터링 후 새 데이터 없음")
-                    
-        return emails, messages, all_messages, len(emails) + len(messages)
+                if len(emails) + len(messages) == 0:
+                    logger.info("⏰ 시간 필터링 후 새 데이터 없음 (메시지 탭은 전체 기간 유지)")
+        else:
+            all_messages = original_all_messages
+        
+        return (
+            emails,
+            messages,
+            all_messages,
+            len(emails) + len(messages),
+            original_all_messages,
+            original_total,
+        )
 
     def _message_identity(self, message: Dict[str, Any]) -> Optional[str]:
         if not message:
@@ -1998,8 +2053,30 @@ class SmartAssistantGUI(QMainWindow):
             self.new_message_ids.clear()
         except Exception:
             self.new_message_ids = set()
+
+    def _reset_message_state_for_persona_change(self) -> None:
+        """페르소나 변경 시 메시지 관련 버퍼 초기화."""
+        try:
+            logger.info("🧹 페르소나 변경으로 메시지 버퍼 초기화")
+            self.collected_messages = []
+            if hasattr(self.assistant, "collected_messages"):
+                self.assistant.collected_messages = []
+            if hasattr(self, "_known_message_ids"):
+                self._known_message_ids.clear()
+            self._clear_new_message_ids()
+            if hasattr(self, "_message_summary_cache"):
+                self._message_summary_cache.clear()
+        except Exception as exc:
+            logger.warning("메시지 버퍼 초기화 실패: %s", exc)
     
-    def _process_new_data(self, emails, messages, all_messages, show_progress):
+    def _process_new_data(
+        self,
+        emails,
+        messages,
+        all_messages,
+        show_progress,
+        original_messages: Optional[List[Dict[str, Any]]] = None,
+    ):
         """새 데이터 처리"""
         if show_progress:
             self._show_progress_bar(f"새 데이터 처리 중... ({len(all_messages)}개)")
@@ -2015,9 +2092,14 @@ class SmartAssistantGUI(QMainWindow):
         
         # 기존 데이터에 추가
         if hasattr(self.assistant, 'collected_messages'):
-            self.assistant.collected_messages.extend(emails)
-            self.assistant.collected_messages.extend(messages)
+            if original_messages is not None:
+                new_messages = list(original_messages or [])
+            else:
+                new_messages = list(emails) + list(messages)
+            self.assistant.collected_messages = new_messages
             self.collected_messages = self.assistant.collected_messages
+        if hasattr(self, "_register_known_messages"):
+            self._register_known_messages(self.collected_messages)
         
         if show_progress:
             self._update_progress_bar(50)

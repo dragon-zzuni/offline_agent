@@ -7,9 +7,11 @@ TodoPanel과 같은 UI 계층이 직접 sqlite3에 접근하지 않도록 캡슐
 from __future__ import annotations
 
 import json
+import logging
+import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator, Iterable, List, Optional
 
@@ -18,6 +20,11 @@ OFFLINE_AGENT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DB_PATH = (
     OFFLINE_AGENT_ROOT.parent / "virtualoffice" / "src" / "virtualoffice" / "todos_cache.db"
 )
+VDOS_DB_PATH = (
+    OFFLINE_AGENT_ROOT.parent / "virtualoffice" / "src" / "virtualoffice" / "vdos.db"
+)
+
+logger = logging.getLogger(__name__)
 
 
 class TodoRepository:
@@ -29,6 +36,7 @@ class TodoRepository:
         self._conn = sqlite3.connect(str(self.db_path))
         self._conn.row_factory = sqlite3.Row
         self._init_db()
+        self._backfill_missing_source_dates()
 
     # ------------------------------------------------------------------ #
     # 내부 유틸
@@ -77,6 +85,125 @@ class TodoRepository:
         except sqlite3.OperationalError:
             # 이미 존재하는 경우는 무시
             pass
+
+    def _backfill_missing_source_dates(self) -> None:
+        """source_message에 date가 없는 레거시 TODO를 VDOS DB 기반으로 보정."""
+        if not VDOS_DB_PATH.exists():
+            return
+
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT id, source_message
+              FROM todos
+             WHERE source_message IS NOT NULL
+               AND source_message != ''
+               AND source_message NOT LIKE '%"date":%'
+            """
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return
+
+        try:
+            vdos_conn = sqlite3.connect(str(VDOS_DB_PATH))
+            vdos_conn.row_factory = sqlite3.Row
+        except sqlite3.Error as exc:  # pragma: no cover - 로컬 환경 문제
+            logger.warning("VDOS DB 연결 실패로 수신 시간 보정을 건너뜁니다: %s", exc)
+            return
+
+        updated = 0
+        with self._transaction() as todo_cur:
+            for row in rows:
+                todo_id = row["id"]
+                raw_src = row["source_message"]
+                try:
+                    src = json.loads(raw_src)
+                except Exception:
+                    continue
+
+                timestamp = self._lookup_original_timestamp(src, vdos_conn)
+                if not timestamp:
+                    continue
+
+                metadata = src.get("metadata") or {}
+                metadata.setdefault("original_date", timestamp)
+                src["metadata"] = metadata
+                if "date" not in src:
+                    src["date"] = timestamp
+
+                new_payload = json.dumps(src, ensure_ascii=False)
+                todo_cur.execute(
+                    "UPDATE todos SET source_message = ? WHERE id = ?",
+                    (new_payload, todo_id),
+                )
+                updated += 1
+
+        vdos_conn.close()
+        if updated:
+            logger.info("🔄 source_message 누락 수신 시간 %d건 보정 완료", updated)
+
+    def _lookup_original_timestamp(
+        self, source_msg: dict, vdos_conn: sqlite3.Connection
+    ) -> Optional[str]:
+        """VDOS DB에서 원본 메시지의 sent_at을 조회."""
+        if not source_msg:
+            return None
+
+        metadata = source_msg.get("metadata") or {}
+        msg_id = source_msg.get("id") or ""
+        platform = (source_msg.get("platform") or "").lower()
+
+        # 이메일: email_id 우선, 없으면 msg_id에서 추출
+        if platform == "email" or msg_id.startswith("email_"):
+            email_id = metadata.get("email_id")
+            if not email_id and msg_id:
+                match = re.search(r"email_(\d+)", msg_id)
+                if match:
+                    email_id = int(match.group(1))
+            if not email_id:
+                return None
+            cur = vdos_conn.execute("SELECT sent_at FROM emails WHERE id = ?", (email_id,))
+            row = cur.fetchone()
+            if row and row["sent_at"]:
+                return self._to_utc_iso(row["sent_at"])
+            return None
+
+        # 채팅: chat_id 우선, 없으면 msg_id 마지막 숫자 사용
+        chat_id = metadata.get("chat_id")
+        if not chat_id and msg_id:
+            match = re.search(r"_(\d+)$", msg_id)
+            if match:
+                chat_id = int(match.group(1))
+        if not chat_id:
+            return None
+
+        cur = vdos_conn.execute("SELECT sent_at FROM chat_messages WHERE id = ?", (chat_id,))
+        row = cur.fetchone()
+        if row and row["sent_at"]:
+            return self._to_utc_iso(row["sent_at"])
+        return None
+
+    @staticmethod
+    def _to_utc_iso(value: str) -> Optional[str]:
+        """sent_at 문자열을 UTC ISO-8601 형식으로 변환."""
+        if not value:
+            return None
+
+        normalized = value.strip().replace(" ", "T")
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+
+        try:
+            dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            return normalized
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.isoformat()
 
     @contextmanager
     def _transaction(self) -> Generator[sqlite3.Cursor, None, None]:
@@ -298,37 +425,26 @@ class TodoRepository:
         """활성 TODO 조회 (페르소나 필터링 옵션)
         
         Args:
-            persona_name: 페르소나 이름 (한글 이름)
-            persona_email: 페르소나 이메일
-            persona_handle: 페르소나 채팅 핸들
+            persona_name: 페르소나 이름 (한글 이름) - DB의 persona_name 컬럼과 비교
+            persona_email: 페르소나 이메일 (현재는 사용하지 않음, 향후 확장용)
+            persona_handle: 페르소나 채팅 핸들 (현재는 사용하지 않음, 향후 확장용)
             
         Note:
             페르소나가 **수신한** TODO만 반환합니다 (requester가 페르소나가 아닌 TODO).
             즉, 다른 사람이 페르소나에게 요청한 TODO만 표시됩니다.
+            
+            중요: DB의 persona_name 컬럼에는 한글 이름만 저장되어 있으므로,
+            persona_name만 비교합니다.
         """
         cur = self._conn.cursor()
         
-        # 페르소나 필터가 하나라도 있으면 필터링
-        if persona_name or persona_email or persona_handle:
-            # persona_name이 페르소나와 일치하고, requester가 페르소나가 아닌 TODO 조회
-            # (페르소나가 받은 TODO만 표시, 자기가 보낸 것은 제외)
+        # persona_name 필터만 사용 (DB 컬럼에 한글 이름만 저장됨)
+        if persona_name:
             params = []
             
             # 1. persona_name 조건 (페르소나가 받은 TODO)
-            persona_conditions = []
-            if persona_name:
-                persona_conditions.append("persona_name=?")
-                params.append(persona_name)
-            
-            if persona_email:
-                persona_conditions.append("persona_name=?")
-                params.append(persona_email)
-            
-            if persona_handle:
-                persona_conditions.append("persona_name=?")
-                params.append(persona_handle)
-            
-            persona_clause = " OR ".join(persona_conditions)
+            persona_clause = "persona_name=?"
+            params.append(persona_name)
             
             # 2. requester 제외 조건 (자기가 보낸 것 제외)
             # 페르소나의 이름, 이메일, 핸들 중 하나라도 requester와 일치하면 제외
@@ -341,14 +457,19 @@ class TodoRepository:
                 requester_params.append(persona_handle)
             
             # NOT IN 절로 변경 (더 명확하고 안전)
-            requester_placeholders = ",".join(["?"] * len(requester_params))
-            requester_clause = f"requester NOT IN ({requester_placeholders})"
-            params.extend(requester_params)
-            
-            # 최종 쿼리: (페르소나가 받은 TODO) AND (자기가 보낸 것 아님)
-            query = f"SELECT * FROM todos WHERE status!='done' AND ({persona_clause}) AND {requester_clause} ORDER BY created_at DESC"
+            if requester_params:
+                requester_placeholders = ",".join(["?"] * len(requester_params))
+                requester_clause = f"requester NOT IN ({requester_placeholders})"
+                params.extend(requester_params)
+                
+                # 최종 쿼리: (페르소나가 받은 TODO) AND (자기가 보낸 것 아님)
+                query = f"SELECT * FROM todos WHERE status!='done' AND {persona_clause} AND {requester_clause} ORDER BY created_at DESC"
+            else:
+                # requester 필터 없으면 persona_name만 필터링
+                query = f"SELECT * FROM todos WHERE status!='done' AND {persona_clause} ORDER BY created_at DESC"
             
             cur.execute(query, tuple(params))
+            logger.debug(f"🔍 페르소나 필터링 TODO 조회: persona_name={persona_name}, 결과={cur.rowcount}개")
         else:
             # 필터 없으면 전체 조회
             cur.execute("SELECT * FROM todos WHERE status!='done' ORDER BY created_at DESC")

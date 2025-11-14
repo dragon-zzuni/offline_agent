@@ -950,6 +950,34 @@ class ProjectFilterPanel(QWidget):
             button = self.project_tags[project_name]
             display_name = button.project_info.display_name
             button.setText(f"{display_name} ({count})")
+    
+    def update_active_projects(self, active_projects: set):
+        """활성 프로젝트 목록으로 태그 바 업데이트
+        
+        Args:
+            active_projects: 현재 활성화된 프로젝트명 세트
+        """
+        try:
+            # 기존 프로젝트 태그 중 활성 프로젝트에 없는 것 제거
+            projects_to_remove = []
+            for project_name in self.project_tags.keys():
+                if project_name not in active_projects:
+                    projects_to_remove.append(project_name)
+            
+            for project_name in projects_to_remove:
+                button = self.project_tags.pop(project_name)
+                self.filter_layout.removeWidget(button)
+                button.deleteLater()
+            
+            # 새로운 프로젝트 추가
+            for project_name in active_projects:
+                if project_name and project_name not in self.project_tags:
+                    self.add_project_filter(project_name)
+            
+            logger.debug(f"[프로젝트 태그 바] 업데이트 완료: {len(active_projects)}개 프로젝트")
+            
+        except Exception as e:
+            logger.error(f"[프로젝트 태그 바] 업데이트 오류: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

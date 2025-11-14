@@ -11,7 +11,8 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    사용자 입력                                │
-│  "PN 프로젝트의 전형우가 요청한 업무처리"                      │
+│  "프로젝트 LUMINA에서 전형우가 요청한 업무처리일 경우        │
+│   우선순위 높게해줘"                                          │
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -47,7 +48,7 @@
 
 **입력 예시**:
 ```
-자연어 규칙: "PN 프로젝트의 전형우가 요청한 업무처리"
+자연어 규칙: "프로젝트 LUMINA에서 전형우가 요청한 업무처리일 경우 우선순위 높게해줘"
 ```
 
 **코드 위치**: `Top3LLMSelector.select_top3()`
@@ -94,7 +95,8 @@ def _get_person_mapping(self):
     # 이메일 → 이름 매핑 생성
     mapping = {
         "hyungwoo.jeon@example.com": "전형우",
-        "hogyu.lim@example.com": "임호규",
+        "jungjiwon@koreaitcompany.com": "정지원",
+        "limboyeon@koreaitcompany.com": "임보연",
         ...
     }
     return mapping
@@ -118,6 +120,17 @@ for i, todo in enumerate(todos, 1):
 → 수신방법: {todo['source_type']}
 → 우선순위: {todo['priority']}
 → 마감일: {todo['deadline']}"""
+
+# 예시 출력:
+# [TODO #1]
+# → ID: "task_abc123"
+# → 제목: UI/UX 디자인 초안 피드백 요청
+# → 프로젝트: Project LUMINA (LUMINA)
+# → 요청자: 전형우
+# → 유형: task
+# → 수신방법: 메일
+# → 우선순위: high
+# → 마감일: 2025-11-15
 ```
 
 
@@ -195,18 +208,19 @@ selected_ids에 해당 TODO의 실제 ID를 정확히 복사하세요!
 
 **사용자 프롬프트 구조**:
 ```
-사용자 규칙: PN 프로젝트의 전형우가 요청한 업무처리
+사용자 규칙: 프로젝트 LUMINA에서 전형우가 요청한 업무처리일 경우 우선순위 높게해줘
 
 사람 매핑 (이메일 → 이름):
 - hyungwoo.jeon@example.com: 전형우
-- hogyu.lim@example.com: 임호규
+- jungjiwon@koreaitcompany.com: 정지원
+- limboyeon@koreaitcompany.com: 임보연
 ...
 
 TODO 리스트 (50개):
 [TODO #1]
 → ID: "task_abc123"
-→ 제목: 데이터베이스 스키마 설계
-→ 프로젝트: Project Nova (PN)
+→ 제목: UI/UX 디자인 초안 피드백 요청
+→ 프로젝트: Project LUMINA (LUMINA)
 → 요청자: 전형우
 → 유형: task
 → 수신방법: 메일
@@ -215,10 +229,23 @@ TODO 리스트 (50개):
 
 [TODO #2]
 → ID: "review_def456"
-→ 제목: API 문서 검토
-→ 프로젝트: Project Nova (PN)
-→ 요청자: 임호규
+→ 제목: 프로젝트 개요서 검토
+→ 프로젝트: Project LUMINA (LUMINA)
+→ 요청자: 정지원
 → 유형: review
+→ 수신방법: 메일
+→ 우선순위: medium
+→ 마감일: 2025-11-16
+
+[TODO #3]
+→ ID: "task_ghi789"
+→ 제목: 데이터베이스 스키마 설계
+→ 프로젝트: Project OMEGA (OMEGA)
+→ 요청자: 전형우
+→ 유형: task
+→ 수신방법: 메일
+→ 우선순위: high
+→ 마감일: 2025-11-17
 ...
 
 선정 기준 (반드시 순서대로 적용):
@@ -239,7 +266,7 @@ TODO 리스트 (50개):
 **로그 예시**:
 ```
 [Top3LLM] 프롬프트 생성 완료 (길이: 15234자)
-[Top3LLM] 자연어 규칙: PN 프로젝트의 전형우가 요청한 업무처리
+[Top3LLM] 자연어 규칙: 프로젝트 LUMINA에서 전형우가 요청한 업무처리일 경우 우선순위 높게해줘
 ```
 
 ---
@@ -264,28 +291,34 @@ response = self.llm_client.generate(
 **LLM 응답 예시 (Chain of Thought 적용)**:
 ```json
 {
-    "reasoning": "PN 프로젝트의 전형우가 요청한 업무처리 TODO를 찾았습니다. 
+    "reasoning": "프로젝트 LUMINA에서 전형우가 요청한 업무처리 TODO를 우선적으로 선정합니다.
                   
                   [1단계: 조건 분석]
-                  - 프로젝트: PN
+                  - 프로젝트: LUMINA
                   - 요청자: 전형우
                   - 유형: 업무처리(task)
+                  - 우선순위: 위 조건을 만족하는 TODO를 최우선으로
                   
                   [2단계: 후보 필터링]
-                  - PN 프로젝트 TODO: #1, #3, #5, #7, #12, #15, #18 (7개)
-                  - 전형우 요청 TODO: #1, #5, #12, #20, #25 (5개)
-                  - 업무처리(task) TODO: #1, #2, #5, #8, #12, #16 (6개)
+                  - LUMINA 프로젝트 TODO: #1, #2, #5, #8, #12, #15 (6개)
+                  - 전형우 요청 TODO: #1, #3, #7, #10, #14 (5개)
+                  - 업무처리(task) TODO: #1, #3, #5, #7, #9, #11 (6개)
                   
                   [3단계: 교집합 확인]
-                  - 모든 조건 만족: TODO #1, #5, #12 (3개) ✅
+                  - 모든 조건 만족 (LUMINA + 전형우 + task): TODO #1 (1개) ✅
+                  - 부분 조건 만족 (LUMINA + task): TODO #5, #12 (2개)
                   
                   [4단계: 최종 선정]
-                  - TODO #1: 데이터베이스 스키마 설계 (마감: 11/15, 우선순위: high)
-                  - TODO #5: API 엔드포인트 구현 (마감: 11/18, 우선순위: high)
-                  - TODO #12: 테스트 코드 작성 (마감: 11/20, 우선순위: medium)
+                  - TODO #1: UI/UX 디자인 초안 피드백 요청 
+                    (LUMINA + 전형우 + task, 마감: 11/15, 우선순위: high) ⭐ 최우선
+                  - TODO #5: 프로토타입 제작 
+                    (LUMINA + 정지원 + task, 마감: 11/16, 우선순위: high)
+                  - TODO #12: 테스트 자동화 스크립트 
+                    (LUMINA + 임보연 + task, 마감: 11/18, 우선순위: medium)
                   
-                  마감일이 가장 임박한 순서로 우선순위를 부여했습니다.",
-    "selected_ids": ["task_abc123", "task_ghi789", "task_jkl012"]
+                  규칙에 따라 LUMINA 프로젝트의 전형우 요청 업무처리를 최우선으로 선정하고,
+                  나머지는 같은 프로젝트의 업무처리 중 마감일이 임박한 순서로 선정했습니다.",
+    "selected_ids": ["task_abc123", "task_def456", "task_ghi789"]
 }
 ```
 
@@ -337,14 +370,14 @@ def _parse_response(self, response: str):
 
 **파싱 결과**:
 ```python
-selected_ids = {"task_abc123", "task_ghi789", "task_jkl012"}
-reasoning = "PN 프로젝트의 전형우가 요청한 업무처리 TODO를 찾았습니다..."
+selected_ids = {"task_abc123", "task_def456", "task_ghi789"}
+reasoning = "프로젝트 LUMINA에서 전형우가 요청한 업무처리 TODO를 우선적으로 선정합니다..."
 ```
 
 **로그 예시**:
 ```
 [Top3LLM] 파싱 결과: 3개 ID 추출
-[Top3LLM] 파싱된 ID: ['task_abc123', 'task_ghi789', 'task_jkl012']
+[Top3LLM] 파싱된 ID: ['task_abc123', 'task_def456', 'task_ghi789']
 ```
 
 ---
@@ -374,16 +407,16 @@ def _validate_ids(self, ids: Set[str], todos: List[Dict]):
 
 **케이스 1: 모두 유효** ✅
 ```python
-LLM 선정: {"task_abc123", "task_ghi789", "task_jkl012"}
+LLM 선정: {"task_abc123", "task_def456", "task_ghi789"}
 실제 TODO: {"task_abc123", "task_def456", "task_ghi789", "task_jkl012", ...}
-→ 유효한 ID: {"task_abc123", "task_ghi789", "task_jkl012"}
+→ 유효한 ID: {"task_abc123", "task_def456", "task_ghi789"}
 ```
 
 **케이스 2: 일부 무효** ⚠️
 ```python
-LLM 선정: {"task_abc123", "task_INVALID", "task_jkl012"}
+LLM 선정: {"task_abc123", "task_INVALID", "task_def456"}
 실제 TODO: {"task_abc123", "task_def456", "task_ghi789", "task_jkl012", ...}
-→ 유효한 ID: {"task_abc123", "task_jkl012"}
+→ 유효한 ID: {"task_abc123", "task_def456"}
 → 무효한 ID: {"task_INVALID"}
 ```
 
@@ -410,7 +443,7 @@ def _validate_and_explain_selection(self, selected_ids, todos, natural_rule, ori
     for todo in todos:
         project = todo.get("project", "")
         if project and project.lower() in rule_lower:
-            expected_project = project  # "PN"
+            expected_project = project  # "LUMINA"
             break
     
     # 2. 요청자 조건 추출
@@ -437,7 +470,7 @@ def _validate_and_explain_selection(self, selected_ids, todos, natural_rule, ori
 
 **추출 결과**:
 ```python
-expected_project = "PN"
+expected_project = "LUMINA"
 expected_requester = "전형우"
 expected_type = "task"
 ```
@@ -478,9 +511,9 @@ violations = 0개
 
 **출력 예시**:
 ```
-PN 프로젝트의 전형우가 요청한 업무처리 TODO를 찾았습니다. 
-TODO #1, #5, #12가 모두 프로젝트(PN), 요청자(전형우), 유형(task) 조건을 
-완벽히 만족하므로 이 3개를 선정합니다.
+프로젝트 LUMINA에서 전형우가 요청한 업무처리 TODO를 우선적으로 선정합니다.
+TODO #1, #5, #8이 모두 프로젝트(LUMINA), 요청자(전형우), 유형(task) 조건을 
+완벽히 만족하므로 이 3개를 최우선으로 선정합니다.
 ```
 
 **케이스 2: 부분 일치 포함** ⚠️
@@ -493,23 +526,23 @@ violations = 2개
 
 **출력 예시**:
 ```
-PN 프로젝트의 전형우가 요청한 업무처리 TODO를 찾았습니다. 
+프로젝트 LUMINA에서 전형우가 요청한 업무처리 TODO를 우선적으로 선정합니다.
 TODO #1이 조건을 완벽히 만족하고, TODO #5, #12를 추가로 선정했습니다.
 
 ⚠️ 선정 결과 분석:
 
 ✅ 완벽히 일치: 1개
-  - task_abc123: 프로젝트=PN, 요청자=전형우, 유형=task
+  - task_abc123: 프로젝트=LUMINA, 요청자=전형우, 유형=task
 
 ⚠️ 부분 일치: 2개
-  - task_ghi789: 프로젝트=PN, 요청자=임호규, 유형=task
-    → 요청자 불일치 (기대: 전형우, 실제: 임호규)
+  - task_def456: 프로젝트=LUMINA, 요청자=정지원, 유형=task
+    → 요청자 불일치 (기대: 전형우, 실제: 정지원)
   
-  - task_jkl012: 프로젝트=PN, 요청자=임호규, 유형=task
-    → 요청자 불일치 (기대: 전형우, 실제: 임호규)
+  - task_ghi789: 프로젝트=LUMINA, 요청자=임보연, 유형=task
+    → 요청자 불일치 (기대: 전형우, 실제: 임보연)
 
 📝 조건 완화: 규칙을 완벽히 만족하는 TODO가 1개뿐이어서, 
-부분적으로 일치하는 TODO 2개를 추가로 선정했습니다.
+같은 프로젝트(LUMINA)의 업무처리 TODO 2개를 추가로 선정했습니다.
 ```
 
 ---
@@ -533,10 +566,10 @@ return valid_ids  # {"task_abc123", "task_ghi789", "task_jkl012"}
 **로그 예시**:
 ```
 [Top3LLM] ✅ 선정 완료: 3개
-[Top3LLM] 선정 이유: PN 프로젝트의 전형우가 요청한 업무처리 TODO를 찾았습니다...
-[Top3LLM] 선정: task_abc123 - 데이터베이스 스키마 설계 (프로젝트: PN, 요청자: 전형우)
-[Top3LLM] 선정: task_ghi789 - API 엔드포인트 구현 (프로젝트: PN, 요청자: 전형우)
-[Top3LLM] 선정: task_jkl012 - 테스트 코드 작성 (프로젝트: PN, 요청자: 전형우)
+[Top3LLM] 선정 이유: 프로젝트 LUMINA에서 전형우가 요청한 업무처리 TODO를 우선적으로 선정합니다...
+[Top3LLM] 선정: task_abc123 - UI/UX 디자인 초안 피드백 요청 (프로젝트: LUMINA, 요청자: 전형우)
+[Top3LLM] 선정: task_def456 - 프로토타입 제작 (프로젝트: LUMINA, 요청자: 정지원)
+[Top3LLM] 선정: task_ghi789 - 테스트 자동화 스크립트 (프로젝트: LUMINA, 요청자: 임보연)
 ```
 
 ---
@@ -788,8 +821,8 @@ TODO 직렬화: 50개
 
 **7단계: 결과 반환**
 ```
-선정된 ID: {"task_abc123", "task_ghi789", "task_jkl012"}
-선정 이유: "PN 프로젝트의 전형우가 요청한 업무처리 TODO를 찾았습니다..."
+선정된 ID: {"task_abc123", "task_def456", "task_ghi789"}
+선정 이유: "프로젝트 LUMINA에서 전형우가 요청한 업무처리 TODO를 우선적으로 선정합니다..."
 ```
 
 ---

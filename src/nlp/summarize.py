@@ -471,8 +471,14 @@ class MessageSummarizer:
             action_required=action_required
         )
     
-    async def batch_summarize(self, messages: List[Dict]) -> List[MessageSummary]:
-        """여러 메시지를 동시(제한된 동시성)로 요약. 입력 순서를 보존합니다."""
+    async def batch_summarize(self, messages: List[Dict], batch_callback=None, batch_size: int = 40) -> List[MessageSummary]:
+        """여러 메시지를 배치 단위로 요약. 입력 순서를 보존합니다.
+        
+        Args:
+            messages: 요약할 메시지 리스트
+            batch_callback: 각 배치 완료 시 호출할 콜백 함수 (batch_idx, total_batches, batch_results)
+            batch_size: 배치 크기 (기본값: 40)
+        """
         if not messages:
             return []
 
@@ -481,6 +487,12 @@ class MessageSummarizer:
         sem = asyncio.Semaphore(CONCURRENCY)
 
         results: List[MessageSummary] = [None] * len(messages)  # 입력 순서 유지용
+        
+        # 배치로 나누기
+        total_messages = len(messages)
+        num_batches = (total_messages + batch_size - 1) // batch_size
+        
+        logger.info(f"📝 {total_messages}개 메시지를 {num_batches}개 배치로 나누어 분석 시작 (배치 크기: {batch_size})")
 
         async def one(i: int, m: Dict):
             content = (m.get("content") or m.get("body") or "").strip()
@@ -490,10 +502,9 @@ class MessageSummarizer:
             # 내용이 비면 호출하지 않고 기본 요약
             if not content:
                 s = self._basic_summarize(content, sender, subject)
-                s.original_id = m.get("msg_id") or s.original_id   # ✅ 여기
+                s.original_id = m.get("msg_id") or s.original_id
                 results[i] = s
                 return
-
 
             try:
                 async with sem:
@@ -508,10 +519,32 @@ class MessageSummarizer:
             except Exception as e:
                 logger.error(f"메시지 요약 오류 (index={i}): {e}")
                 s = self._basic_summarize(content, sender, subject)
-                s.original_id = m.get("msg_id") or s.original_id   # ✅ 여기
+                s.original_id = m.get("msg_id") or s.original_id
                 results[i] = s
-                
-        await asyncio.gather(*[asyncio.create_task(one(i, m)) for i, m in enumerate(messages)])
+        
+        # 배치별로 처리
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, total_messages)
+            batch_messages = messages[start_idx:end_idx]
+            
+            logger.info(f"   📦 배치 {batch_idx + 1}/{num_batches}: {len(batch_messages)}개 메시지 분석 중...")
+            
+            # 배치 내 메시지들을 동시에 처리
+            await asyncio.gather(*[asyncio.create_task(one(start_idx + i, m)) for i, m in enumerate(batch_messages)])
+            
+            # 배치 완료 - 현재까지의 결과 추출
+            batch_results = results[start_idx:end_idx]
+            completed_count = sum(1 for r in results[:end_idx] if r is not None)
+            
+            logger.info(f"   ✅ 배치 {batch_idx + 1}/{num_batches} 완료 (누적: {completed_count}/{total_messages}개)")
+            
+            # 콜백 호출 (있는 경우)
+            if batch_callback:
+                try:
+                    await batch_callback(batch_idx + 1, num_batches, batch_results, completed_count)
+                except Exception as e:
+                    logger.error(f"배치 콜백 오류: {e}")
 
         logger.info(f"📝 {sum(1 for r in results if r is not None)}개 메시지 요약 완료")
         return results

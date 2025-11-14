@@ -24,6 +24,8 @@ def group_by_day(messages: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any
     """
     groups = defaultdict(list)
     
+    logger.info(f"📅 일별 그룹화 시작: {len(messages)}개 메시지")
+    
     for message in messages:
         dt = parse_message_date(message)
         date_key = dt.strftime("%Y-%m-%d")
@@ -32,6 +34,11 @@ def group_by_day(messages: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any
     # 최신순 정렬 (내림차순)
     sorted_groups = dict(sorted(groups.items(), reverse=True))
     logger.info(f"📅 일별 그룹화 완료: {len(sorted_groups)}개 그룹")
+    
+    # 날짜 분포 로그 (처음 10개)
+    for i, (date_key, msgs) in enumerate(sorted(sorted_groups.items())[:10]):
+        logger.info(f"  {date_key}: {len(msgs)}건")
+    
     return sorted_groups
 
 

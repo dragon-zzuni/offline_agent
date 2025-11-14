@@ -306,9 +306,12 @@ TODO 리스트 ({len(todos)}개):
 
 선정 기준 (반드시 순서대로 적용):
 1. **프로젝트 조건을 최우선으로 정확히 만족**: 
-   - 각 TODO의 "프로젝트" 필드를 확인하세요
-   - 사용자가 "care bridge" 또는 "CareBridge"라고 하면 프로젝트가 "CareBridge Integration (CI)" 또는 "CI"인 TODO만 선택
-   - "Care Connect"라고 하면 프로젝트가 "Care Connect 2.0 (CC)" 또는 "CC"인 TODO만 선택
+   - 각 TODO의 "프로젝트" 필드를 확인하세요 (예: "Project LUMINA (PL)" 형태로 표시됨)
+   - 사용자가 프로젝트 이름을 언급하면 (한글/영문/약어 모두 가능):
+     * "LUMINA", "루미나", "PL" → "Project LUMINA (PL)" 또는 약어 "PL"이 포함된 TODO 선택
+     * "CareBridge", "케어브릿지", "CI" → "CareBridge Integration (CI)" 또는 약어 "CI"가 포함된 TODO 선택
+     * "Care Connect", "케어커넥트", "CC" → "Care Connect 2.0 (CC)" 또는 약어 "CC"가 포함된 TODO 선택
+   - **중요**: 프로젝트 필드에 풀네임과 약어가 함께 표시되므로, 사용자가 어떤 형태로 입력해도 매칭되어야 합니다!
    - 프로젝트 조건이 맞지 않으면 절대 선택하지 마세요!
 
 2. **요청자 조건을 정확히 만족**: 

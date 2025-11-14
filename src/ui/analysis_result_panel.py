@@ -13,7 +13,7 @@ from collections import Counter
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QScrollArea, QFrame, QSplitter
+    QScrollArea, QFrame, QSplitter, QSizePolicy
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -139,9 +139,15 @@ class AnalysisResultPanel(QWidget):
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # 스크롤 영역이 내용에 맞게 크기 조정되도록 설정
+        scroll_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         # 상세 컨테이너
         self.detail_container = QWidget()
+        # 컨테이너가 스크롤 영역에 맞게 크기 조정되도록 설정
+        self.detail_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        
         self.detail_layout = QVBoxLayout(self.detail_container)
         self.detail_layout.setContentsMargins(0, 0, 0, 0)
         self.detail_layout.setSpacing(Spacing.MD)
@@ -500,6 +506,8 @@ class AnalysisResultPanel(QWidget):
         """메시지 카드 생성 (상세 정보 포함)"""
         card = QFrame()
         card.setFrameStyle(QFrame.Shape.StyledPanel)
+        # 카드가 내용에 맞게 크기 조정되도록 설정
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         card.setStyleSheet(f"""
             QFrame {{
                 background-color: {Colors.BG_PRIMARY};
@@ -515,6 +523,7 @@ class AnalysisResultPanel(QWidget):
         
         layout = QVBoxLayout(card)
         layout.setSpacing(Spacing.SM)
+        layout.setContentsMargins(Spacing.MD, Spacing.MD, Spacing.MD, Spacing.MD)
         
         # 메시지 정보
         msg = result.get("message", {})
@@ -562,17 +571,27 @@ class AnalysisResultPanel(QWidget):
         if recipients or cc:
             recipient_text = ""
             if recipients:
-                recipient_text += f"수신: {', '.join(recipients[:2])}"
-                if len(recipients) > 2:
-                    recipient_text += f" 외 {len(recipients) - 2}명"
+                # recipients가 리스트가 아닐 수 있으므로 처리
+                if isinstance(recipients, list):
+                    recipient_text += f"수신: {', '.join(str(r) for r in recipients[:2])}"
+                    if len(recipients) > 2:
+                        recipient_text += f" 외 {len(recipients) - 2}명"
+                else:
+                    recipient_text += f"수신: {recipients}"
             if cc:
                 if recipient_text:
                     recipient_text += " | "
-                recipient_text += f"참조: {', '.join(cc[:2])}"
-                if len(cc) > 2:
-                    recipient_text += f" 외 {len(cc) - 2}명"
+                # cc가 리스트가 아닐 수 있으므로 처리
+                if isinstance(cc, list):
+                    recipient_text += f"참조: {', '.join(str(c) for c in cc[:2])}"
+                    if len(cc) > 2:
+                        recipient_text += f" 외 {len(cc) - 2}명"
+                else:
+                    recipient_text += f"참조: {cc}"
             
             recipient_label = QLabel(recipient_text)
+            recipient_label.setWordWrap(True)  # 텍스트 줄바꿈 활성화
+            recipient_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             recipient_label.setStyleSheet(f"""
                 QLabel {{
                     color: {Colors.TEXT_SECONDARY};
@@ -587,7 +606,8 @@ class AnalysisResultPanel(QWidget):
         # 4. 제목/내용
         if subject:
             subject_label = QLabel(f"내용: {subject}")
-            subject_label.setWordWrap(True)
+            subject_label.setWordWrap(True)  # 텍스트 줄바꿈 활성화
+            subject_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             subject_label.setStyleSheet(f"""
                 QLabel {{
                     color: {Colors.TEXT_SECONDARY};
@@ -620,6 +640,8 @@ class AnalysisResultPanel(QWidget):
                     # 액션 제목을 짧게 자르기
                     short_title = action_title[:20] + "..." if len(action_title) > 20 else action_title
                     action_tag = QLabel(short_title)
+                    action_tag.setWordWrap(True)  # 텍스트 줄바꿈 활성화
+                    action_tag.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
                     action_tag.setStyleSheet(f"""
                         QLabel {{
                             background-color: {Colors.PRIMARY_BG};

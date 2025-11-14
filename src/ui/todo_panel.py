@@ -282,19 +282,53 @@ class BasicTodoItem(QWidget):
         if recipient_badge:
             meta.addWidget(recipient_badge, 0)
         
-        # 수신 시간 표시
-        if todo.get("created_at"):
+        # 수신 시간 표시 (원본 메시지의 시뮬레이션 시간 사용)
+        received_time = None
+        
+        # 1. source_message에서 원본 메시지의 date 가져오기 (VDOS DB의 sent_at)
+        source_message = todo.get("source_message")
+        if source_message:
+            try:
+                # source_message가 JSON 문자열이면 파싱
+                if isinstance(source_message, str):
+                    source_msg_dict = json.loads(source_message)
+                else:
+                    source_msg_dict = source_message
+                
+                # date 사용 (VDOS DB의 sent_at이 이미 시뮬레이션 시간)
+                # simulated_datetime은 수집 시간이므로 사용하지 않음
+                received_time = source_msg_dict.get("date")
+            except:
+                pass
+        
+        # 2. evidence에서 시도 (폴백)
+        if not received_time:
+            evidence = todo.get("evidence")
+            if evidence:
+                try:
+                    evidence_list = json.loads(evidence) if isinstance(evidence, str) else evidence
+                    if evidence_list and len(evidence_list) > 0:
+                        first_msg = evidence_list[0]
+                        received_time = first_msg.get("date")
+                except:
+                    pass
+        
+        # 3. 없으면 created_at 사용 (폴백)
+        if not received_time:
+            received_time = todo.get("created_at")
+        
+        if received_time:
             from utils.datetime_utils import parse_iso_datetime
-            created_dt = parse_iso_datetime(todo.get("created_at"))
-            if created_dt:
+            received_dt = parse_iso_datetime(received_time)
+            if received_dt:
                 # 한국 시간으로 변환하여 표시
                 from datetime import timezone, timedelta
                 kst = timezone(timedelta(hours=9))
-                created_kst = created_dt.astimezone(kst)
-                created_str = created_kst.strftime("%m/%d %H:%M")
-                created_lbl = QLabel(f"수신 · {created_str}")
-                created_lbl.setStyleSheet("color:#059669; background:#D1FAE5; padding:2px 6px; border-radius:8px;")
-                meta.addWidget(created_lbl, 0)
+                received_kst = received_dt.astimezone(kst)
+                received_str = received_kst.strftime("%m/%d %H:%M")
+                received_lbl = QLabel(f"수신 · {received_str}")
+                received_lbl.setStyleSheet("color:#059669; background:#D1FAE5; padding:2px 6px; border-radius:8px;")
+                meta.addWidget(received_lbl, 0)
         
         # 마감 시간 표시
         if todo.get("deadline"):
@@ -775,10 +809,10 @@ class TodoPanel(QWidget):
             # TODO 리스트를 다시 로드해서 프로젝트 태그 업데이트
             rows = self.controller.load_active_items()
             if not rows:
-                logger.debug("[프로젝트 업데이트] rows 없음")
+                logger.info("[프로젝트 업데이트] rows 없음 - 스킵")
                 return
             
-            logger.debug(f"[프로젝트 업데이트] DB에서 {len(rows)}개 TODO 로드")
+            logger.info(f"[프로젝트 업데이트] DB에서 {len(rows)}개 TODO 로드")
             
             # 프로젝트 태그가 실제로 변경되었는지 확인
             has_changes = False
@@ -799,9 +833,10 @@ class TodoPanel(QWidget):
                             if len(changes_detail) < 5:  # 최대 5개만 로그
                                 logger.info(f"[프로젝트 업데이트] 변경 감지: {todo_id}: '{old_project}' → '{new_project}'")
             
-            # 변경사항이 없으면 업데이트 건너뛰기
+            # 변경사항이 없으면 프로젝트 태그 바만 업데이트 (초기 로드 대응)
             if not has_changes:
-                logger.debug("[프로젝트 업데이트] 변경사항 없음 - 스킵")
+                logger.debug("[프로젝트 업데이트] 변경사항 없음 - 프로젝트 태그 바만 업데이트")
+                self._update_project_tag_bar_from_todos(rows)
                 return
             
             logger.info(f"[프로젝트 업데이트] 프로젝트 태그 변경 감지 - UI 업데이트")
@@ -1016,13 +1051,18 @@ class TodoPanel(QWidget):
 
         return merged
     
-    def refresh_todo_list(self, show_reasoning: bool = False) -> None:
+    def refresh_todo_list(self, show_reasoning: bool = False, preserve_existing_on_empty: bool = True) -> None:
         """TODO 리스트 새로고침
         
         Args:
             show_reasoning: True면 Top3 선정이유 팝업 표시 (기본값: False)
+            preserve_existing_on_empty: True면 새 데이터가 없을 때 기존 표시를 유지
         """
-        logger.info(f"[TodoPanel] refresh_todo_list 시작 (show_reasoning={show_reasoning})")
+        logger.info(
+            "[TodoPanel] refresh_todo_list 시작 (show_reasoning=%s, preserve_existing_on_empty=%s)",
+            show_reasoning,
+            preserve_existing_on_empty,
+        )
         
         # 현재 페르소나 정보 가져오기
         persona_name = self._get_current_persona_name()
@@ -1041,7 +1081,7 @@ class TodoPanel(QWidget):
 
         if not rows:
             # 기존 TODO가 있으면 유지 (백그라운드 분석 중)
-            if self._all_rows:
+            if preserve_existing_on_empty and self._all_rows:
                 logger.info("[TodoPanel] TODO 없음 - 기존 TODO 유지 (백그라운드 분석 중)")
                 return
             else:
@@ -1555,9 +1595,12 @@ class TodoPanel(QWidget):
             self.async_project_service = None
     
     def queue_new_todos_for_async_analysis(self, new_todos: List[dict]):
-        """새로운 TODO들을 비동기 분석 큐에 추가"""
+        """새로운 TODO들을 비동기 분석 큐에 추가 (현재 페르소나 우선순위 적용)"""
         if not self.async_project_service or not new_todos:
             return
+        
+        # 현재 페르소나 정보 가져오기
+        current_persona_name = self._get_current_persona_name()
         
         # 프로젝트 태그가 없는 TODO만 필터링
         todos_needing_analysis = [
@@ -1566,7 +1609,7 @@ class TodoPanel(QWidget):
         ]
         
         if todos_needing_analysis:
-            logger.info(f"🔄 {len(todos_needing_analysis)}개 새 TODO 비동기 프로젝트 태그 분석 큐에 추가")
+            logger.info(f"🔄 {len(todos_needing_analysis)}개 새 TODO 비동기 프로젝트 태그 분석 큐에 추가 (현재 페르소나: {current_persona_name})")
             
             def on_project_analyzed(todo_id: str, project: str):
                 """프로젝트 태그 분석 완료 콜백"""
@@ -1574,10 +1617,38 @@ class TodoPanel(QWidget):
                 # UI 업데이트는 주기적으로 일괄 처리 (성능 최적화)
                 # 개별 TODO마다 refresh하면 성능 저하 발생
             
-            self.async_project_service.queue_multiple_todos(
-                todos_needing_analysis, 
-                on_project_analyzed
-            )
+            # 현재 페르소나의 TODO를 우선순위로 큐에 추가
+            priority_todos = []
+            normal_todos = []
+            
+            for todo in todos_needing_analysis:
+                todo_persona = todo.get("persona_name")
+                # 현재 페르소나의 TODO는 우선순위 높음
+                if current_persona_name and todo_persona == current_persona_name:
+                    priority_todos.append(todo)
+                else:
+                    normal_todos.append(todo)
+            
+            # 우선순위 TODO 먼저 큐에 추가 (priority=True)
+            for todo in priority_todos:
+                todo_id = todo.get("id")
+                if todo_id:
+                    self.async_project_service.queue_todo_for_analysis(
+                        todo_id, todo, on_project_analyzed, priority=True
+                    )
+            
+            # 일반 TODO 나중에 큐에 추가 (priority=False)
+            for todo in normal_todos:
+                todo_id = todo.get("id")
+                if todo_id:
+                    self.async_project_service.queue_todo_for_analysis(
+                        todo_id, todo, on_project_analyzed, priority=False
+                    )
+            
+            if priority_todos:
+                logger.info(f"⚡ {len(priority_todos)}개 현재 페르소나 TODO 우선 분석 큐에 추가")
+            if normal_todos:
+                logger.info(f"📋 {len(normal_todos)}개 일반 TODO 분석 큐에 추가")
     
     def get_async_project_tag_stats(self) -> dict:
         """비동기 프로젝트 태그 서비스 통계 반환"""
@@ -1850,12 +1921,12 @@ class TodoDetailDialog(QDialog):
         # 요약 표시 영역
         self.summary_text = QTextEdit()
         self.summary_text.setReadOnly(True)
-        self.summary_text.setPlaceholderText("원본 메시지가 없습니다.")
+        self.summary_text.setPlaceholderText("'요약 생성' 버튼을 클릭하여 요약을 생성하세요.")
         self.summary_text.setStyleSheet("background:#F9FAFB; border:1px solid #E5E7EB; border-radius:6px; padding:8px;")
         self.summary_text.setMinimumHeight(120)
         
-        # 처음에 원본 메시지 내용 표시
-        self._display_original_content()
+        # 처음에는 빈 상태로 시작 (요약 생성 버튼을 눌러야만 표시)
+        self.summary_text.setPlainText("")
         
         main_layout.addWidget(self.summary_text)
         
@@ -2071,49 +2142,9 @@ class TodoDetailDialog(QDialog):
             self.generate_reply_btn.setText("✉️ 회신 초안 작성")
     
     def _display_original_content(self):
-        """원본 메시지 내용을 요약 영역에 표시"""
-        try:
-            # 원본 메시지 내용 가져오기
-            src = _source_message_dict(self.todo)
-            
-            if not src:
-                self.summary_text.setPlainText("원본 메시지가 없습니다.")
-                return
-            
-            # 원본 메시지 구조화하여 표시
-            content_parts = []
-            
-            # 발신자 정보
-            sender = src.get("sender", "")
-            if sender:
-                content_parts.append(f"📧 발신자: {sender}")
-            
-            # 플랫폼 정보
-            platform = src.get("platform", "")
-            if platform:
-                content_parts.append(f"📱 플랫폼: {platform}")
-            
-            # 제목 정보
-            subject = src.get("subject", "")
-            if subject:
-                content_parts.append(f"📋 제목: {subject}")
-            
-            # 구분선
-            if content_parts:
-                content_parts.append("─" * 50)
-            
-            # 메시지 내용 (source_message의 content 또는 description 필드 사용)
-            message_content = src.get("content", "") or self.todo.get("description", "")
-            if message_content:
-                content_parts.append(f"📄 메시지 내용:\n{message_content}")
-            else:
-                content_parts.append("📄 메시지 내용: (내용 없음)")
-            
-            # 최종 텍스트 조합
-            display_text = "\n".join(content_parts)
-            self.summary_text.setPlainText(display_text)
-            
-        except Exception as e:
-            logger.error(f"원본 메시지 표시 오류: {e}")
-            self.summary_text.setPlainText(f"원본 메시지 표시 중 오류가 발생했습니다: {e}")
+        """원본 메시지 내용을 요약 영역에 표시 (더 이상 사용하지 않음 - 위쪽에만 표시)"""
+        # 이 메서드는 더 이상 사용하지 않습니다.
+        # 원본 메시지는 위쪽 "원본 메시지" 섹션에만 표시되고,
+        # 아래쪽 "요약 및 액션" 섹션은 요약 생성 버튼을 눌렀을 때만 내용이 표시됩니다.
+        pass
 

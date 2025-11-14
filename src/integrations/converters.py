@@ -83,20 +83,27 @@ def convert_email_to_internal_format(
     sender_persona = persona_map.get(sender_email.lower(), {})
     sender_name = sender_persona.get("name", sender_email)
     
-    # recipient_type 판별 (선택된 페르소나가 to/cc/bcc 중 어디에 있는지)
+    # recipient_type 판별 (선택된 페르소나가 to/cc/bcc 중 어디에 있는지, 또는 발신자인지)
     recipient_type = "to"  # 기본값
     if selected_persona_email:
         selected_email_lower = selected_persona_email.lower()
-        to_list = [r.lower() for r in (email.get("to") or [])]
-        cc_list = [r.lower() for r in (email.get("cc") or [])]
-        bcc_list = [r.lower() for r in (email.get("bcc") or [])]
+        sender_email_lower = sender_email.lower()
         
-        if selected_email_lower in to_list:
-            recipient_type = "to"
-        elif selected_email_lower in cc_list:
-            recipient_type = "cc"
-        elif selected_email_lower in bcc_list:
-            recipient_type = "bcc"
+        # 발신자가 선택된 페르소나인 경우
+        if sender_email_lower == selected_email_lower:
+            recipient_type = "from"
+        else:
+            # 수신자 목록에서 확인
+            to_list = [r.lower() for r in (email.get("to") or [])]
+            cc_list = [r.lower() for r in (email.get("cc") or [])]
+            bcc_list = [r.lower() for r in (email.get("bcc") or [])]
+            
+            if selected_email_lower in to_list:
+                recipient_type = "to"
+            elif selected_email_lower in cc_list:
+                recipient_type = "cc"
+            elif selected_email_lower in bcc_list:
+                recipient_type = "bcc"
     
     # ISO 날짜 표준화
     iso_date = _to_aware_iso(email.get("sent_at"))

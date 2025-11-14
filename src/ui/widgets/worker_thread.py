@@ -12,6 +12,7 @@ class WorkerThread(QThread):
     status_updated = pyqtSignal(str)
     result_ready = pyqtSignal(dict)
     error_occurred = pyqtSignal(str)
+    batch_completed = pyqtSignal(int, int, int)  # batch_idx, total_batches, completed_count
     
     def __init__(self, assistant, dataset_config, collect_options):
         super().__init__()

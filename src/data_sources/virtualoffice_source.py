@@ -213,19 +213,27 @@ class VirtualOfficeDataSource(DataSource):
             hours = minutes_24h // 60
             minutes = minutes_24h % 60
 
+            # 원본 날짜 보존 (덮어쓰지 않음)
             if source_date and "original_date" not in metadata:
                 metadata["original_date"] = source_date
 
+            # 시뮬레이션 정보는 메타데이터에 저장
             metadata["sim_tick"] = tick
             metadata["sim_day_index"] = day_index + 1
             metadata["sim_time"] = f"Day {day_index + 1} {hours:02d}:{minutes:02d}"
+            metadata["simulated_datetime"] = sim_dt.isoformat()
             msg["metadata"] = metadata
 
-            msg["simulated_datetime"] = sim_dt.isoformat()
+            # 시뮬레이션 인덱스 정보 추가 (그룹화용)
             msg["sim_day_index"] = day_index + 1
             msg["sim_week_index"] = day_index // 7 + 1
             msg["sim_month_index"] = day_index // 30 + 1
-            msg["date"] = sim_dt.isoformat()
+            
+            # simulated_datetime을 최상위 레벨에도 추가 (TODO source_message에서 접근 가능하도록)
+            msg["simulated_datetime"] = sim_dt.isoformat()
+            
+            # 중요: 원본 date는 VDOS DB의 sent_at 시간 그대로 유지
+            # msg["date"]를 덮어쓰지 않음!
     
     async def collect_messages(self, options: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
@@ -327,30 +335,13 @@ class VirtualOfficeDataSource(DataSource):
         # 통합 및 정렬
         all_messages = emails + messages
         
-        # 메시지 필터링 적용 - 성능 측정
-        start_time = time.time()
-        from utils.message_filters import apply_all_filters
-        all_messages, filter_stats = apply_all_filters(all_messages)
-        filter_time = time.time() - start_time
-        
+        # 메시지 필터링은 데이터 수집 시점에 적용하지 않음
+        # TODO 생성 시에만 필터링 적용 (메시지 탭/메일 탭에서는 원본 메시지 표시)
         logger.info(
-            f"🔍 메시지 필터링 완료: {filter_stats['original_count']}개 → {filter_stats['filtered_count']}개 "
-            f"({filter_stats['removed_count']}개 제거) - {filter_time:.2f}초"
-        )
-        logger.info(
-            f"  - 본문 중복: {filter_stats['content_duplicate']}개"
-        )
-        logger.info(
-            f"  - 짧은 메시지: {filter_stats['too_short']}개, "
-            f"단순 인사: {filter_stats['simple_greeting']}개, "
-            f"단순 업데이트: {filter_stats['simple_update']}개"
-        )
-        logger.info(
-            f"  - TO/CC/BCC 중복: {filter_stats['recipient_type_removed']}개 "
-            f"(TO {filter_stats['to_kept']}개, CC {filter_stats['cc_kept']}개, BCC {filter_stats['bcc_kept']}개 유지)"
+            f"📨 메시지 수집 완료 (필터링 없음): 이메일 {len(emails)}개, 채팅 {len(messages)}개"
         )
 
-        # 시뮬레이션 시간 메타데이터 주입
+        # 시뮬레이션 시간 메타데이터 주입 (tick 기반 시간 계산)
         self._annotate_simulation_timestamps(all_messages)
         
         # 정렬 - 성능 측정
@@ -477,20 +468,11 @@ class VirtualOfficeDataSource(DataSource):
                 for m in raw_messages
             ]
             
-            # 메시지 필터링 적용
-            from utils.message_filters import apply_all_filters
-            all_new_messages = emails + messages
-            all_new_messages, filter_stats = apply_all_filters(all_new_messages)
-            
-            # 필터링 후 이메일과 메시지 분리
-            emails = [m for m in all_new_messages if m.get("platform") == "email"]
-            messages = [m for m in all_new_messages if m.get("platform") != "email"]
-            
-            if filter_stats["removed_count"] > 0:
-                logger.info(
-                    f"🔍 배치 수집 필터링: {filter_stats['original_count']}개 → {filter_stats['filtered_count']}개 "
-                    f"({filter_stats['removed_count']}개 제거)"
-                )
+            # 메시지 필터링은 배치 수집 시점에 적용하지 않음
+            # TODO 생성 시에만 필터링 적용
+            logger.info(
+                f"📨 배치 수집 완료 (필터링 없음): 이메일 {len(emails)}개, 채팅 {len(messages)}개"
+            )
             
             # last_id 업데이트
             if raw_emails:
@@ -498,6 +480,7 @@ class VirtualOfficeDataSource(DataSource):
             if raw_messages:
                 self.last_message_id = max(m["id"] for m in raw_messages)
 
+            # 시뮬레이션 시간 메타데이터 주입 (tick 기반 시간 계산)
             self._annotate_simulation_timestamps(emails)
             self._annotate_simulation_timestamps(messages)
             

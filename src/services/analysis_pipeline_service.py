@@ -91,7 +91,8 @@ class AnalysisPipelineService:
         email_limit: Optional[int] = None,
         messenger_limit: Optional[int] = None,
         overall_limit: Optional[int] = None,
-        force_reload: bool = False
+        force_reload: bool = False,
+        batch_callback=None
     ) -> Dict[str, Any]:
         """
         메시지 분석 파이프라인 실행
@@ -105,6 +106,7 @@ class AnalysisPipelineService:
             messenger_limit: 메신저 최대 개수
             overall_limit: 전체 메시지 최대 개수
             force_reload: 강제 리로드 여부
+            batch_callback: 각 배치 완료 시 호출할 콜백 함수
         
         Returns:
             {
@@ -140,12 +142,15 @@ class AnalysisPipelineService:
             logger.warning("수집된 메시지가 없습니다.")
             return self._empty_result()
         
+        # 원본 메시지를 msg_id로 매핑 (TODO 생성 시 사용)
+        self._original_messages_map = {msg.get("msg_id"): msg for msg in messages}
+        
         # 2. 우선순위 분류
         ranked_messages = await self._rank_messages(messages)
         
         # 3. 상위 N개 요약
         top_messages = [m for (m, _) in ranked_messages][:top_n]
-        summaries = await self._summarize_messages(top_messages)
+        summaries = await self._summarize_messages(top_messages, batch_callback=batch_callback)
         
         # 4. 액션 추출
         actions = await self._extract_actions(top_messages)
@@ -250,6 +255,25 @@ class AnalysisPipelineService:
         
         messages = await self._data_source_manager.collect_messages(collect_options)
         
+        # TODO 생성용 메시지 필터링 적용
+        from utils.message_filters import apply_all_filters
+        original_count = len(messages)
+        messages, filter_stats = apply_all_filters(messages)
+        
+        logger.info(
+            f"🔍 TODO 생성용 필터링: {original_count}개 → {len(messages)}개 "
+            f"({filter_stats['removed_count']}개 제거)"
+        )
+        logger.info(
+            f"  - 본문 중복: {filter_stats['content_duplicate']}개, "
+            f"짧은 메시지: {filter_stats['too_short']}개, "
+            f"단순 인사: {filter_stats['simple_greeting']}개, "
+            f"단순 업데이트: {filter_stats['simple_update']}개"
+        )
+        logger.info(
+            f"  - TO/CC/BCC 중복: {filter_stats['recipient_type_removed']}개"
+        )
+        
         # 메시지 병합 (연속된 메시지 합치기)
         from main import coalesce_messages, _sort_key
         merged = coalesce_messages(messages, window_seconds=90, max_chars=1200)
@@ -280,13 +304,18 @@ class AnalysisPipelineService:
 
     async def _summarize_messages(
         self,
-        messages: List[Dict[str, Any]]
+        messages: List[Dict[str, Any]],
+        batch_callback=None
     ) -> List[Any]:
         """메시지 요약 (모든 메시지를 LLM이 판단)
         
         이전에는 정보 공유 메시지를 사전 필터링했지만,
         배치 처리 + Rate Limit 회피가 구현되어 있으므로
         모든 메시지를 LLM에게 판단시키는 것이 더 정확합니다.
+        
+        Args:
+            messages: 요약할 메시지 리스트
+            batch_callback: 각 배치 완료 시 호출할 콜백 함수
         """
         logger.info(f"📝 {len(messages)}개 메시지 LLM 분석 시작 (배치 처리)...")
         
@@ -294,7 +323,7 @@ class AnalysisPipelineService:
         # - 배치 40개씩 처리
         # - Rate limit 회피 (0.2초 지연 + 자동 재시도)
         # - LLM이 action_required를 정확하게 판단
-        summaries = await self._summarizer.batch_summarize(messages)
+        summaries = await self._summarizer.batch_summarize(messages, batch_callback=batch_callback)
         
         logger.info(f"✅ 메시지 요약 완료: {len(summaries)}개")
         return summaries
@@ -489,9 +518,31 @@ class AnalysisPipelineService:
                 # TODO 생성
                 todo_id = f"todo_{datetime.now().timestamp()}_{created_count}"
                 
-                # source_message에 전체 메시지 내용 저장 (프로젝트 태그 추출용)
+                # source_message에 원본 메시지 저장 (date 필드 포함)
                 import json
-                source_message_full = json.dumps(message, ensure_ascii=False) if message else action_source_id
+                if message:
+                    # 원본 메시지 맵에서 가져오기 (date 필드 포함)
+                    msg_id = message.get("msg_id")
+                    original_message = self._original_messages_map.get(msg_id, message)
+                    
+                    # 디버깅: 원본 메시지 확인
+                    logger.info(f"🔍 LLM TODO #{created_count} msg_id: {msg_id}")
+                    logger.info(f"🔍 LLM TODO #{created_count} original_message 키: {list(original_message.keys())}")
+                    logger.info(f"🔍 LLM TODO #{created_count} original_message.get('date'): {original_message.get('date')}")
+                    logger.info(f"🔍 LLM TODO #{created_count} message.get('date'): {message.get('date')}")
+                    
+                    # 원본 메시지를 저장 (빠른 분석과 동일)
+                    source_message_full = json.dumps(original_message, ensure_ascii=False)
+                else:
+                    source_message_full = action_source_id
+                
+                # Evidence (우선순위 추론 사유)
+                priority_reasons: List[str] = []
+                if isinstance(priority_obj, dict):
+                    priority_reasons = priority_obj.get("reasoning") or []
+                elif priority_obj:
+                    priority_reasons = getattr(priority_obj, "reasoning", []) or []
+                evidence_payload = json.dumps(priority_reasons[:3], ensure_ascii=False)
                 
                 todo_item = {
                     "id": todo_id,
@@ -507,6 +558,7 @@ class AnalysisPipelineService:
                     "recipient_type": recipient_type,
                     "source_type": source_type,
                     "persona_name": persona_name,
+                    "evidence": evidence_payload,
                 }
                 
                 todo_items.append(todo_item)

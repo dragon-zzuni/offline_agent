@@ -239,6 +239,7 @@ class SmartAssistant:
 
         self._chat_messages: List[Dict[str, Any]] = []
         self._email_messages: List[Dict[str, Any]] = []
+        self._message_index: Dict[str, Dict[str, Any]] = {}
         self._dataset_loaded = False
         self._dataset_last_loaded: Optional[datetime] = None
         
@@ -581,10 +582,20 @@ class SmartAssistant:
         email_messages = [m for m in messages if m.get("type") == "email"]
         
         # 메시지 병합 (연속된 메시지 합치기)
+        # 주의: coalesce_messages는 미리보기용으로만 사용하고, 원본 메시지는 _message_index에 저장
         merged = coalesce_messages(messages, window_seconds=90, max_chars=1200)
         merged.sort(key=_sort_key, reverse=True)
 
         self.collected_messages = merged
+        # 원본 메시지 전체 내용 보존을 위한 인덱스 (병합 전 원본 메시지 사용)
+        self._message_index = {
+            msg.get("msg_id"): msg for msg in messages if msg.get("msg_id")
+        }
+        # 병합된 메시지도 인덱스에 추가 (msg_id가 여러 개인 경우 대비)
+        for msg in merged:
+            msg_id = msg.get("msg_id")
+            if msg_id and msg_id not in self._message_index:
+                self._message_index[msg_id] = msg
         logger.info(
             "📦 총 %d개 메시지 수집 (chat %d, email %d)",
             len(self.collected_messages),
@@ -907,7 +918,7 @@ class SmartAssistant:
         logger.info(f"📝 2단계: LLM으로 {total_to_analyze}개 메시지 배치 분석 시작...")
         logger.info(f"   → 임시 TODO가 생성된 {len(temp_action_msg_ids)}개 메시지 중 {total_to_analyze}개 분석 (배치 크기: {BATCH_SIZE}개)")
         
-        # 배치로 나누어 분석
+        # 배치로 나누어 분석 + 배치별 TODO 저장
         all_summaries = []
         num_batches = (total_to_analyze + BATCH_SIZE - 1) // BATCH_SIZE
         
@@ -923,6 +934,122 @@ class SmartAssistant:
             all_summaries.extend(batch_summaries)
             
             logger.info(f"   ✅ 배치 {batch_idx + 1}/{num_batches} 완료 (누적: {len(all_summaries)}/{total_to_analyze}개)")
+            
+            # 배치별 TODO 생성 및 저장 (UI 즉시 업데이트)
+            try:
+                # 현재 배치의 summary를 msg_id로 매핑
+                batch_summary_by_id = {}
+                for m, s in zip(batch_messages, batch_summaries):
+                    if s and not getattr(s, "original_id", None):
+                        s.original_id = m.get("msg_id")
+                    batch_summary_by_id[m["msg_id"]] = s
+                
+                # 현재 배치의 액션만 필터링
+                batch_filtered_actions = []
+                for action in temp_actions:
+                    msg_id = action.source_message_id if hasattr(action, 'source_message_id') else None
+                    if msg_id in batch_summary_by_id:
+                        summary = batch_summary_by_id[msg_id]
+                        if summary and hasattr(summary, "action_required") and summary.action_required:
+                            batch_filtered_actions.append(action)
+                
+                # 배치 TODO 생성
+                if batch_filtered_actions:
+                    batch_todos = []
+                    persona_name = self.user_profile.get('name') if hasattr(self, 'user_profile') and self.user_profile else None
+                    
+                    for action in batch_filtered_actions:
+                        msg_id = action.source_message_id if hasattr(action, 'source_message_id') else None
+                        # 전체 메시지 리스트에서 찾기 (배치에 없을 수도 있음)
+                        message = msg_by_id.get(msg_id) if msg_id else None
+                        if message:
+                            # TODO 아이템 생성
+                            recipient_type = message.get("recipient_type", "to")
+                            platform = message.get("platform", "")
+                            source_type = "메일" if platform == "email" else "메시지"
+                            
+                            # 원본 메시지에서 전체 내용 가져오기
+                            original_content = message.get("content") or message.get("body") or ""
+                            original_subject = message.get("subject") or ""
+                            
+                            todo_item = {
+                                "id": action.action_id if hasattr(action, 'action_id') else action.get("action_id"),
+                                "title": action.title if hasattr(action, 'title') else action.get("title"),
+                                "description": action.description if hasattr(action, 'description') else action.get("description"),
+                                "priority": action.priority if hasattr(action, 'priority') else action.get("priority", "medium"),
+                                "deadline": action.deadline if hasattr(action, 'deadline') else action.get("deadline"),
+                                "requester": (action.requester if hasattr(action, 'requester') else action.get("requester")) or message.get("sender"),
+                                "type": action.action_type if hasattr(action, 'action_type') else action.get("action_type"),
+                                "status": "pending",
+                                "recipient_type": recipient_type,
+                                "source_type": source_type,
+                                "persona_name": persona_name,
+                                "source_message": {
+                                    "id": message.get("msg_id"),
+                                    "sender": message.get("sender"),
+                                    "subject": original_subject,
+                                    "content": original_content,  # 전체 내용 포함
+                                    "body": original_content,     # body도 포함 (호환성)
+                                    "platform": message.get("platform"),
+                                    "recipient_type": recipient_type,
+                                    "is_read": True,
+                                    "date": message.get("date") or message.get("timestamp") or message.get("sent_at"),
+                                },
+                                "created_at": action.created_at if hasattr(action, 'created_at') else action.get("created_at"),
+                                "_viewed": False,
+                            }
+                            batch_todos.append(todo_item)
+                    
+                    # DB에 저장 (직접 SQLite 사용)
+                    if batch_todos:
+                        import sqlite3
+                        from pathlib import Path
+                        
+                        # TODO DB 경로 (virtualoffice/src/virtualoffice/todos_cache.db)
+                        project_root = Path(__file__).parent
+                        db_path = project_root.parent / "virtualoffice" / "src" / "virtualoffice" / "todos_cache.db"
+                        
+                        conn = sqlite3.connect(str(db_path))
+                        cur = conn.cursor()
+                        
+                        for todo in batch_todos:
+                            cur.execute("""
+                                INSERT OR REPLACE INTO todos (
+                                    id, title, description, priority, deadline, deadline_ts,
+                                    requester, type, status, source_message, created_at, updated_at,
+                                    snooze_until, is_top3, evidence, deadline_confidence,
+                                    recipient_type, source_type, persona_name, project_tag, draft_subject, draft_body
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                todo.get("id"),
+                                todo.get("title"),
+                                todo.get("description"),
+                                todo.get("priority"),
+                                todo.get("deadline"),
+                                None,  # deadline_ts
+                                todo.get("requester"),
+                                todo.get("type"),
+                                todo.get("status", "pending"),
+                                json.dumps(todo.get("source_message"), ensure_ascii=False) if todo.get("source_message") else None,
+                                todo.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                                datetime.now(timezone.utc).isoformat(),
+                                None,  # snooze_until
+                                0,  # is_top3
+                                todo.get("evidence"),
+                                todo.get("deadline_confidence"),
+                                todo.get("recipient_type"),
+                                todo.get("source_type"),
+                                todo.get("persona_name"),
+                                todo.get("project"),
+                                todo.get("draft_subject"),
+                                todo.get("draft_body")
+                            ))
+                        
+                        conn.commit()
+                        conn.close()
+                        logger.info(f"   💾 배치 {batch_idx + 1}/{num_batches}: {len(batch_todos)}개 TODO 저장 완료 → UI 업데이트 가능")
+            except Exception as e:
+                logger.error(f"   ❌ 배치 {batch_idx + 1} TODO 저장 실패: {e}", exc_info=True)
         
         self.summaries = all_summaries
         logger.info(f"✅ 전체 LLM 분석 완료: {len(self.summaries)}개 메시지")
@@ -1117,26 +1244,82 @@ class SmartAssistant:
             for action in result.get("actions", []):
                 # 원본 메시지에서 recipient_type 가져오기
                 source_msg = result.get("message") or {}
+                msg_id = (
+                    source_msg.get("msg_id")
+                    or source_msg.get("id")
+                    or (source_msg.get("message_id") if isinstance(source_msg.get("message_id"), str) else None)
+                )
+                original_msg = None
+                if msg_id:
+                    original_msg = self._message_index.get(msg_id)
+                    if not original_msg:
+                        # 안전망: message_index가 비어있을 때 기존 리스트에서 검색
+                        original_msg = next(
+                            (m for m in self.collected_messages if m.get("msg_id") == msg_id),
+                            None,
+                        )
+                if not original_msg:
+                    original_msg = source_msg
                 recipient_type = source_msg.get("recipient_type", "to")
                 platform = source_msg.get("platform", "")
                 
                 # 소스 타입 결정 (메일/메시지)
                 source_type = "메일" if platform == "email" else "메시지"
                 
-                # 이메일의 경우에만 TO/CC/BCC 필터링 적용
-                # 메신저 메시지는 recipient_type이 없거나 다른 값이므로 필터링하지 않음
-                if platform == "email" and recipient_type != "to":
-                    logger.debug(f"🔍 [DEBUG] 이메일 CC/BCC 필터링: recipient_type={recipient_type}")
-                    continue
-                
-                # 페르소나 이름 결정: 메시지의 주 수신자(TO)를 기준으로 설정
-                # CC/BCC로 받은 메시지는 해당 페르소나의 TODO가 아님
                 persona_name = None
-                if recipient_type == "to":
-                    # TO로 받은 메시지만 현재 페르소나의 TODO로 설정
-                    if hasattr(self, 'user_profile') and self.user_profile:
-                        persona_name = self.user_profile.get('name')
-                # CC/BCC로 받은 메시지는 persona_name을 None으로 남겨둠 (필터링됨)
+                if hasattr(self, 'user_profile') and self.user_profile:
+                    persona_name = self.user_profile.get('name')
+
+                source_metadata = (
+                    original_msg.get("metadata")
+                    or source_msg.get("metadata")
+                    or {}
+                )
+                date_candidates = [
+                    original_msg.get("date"),
+                    source_metadata.get("original_date"),
+                    original_msg.get("timestamp"),
+                    original_msg.get("sent_at"),
+                    original_msg.get("created_at"),
+                    source_msg.get("date"),
+                    source_msg.get("timestamp"),
+                    source_msg.get("sent_at"),
+                    source_msg.get("created_at"),
+                ]
+                received_time = next((value for value in date_candidates if value), None)
+                simulated_time = (
+                    original_msg.get("simulated_datetime")
+                    or source_metadata.get("simulated_datetime")
+                    or source_msg.get("simulated_datetime")
+                    or source_metadata.get("simulated_datetime")
+                )
+
+                # 원본 메시지에서 전체 내용 가져오기 (잘림 방지)
+                original_content = original_msg.get("content") or original_msg.get("body") or source_msg.get("content") or source_msg.get("body") or ""
+                original_subject = original_msg.get("subject") or source_msg.get("subject") or ""
+                
+                source_message_payload = {
+                    "id": original_msg.get("msg_id") or source_msg.get("msg_id") or source_msg.get("id"),
+                    "sender": original_msg.get("sender") or source_msg.get("sender"),
+                    "subject": original_subject,
+                    "content": original_content,  # 전체 내용 포함 (잘림 방지)
+                    "body": original_content,     # body도 포함 (호환성)
+                    "platform": original_msg.get("platform") or source_msg.get("platform"),
+                    "recipient_type": recipient_type,
+                    "is_read": True,  # 새로 생성된 TODO는 기본적으로 읽음 처리
+                }
+                if received_time:
+                    source_message_payload["date"] = received_time
+                if simulated_time:
+                    source_message_payload["simulated_datetime"] = simulated_time
+                sim_day_index = original_msg.get("sim_day_index") or source_msg.get("sim_day_index")
+                if sim_day_index:
+                    source_message_payload["sim_day_index"] = sim_day_index
+                sim_time = original_msg.get("sim_time") or source_msg.get("sim_time")
+                if sim_time:
+                    source_message_payload["sim_time"] = sim_time
+                if source_metadata:
+                    source_message_payload["metadata"] = dict(source_metadata)
                 
                 todo_item = {
                     "id": action.get("action_id"),
@@ -1150,14 +1333,7 @@ class SmartAssistant:
                     "recipient_type": recipient_type,  # 수신 타입 추가 (to/cc/bcc)
                     "source_type": source_type,  # 소스 타입 추가 (메일/메시지)
                     "persona_name": persona_name,  # 페르소나 이름 추가
-                    "source_message": {
-                        "id": source_msg.get("msg_id"),
-                        "sender": source_msg.get("sender"),
-                        "subject": source_msg.get("subject"),
-                        "platform": source_msg.get("platform"),
-                        "recipient_type": recipient_type,
-                        "is_read": True,  # 새로 생성된 TODO는 기본적으로 읽음 처리
-                    },
+                    "source_message": source_message_payload,
                     "created_at": action.get("created_at"),
                     "_viewed": False,  # 아직 사용자가 확인하지 않음
                 }
