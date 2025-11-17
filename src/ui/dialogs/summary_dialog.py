@@ -5,10 +5,12 @@
 일일/주간 요약을 표시하는 다이얼로그입니다.
 """
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import List
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QWidget, QSizePolicy
+    QScrollArea, QWidget, QSizePolicy, QFileDialog, QMessageBox, QMenu
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -26,7 +28,8 @@ class SummaryDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumSize(600, 500)
-        self._init_ui(title, text)
+        self._raw_text = (text or "").strip()
+        self._init_ui(title, self._raw_text or "표시할 요약이 없습니다.")
     
     def _init_ui(self, title: str, text: str):
         """UI 초기화"""
@@ -126,6 +129,8 @@ class SummaryDialog(QDialog):
                 section_title = QLabel(line)
                 section_title.setFont(QFont(Fonts.FAMILY, Fonts.SIZE_BASE, QFont.Weight.Bold))
                 section_title.setStyleSheet(f"color: {Colors.PRIMARY}; padding-bottom: 4px;")
+                section_title.setWordWrap(True)
+                section_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
                 section_layout.addWidget(section_title)
             else:
                 # 섹션 내용
@@ -174,10 +179,10 @@ class SummaryDialog(QDialog):
         label.setFont(QFont(Fonts.FAMILY, Fonts.SIZE_SM))
         label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; padding: 2px 0;")
         label.setWordWrap(True)
+        label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        label.setMaximumWidth(550)  # 다이얼로그 너비(600) - 여백
         return label
     
     def _create_footer(self, layout: QVBoxLayout):
@@ -186,6 +191,9 @@ class SummaryDialog(QDialog):
         button_container.setStyleSheet(f"background-color: {Colors.BG_SECONDARY}; padding: {Spacing.SM}px;")
         button_layout = QHBoxLayout(button_container)
         button_layout.addStretch()
+
+        download_button = self._create_download_button()
+        button_layout.addWidget(download_button)
         
         close_button = QPushButton("닫기")
         close_button.setMinimumWidth(100)
@@ -207,3 +215,99 @@ class SummaryDialog(QDialog):
         button_layout.addWidget(close_button)
         
         layout.addWidget(button_container)
+
+    def _create_download_button(self) -> QPushButton:
+        """다운로드 버튼 생성"""
+        button = QPushButton("다운로드")
+        button.setMinimumWidth(110)
+        button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: white;
+                color: {Colors.PRIMARY_DARK};
+                border: 1px solid {Colors.PRIMARY};
+                border-radius: {BorderRadius.BASE}px;
+                padding: {Spacing.SM}px {Spacing.MD}px;
+                font-size: {FontSizes.BASE};
+                font-weight: {FontWeights.MEDIUM};
+            }}
+            QPushButton::menu-indicator {{
+                image: none;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.BG_PRIMARY};
+            }}
+        """)
+        menu = QMenu(button)
+        menu.addAction("Markdown (.md) 저장", lambda: self._download_summary("md"))
+        menu.addAction("텍스트 (.txt) 저장", lambda: self._download_summary("txt"))
+        button.setMenu(menu)
+        return button
+
+    def _download_summary(self, fmt: str) -> None:
+        """요약을 지정된 포맷으로 저장"""
+        if not self._raw_text:
+            QMessageBox.warning(self, "다운로드 실패", "저장할 요약 데이터가 없습니다.")
+            return
+        
+        suffix = ".md" if fmt == "md" else ".txt"
+        filters = {
+            "md": "Markdown 파일 (*.md)",
+            "txt": "텍스트 파일 (*.txt)"
+        }
+        suggested = self._build_default_filename(suffix)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "요약 다운로드",
+            str(Path.home() / suggested),
+            f"{filters[fmt]};;모든 파일 (*.*)"
+        )
+        if not path:
+            return
+        
+        path_obj = Path(path)
+        if path_obj.suffix.lower() != suffix:
+            path_obj = path_obj.with_suffix(suffix)
+        
+        try:
+            content = self._build_export_content(fmt)
+            path_obj.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            logger.exception("요약 저장 실패: %s", exc)
+            QMessageBox.critical(self, "다운로드 실패", "파일을 저장하는 중 문제가 발생했습니다.")
+            return
+        
+        QMessageBox.information(self, "다운로드 완료", f"요약을 '{path_obj.name}' 파일로 저장했습니다.")
+
+    def _build_default_filename(self, suffix: str) -> str:
+        """제목과 포맷에 맞는 기본 파일명 생성"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        title = self.windowTitle().replace(" ", "_")
+        return f"{title}_{timestamp}{suffix}"
+
+    def _build_export_content(self, fmt: str) -> str:
+        """포맷별 저장 콘텐츠 생성"""
+        lines = [line.strip() for line in (self._raw_text or "").splitlines() if line.strip()]
+        if not lines:
+            return "표시할 요약이 없습니다.\n"
+        
+        if fmt == "md":
+            md_lines: List[str] = []
+            for idx, line in enumerate(lines):
+                if set(line) == {"="}:
+                    continue
+                if idx == 0:
+                    md_lines.append(f"# {line}")
+                    continue
+                if self._is_section_title(line):
+                    title = line.rstrip(":")
+                    if md_lines and md_lines[-1] != "":
+                        md_lines.append("")
+                    md_lines.append(f"## {title}")
+                else:
+                    if line.startswith(("-", "*", "·")):
+                        md_lines.append(line)
+                    else:
+                        md_lines.append(f"- {line}")
+            return "\n".join(md_lines).strip() + "\n"
+        
+        return "\n".join(lines) + "\n"

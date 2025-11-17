@@ -42,6 +42,7 @@ class CachedAnalysisResult:
     analysis_summary: Dict[str, Any]
     created_at: datetime
     last_accessed_at: datetime = field(default_factory=datetime.now)
+    analysis_data: List[Dict[str, Any]] = field(default_factory=list)
     
     def update_access_time(self) -> None:
         """마지막 접근 시간 업데이트"""

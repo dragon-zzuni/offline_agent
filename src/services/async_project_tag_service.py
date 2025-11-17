@@ -237,7 +237,13 @@ class AsyncProjectTagService:
                     project = result[0].strip()
                     # 영구 캐시에도 저장
                     if self.cache_service and project:
-                        self.cache_service.save_tag(todo_id, project, confidence='db_cache')
+                        fullname = self._resolve_project_full_name(project)
+                        self.cache_service.save_tag(
+                            todo_id,
+                            project,
+                            confidence='db_cache',
+                            project_full_name=fullname,
+                        )
                     return project
             else:
                 # 폴백: 기존 repository 사용 (메인 스레드에서만)
@@ -247,7 +253,13 @@ class AsyncProjectTagService:
                         project = project.strip()
                         # 영구 캐시에도 저장
                         if self.cache_service:
-                            self.cache_service.save_tag(todo_id, project, confidence='db_cache')
+                            fullname = self._resolve_project_full_name(project)
+                            self.cache_service.save_tag(
+                                todo_id,
+                                project,
+                                confidence='db_cache',
+                                project_full_name=fullname,
+                            )
                         return project
                     
         except Exception as e:
@@ -285,14 +297,24 @@ class AsyncProjectTagService:
             logger.debug(f"[AsyncProjectTag] {todo_id}: 프로젝트 태그 분석 시작")
             
             # 프로젝트 태그 추출
-            project = self._extract_project_tag(todo_data)
+            project_result = self._extract_project_tag(todo_data, return_reason=True)
+            if isinstance(project_result, tuple):
+                project, classification_reason = project_result
+            else:
+                project, classification_reason = project_result, None
             
             if project:
                 # TODO 데이터에 프로젝트 태그 설정
                 todo_data["project"] = project
+                project_fullname = self._resolve_project_full_name(project)
                 
                 # DB에 캐시 저장 (스레드 안전성을 위해 직접 DB 연결)
-                self._save_project_to_db_thread_safe(todo_id, project)
+                self._save_project_to_db_thread_safe(
+                    todo_id,
+                    project,
+                    classification_reason=classification_reason,
+                    project_full_name=project_fullname,
+                )
                 
                 logger.info(f"[AsyncProjectTag] ✅ {todo_id}: {project}")
                 self.stats["analyzed"] += 1
@@ -315,7 +337,14 @@ class AsyncProjectTagService:
                     else:
                         cache_key = todo_id
                     
-                    self.cache_service.save_tag(cache_key, project, confidence='llm', analysis_method='async')
+                    self.cache_service.save_tag(
+                        cache_key,
+                        project,
+                        confidence='llm',
+                        analysis_method='async',
+                        classification_reason=classification_reason,
+                        project_full_name=project_fullname,
+                    )
                     logger.debug(f"[AsyncProjectTag] 영구 캐시 저장: {cache_key} → {project}")
                 
                 # 콜백 호출
@@ -330,10 +359,30 @@ class AsyncProjectTagService:
             logger.error(f"프로젝트 태그 분석 오류 ({task.todo_id}): {e}")
             self.stats["errors"] += 1
     
-    def _save_project_to_db_thread_safe(self, todo_id: str, project: str):
+    def _resolve_project_full_name(self, project_code: Optional[str]) -> Optional[str]:
+        """프로젝트 코드에 해당하는 풀네임을 찾는다."""
+        if not project_code:
+            return None
+        if self.project_service and hasattr(self.project_service, "get_project_tag"):
+            try:
+                tag = self.project_service.get_project_tag(project_code)
+                if tag:
+                    return getattr(tag, "name", None)
+            except Exception:
+                pass
+        try:
+            from src.utils.project_fullname_mapper import get_project_fullname
+
+            return get_project_fullname(project_code)
+        except Exception:
+            return None
+
+    def _save_project_to_db_thread_safe(self, todo_id: str, project: str, classification_reason: Optional[str] = None, project_full_name: Optional[str] = None):
         """스레드 안전한 방식으로 프로젝트 태그를 DB에 저장 (todos_cache.db + 캐시 DB)"""
         from datetime import datetime
         import os
+        
+        resolved_fullname = project_full_name or self._resolve_project_full_name(project)
         
         # 1. todos_cache.db에 저장
         try:
@@ -343,8 +392,8 @@ class AsyncProjectTagService:
             
             # 프로젝트 태그 업데이트 (컬럼명: project_tag)
             cur.execute(
-                "UPDATE todos SET project_tag = ?, updated_at = datetime('now') WHERE id = ?",
-                (project, todo_id)
+                "UPDATE todos SET project_tag = ?, project_full_name = ?, updated_at = datetime('now') WHERE id = ?",
+                (project, resolved_fullname, todo_id)
             )
             conn.commit()
             conn.close()
@@ -375,6 +424,9 @@ class AsyncProjectTagService:
                         project_tag TEXT NOT NULL,
                         confidence TEXT,
                         analysis_method TEXT,
+                        classification_reason TEXT,
+                        project_full_name TEXT,
+                        evidence TEXT,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     )
@@ -383,11 +435,24 @@ class AsyncProjectTagService:
                 now = datetime.now().isoformat()
                 cur.execute("""
                     INSERT OR REPLACE INTO project_tag_cache 
-                    (todo_id, project_tag, confidence, analysis_method, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 
+                    (todo_id, project_tag, confidence, analysis_method,
+                     classification_reason, project_full_name, evidence,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 
                         COALESCE((SELECT created_at FROM project_tag_cache WHERE todo_id = ?), ?),
                         ?)
-                """, (todo_id, project, 'llm', 'async_analysis', todo_id, now, now))
+                """, (
+                    todo_id,
+                    project,
+                    'llm',
+                    'async_analysis',
+                    classification_reason,
+                    resolved_fullname,
+                    classification_reason,
+                    todo_id,
+                    now,
+                    now,
+                ))
                 
                 conn.commit()
                 conn.close()
@@ -396,7 +461,7 @@ class AsyncProjectTagService:
         except Exception as e:
             logger.error(f"[AsyncProjectTag] 캐시 DB 저장 오류 ({todo_id}): {e}")
     
-    def _extract_project_tag(self, todo_data: Dict) -> Optional[str]:
+    def _extract_project_tag(self, todo_data: Dict, return_reason: bool = False):
         """TODO 데이터에서 프로젝트 태그 추출"""
         try:
             # TODO 데이터에서 직접 정보 추출
@@ -428,12 +493,17 @@ class AsyncProjectTagService:
                 "subject": subject,
                 "sender": sender or requester,
             }
+            message["id"] = todo_data.get("id") or todo_data.get("todo_id")
             
             logger.debug(f"[AsyncProjectTag] 분석할 메시지: 제목={subject}, 발신자={sender or requester}")
             
             # 프로젝트 서비스로 추출
             if self.project_service:
-                return self.project_service.extract_project_from_message(message, use_cache=False)
+                return self.project_service.extract_project_from_message(
+                    message,
+                    use_cache=False,
+                    return_details=return_reason,
+                )
             
             return None
             

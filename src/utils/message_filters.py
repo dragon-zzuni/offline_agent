@@ -317,10 +317,11 @@ def filter_short_and_simple_messages(messages: List[Dict[str, Any]]) -> Tuple[Li
 def apply_all_filters(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """모든 필터링 적용
     
-    1. 발신 메시지 제거 (recipient_type == "from")
-    2. 본문 내용 중복 제거
-    3. 짧은 메시지/단순 인사/업데이트 제거
-    4. TO/CC/BCC 우선순위 필터링
+    참고: 발신 메시지(recipient_type="from")는 데이터 수집 단계에서 이미 제외됨
+    
+    1. 본문 내용 중복 제거
+    2. 짧은 메시지/단순 인사/업데이트 제거
+    3. TO/CC/BCC 우선순위 필터링
     
     Args:
         messages: 메시지 리스트
@@ -330,20 +331,14 @@ def apply_all_filters(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, An
     """
     original_count = len(messages)
     
-    # 1. 발신 메시지 제거 (선택된 페르소나가 보낸 메시지는 TODO 생성 대상이 아님)
-    from_messages_count = len([m for m in messages if m.get("recipient_type") == "from"])
-    messages = [m for m in messages if m.get("recipient_type") != "from"]
-    
-    if from_messages_count > 0:
-        logger.info(f"📤 발신 메시지 제거: {from_messages_count}개 (TODO 생성 대상 아님)")
-    
-    # 2. 본문 내용 중복 제거
+    # 1. 본문 내용 중복 제거
+    # 참고: 발신 메시지는 이미 데이터 수집 단계에서 제외됨
     messages, content_dup_count = filter_duplicate_content(messages)
     
-    # 3. 짧은 메시지/단순 인사/업데이트 제거
+    # 2. 짧은 메시지/단순 인사/업데이트 제거
     messages, short_simple_stats = filter_short_and_simple_messages(messages)
     
-    # 4. TO/CC/BCC 우선순위 필터링 (같은 이메일 ID를 가진 경우만)
+    # 3. TO/CC/BCC 우선순위 필터링 (같은 이메일 ID를 가진 경우만)
     # 참고: filter_duplicate_content에서 이미 내용 기반 우선순위 필터링을 했으므로
     # 여기서는 같은 이메일 ID를 가진 경우만 처리 (거의 발생하지 않음)
     messages, recipient_stats = filter_by_recipient_type(messages)
@@ -353,7 +348,7 @@ def apply_all_filters(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, An
         "original_count": original_count,
         "filtered_count": len(messages),
         "removed_count": original_count - len(messages),
-        "from_messages": from_messages_count,
+        "from_messages": 0,  # 발신 메시지는 데이터 수집 단계에서 이미 제외됨
         "content_duplicate": content_dup_count,
         "too_short": short_simple_stats["too_short"],
         "simple_greeting": short_simple_stats["simple_greeting"],

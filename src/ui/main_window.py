@@ -1095,7 +1095,7 @@ class SmartAssistantGUI(QMainWindow):
                 todo_items = []
                 if hasattr(self, 'todo_panel') and hasattr(self.todo_panel, 'repository'):
                     try:
-                        todo_items = self.todo_panel.repository.get_all()
+                        todo_items = self.todo_panel.repository.fetch_active()
                     except Exception as e:
                         logger.warning(f"TODO 아이템 가져오기 실패: {e}")
                 self.email_panel.update_emails(email_messages, todo_items)
@@ -1106,9 +1106,12 @@ class SmartAssistantGUI(QMainWindow):
             
             # 분석 결과 패널 업데이트
             if hasattr(self, 'analysis_result_panel') and hasattr(self, 'analysis_results'):
+                # 현재 페르소나의 sender IDs 전달 (이메일과 채팅 핸들 모두)
+                current_persona_ids = getattr(self, '_current_persona_ids', [])
                 self.analysis_result_panel.update_analysis(
                     self.analysis_results, 
-                    filtered_messages
+                    filtered_messages,
+                    current_persona_ids
                 )
             
             logger.info("✅ 필터링된 데이터로 UI 업데이트 완료")
@@ -1824,23 +1827,29 @@ class SmartAssistantGUI(QMainWindow):
         
         try:
             self.selected_persona = persona
-            persona_key = f"{persona.email_address}_{persona.chat_handle}"
+            persona_key = self._build_persona_key(persona)
+            self._current_persona_id = persona_key
             logger.info(f"페르소나 변경: {persona.name} ({persona.email_address})")
 
             # 페르소나 변경 시 기존 메시지 상태 초기화
             self._reset_message_state_for_persona_change()
             
-            # 현재 페르소나 ID 업데이트
-            self._current_persona_id = persona.email_address or persona.chat_handle
-            
-            # TODO 컨트롤러에 페르소나 필터 설정 (이메일, 핸들도 전달)
-            if hasattr(self, 'todo_panel') and self.todo_panel:
-                self.todo_panel.controller.set_persona_filter(
-                    persona_name=persona.name,
-                    persona_email=persona.email_address,
-                    persona_handle=persona.chat_handle
+            # 현재 페르소나 ID 업데이트 (이메일과 채팅 핸들 모두 저장)
+            self._current_persona_email = persona.email_address
+            self._current_persona_handle = persona.chat_handle
+            self._current_persona_ids = [
+                value for value in (
+                    persona.email_address,
+                    persona.chat_handle,
+                    getattr(persona, "id", None),
                 )
-                logger.info(f"👤 TODO 페르소나 필터 설정: {persona.name} (이메일: {persona.email_address}, 핸들: {persona.chat_handle})")
+                if value
+            ]
+            
+            # 데이터 소스 및 사용자 프로필을 항상 최신 페르소나로 동기화
+            self.assistant.set_virtualoffice_source(self.vo_client, persona)
+            if hasattr(self.data_collection_service, "set_selected_persona"):
+                self.data_collection_service.set_selected_persona(persona)
             
             # 데이터 소스 업데이트 (VirtualOffice 모드인 경우에만)
             if self.data_source_type == "virtualoffice":
@@ -1853,9 +1862,14 @@ class SmartAssistantGUI(QMainWindow):
                     logger.info(f"✅ 캐시 히트: {persona.name} - 즉시 표시")
                     self.status_message.setText(f"캐시에서 로드 중: {persona.name}...")
                     
-                    # ✅ 캐시 히트 시: TODO DB 초기화는 하지 않음 (캐시 복원 시 populate_from_items가 처리)
-                    # 대신 페르소나 필터만 설정하고 캐시 복원
-                    logger.info(f"🔄 페르소나 필터 설정 후 캐시 복원 중...")
+                    # ✅ 캐시 복원 전에 페르소나 필터 설정
+                    if hasattr(self, 'todo_panel') and self.todo_panel:
+                        self.todo_panel.controller.set_persona_filter(
+                            persona_name=persona.name,
+                            persona_email=persona.email_address,
+                            persona_handle=persona.chat_handle
+                        )
+                        logger.info(f"👤 TODO 페르소나 필터 설정 (캐시 복원 전): {persona.name}")
                     
                     # 캐시 복원 (TODO, 메시지, UI 패널 모두 복원)
                     self._display_cached_result(cached_result)
@@ -1885,9 +1899,6 @@ class SmartAssistantGUI(QMainWindow):
                     
                     # ✅ 캐시 미스 시: 재분석 플래그 리셋
                     self._skip_reanalysis_after_cache_hit = False
-                    
-                    # 데이터 소스 업데이트
-                    self.assistant.set_virtualoffice_source(self.vo_client, persona)
                     
                     # ✅ 캐시 미스 시: 폴링 워커 업데이트 및 즉시 폴링 트리거
                     self._update_polling_worker_persona(persona)
@@ -2130,7 +2141,7 @@ class SmartAssistantGUI(QMainWindow):
             todo_items = []
             if hasattr(self, 'todo_panel') and hasattr(self.todo_panel, 'repository'):
                 try:
-                    todo_items = self.todo_panel.repository.get_all()
+                    todo_items = self.todo_panel.repository.fetch_active()
                 except Exception as e:
                     logger.warning(f"TODO 아이템 가져오기 실패: {e}")
             self.email_panel.update_emails(email_messages, todo_items)
@@ -2150,6 +2161,11 @@ class SmartAssistantGUI(QMainWindow):
     
     def _finalize_new_data_processing(self, all_messages, total_new, timestamp):
         """새 데이터 처리 완료"""
+        # 초기 수집 완료 플래그 설정
+        if not getattr(self, '_initial_collection_completed', False):
+            self._initial_collection_completed = True
+            logger.info("✅ 초기 데이터 수집 완료 - 페르소나 변경 시 즉시 폴링 활성화")
+        
         if total_new > 0:
             # ✅ 캐시 히트 후에는 재분석 건너뛰기
             skip_reanalysis = getattr(self, '_skip_reanalysis_after_cache_hit', False)
@@ -2332,6 +2348,21 @@ class SmartAssistantGUI(QMainWindow):
             CacheKey: 생성된 캐시 키
         """
         return self.analysis_controller._build_cache_key()
+    
+    def _build_persona_key(self, persona) -> str:
+        """페르소나별 캐시 키 생성을 위한 식별자"""
+        if not persona:
+            return "unknown_persona"
+        email = str(getattr(persona, "email_address", "") or "").strip()
+        handle = str(getattr(persona, "chat_handle", "") or "").strip()
+        persona_id = str(getattr(persona, "id", "") or "").strip()
+        name = str(getattr(persona, "name", "") or "").strip()
+        
+        parts = [p for p in (email, handle) if p]
+        if not parts:
+            identifier = persona_id or name or "unknown_persona"
+            parts = [identifier]
+        return "|".join(parts)
     
     def _display_cached_result(self, cached_result: 'CachedAnalysisResult') -> None:
         """캐시된 분석 결과를 UI에 표시

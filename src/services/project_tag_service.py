@@ -247,7 +247,12 @@ class ProjectTagService:
         logger.debug("_ensure_all_projects_loaded() 호출됨 (비활성화됨)")
         return 0
     
-    def extract_project_from_message(self, message: Dict, use_cache: bool = True) -> Optional[str]:
+    def extract_project_from_message(
+        self,
+        message: Dict,
+        use_cache: bool = True,
+        return_details: bool = False,
+    ):
         """메시지에서 프로젝트 코드 추출 (캐시 우선, LLM 기반 지능 분류)
         
         분석 우선순위:
@@ -262,7 +267,8 @@ class ProjectTagService:
             use_cache: 캐시 사용 여부
             
         Returns:
-            프로젝트 코드 (예: "WELL", "WI", "CC") 또는 None
+            프로젝트 코드 (예: "WELL", "WI", "CC") 또는 None.
+            return_details=True이면 (프로젝트 코드, 분류 근거) 튜플을 반환.
         """
         try:
             todo_id = message.get('id')
@@ -276,7 +282,7 @@ class ProjectTagService:
                         logger.debug(f"[프로젝트 태그] 캐시 히트: {todo_id} → {cached['project_tag']} ({reason})")
                     else:
                         logger.debug(f"[프로젝트 태그] 캐시 히트: {todo_id} → {cached['project_tag']}")
-                    return cached['project_tag']
+                    return (cached['project_tag'], reason) if return_details else cached['project_tag']
             
             # 1. 명시적 프로젝트명 확인 (대괄호 패턴 등 명확한 경우만)
             explicit_project = self._extract_explicit_project(message)
@@ -300,8 +306,16 @@ class ProjectTagService:
                 
                 # 캐시 저장
                 if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
-                    self.tag_cache.save_tag(todo_id, result, 'explicit', 'pattern_match', reason)
-                return result
+                    project_full_name = self._get_project_full_name(result)
+                    self.tag_cache.save_tag(
+                        todo_id,
+                        result,
+                        'explicit',
+                        'pattern_match',
+                        reason,
+                        project_full_name=project_full_name,
+                    )
+                return (result, reason) if return_details else result
             
             # 2. LLM 기반 지능 분류 (메시지 내용 우선 분석)
             llm_result = self._extract_project_by_llm(message)
@@ -312,8 +326,16 @@ class ProjectTagService:
                     
                     # 캐시 저장
                     if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
-                        self.tag_cache.save_tag(todo_id, llm_project, 'llm', 'content_analysis', llm_reason)
-                    return llm_project
+                        project_full_name = self._get_project_full_name(llm_project)
+                        self.tag_cache.save_tag(
+                            todo_id,
+                            llm_project,
+                            'llm',
+                            'content_analysis',
+                            llm_reason,
+                            project_full_name=project_full_name,
+                        )
+                    return (llm_project, llm_reason) if return_details else llm_project
             
             # 3. 고급 분석 (프로젝트 기간, 설명, 발신자 종합)
             advanced_result = self._extract_project_by_advanced_analysis(message)
@@ -323,8 +345,16 @@ class ProjectTagService:
                 
                 # 캐시 저장
                 if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
-                    self.tag_cache.save_tag(todo_id, project_code, 'advanced', 'advanced_analysis', reason)
-                return project_code
+                    project_full_name = self._get_project_full_name(project_code)
+                    self.tag_cache.save_tag(
+                        todo_id,
+                        project_code,
+                        'advanced',
+                        'advanced_analysis',
+                        reason,
+                        project_full_name=project_full_name,
+                    )
+                return (project_code, reason) if return_details else project_code
             
             # 4. 발신자 정보 참고 (폴백 - 여러 프로젝트 가능하므로 참고용)
             sender_project = self._extract_project_by_sender(message)
@@ -334,14 +364,22 @@ class ProjectTagService:
                 
                 # 캐시 저장
                 if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
-                    self.tag_cache.save_tag(todo_id, sender_project, 'sender', 'sender_fallback', reason)
-                return sender_project
+                    project_full_name = self._get_project_full_name(sender_project)
+                    self.tag_cache.save_tag(
+                        todo_id,
+                        sender_project,
+                        'sender',
+                        'sender_fallback',
+                        reason,
+                        project_full_name=project_full_name,
+                    )
+                return (sender_project, reason) if return_details else sender_project
             
             # 5. 최종 폴백: "미분류" 태그 부여 (프로젝트를 전혀 식별할 수 없는 경우)
             logger.info("[프로젝트 태그] 최종 폴백: 미분류")
             if todo_id and hasattr(self, 'tag_cache') and self.tag_cache:
                 self.tag_cache.save_tag(todo_id, "미분류", 'fallback', 'unclassified', "프로젝트 특정 불가")
-            return "미분류"
+            return ("미분류", "프로젝트 특정 불가") if return_details else "미분류"
             
         except Exception as e:
             logger.error(f"프로젝트 추출 오류: {e}")
@@ -1301,6 +1339,13 @@ class ProjectTagService:
     def get_available_projects(self) -> Dict[str, ProjectTag]:
         """사용 가능한 프로젝트 태그 반환"""
         return self.project_tags.copy()
+    
+    def _get_project_full_name(self, project_code: Optional[str]) -> Optional[str]:
+        """프로젝트 코드에 해당하는 풀네임 반환"""
+        if not project_code:
+            return None
+        tag = self.project_tags.get(project_code)
+        return tag.name if tag else None
     
     def get_project_color(self, project_code: str) -> str:
         """프로젝트 코드의 색상 반환"""

@@ -38,6 +38,7 @@ class AnalysisResultPanel(QWidget):
         super().__init__(parent)
         self._analysis_results = []
         self._messages = []
+        self._current_persona_ids = []
         self._init_ui()
     
     def _init_ui(self):
@@ -200,15 +201,17 @@ class AnalysisResultPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
     
-    def update_analysis(self, analysis_results: List[Dict], messages: List[Dict]):
+    def update_analysis(self, analysis_results: List[Dict], messages: List[Dict], current_persona_ids: Optional[List[str]] = None):
         """분석 결과 업데이트
         
         Args:
             analysis_results: 분석 결과 리스트
             messages: 원본 메시지 리스트
+            current_persona_ids: 현재 페르소나의 sender IDs (이메일, 채팅 핸들 등)
         """
         self._analysis_results = analysis_results or []
         self._messages = messages or []
+        self._current_persona_ids = current_persona_ids or []
         
         if not self._analysis_results:
             self._show_empty_summary()
@@ -427,10 +430,13 @@ class AnalysisResultPanel(QWidget):
         """)
         layout.addWidget(title)
         
-        # 발신자 카운트
+        # 발신자 카운트 (현재 페르소나 제외)
         sender_counts = Counter()
         for msg in self._messages:
             sender = msg.get("sender", "Unknown")
+            # 현재 페르소나가 발신한 메시지는 제외 (이메일, 채팅 핸들 모두 체크)
+            if sender in self._current_persona_ids:
+                continue
             sender_counts[sender] += 1
         
         # 상위 5명

@@ -151,10 +151,10 @@ class EmailPanel(QWidget):
         """
         self.emails = emails
         self.email_list.clear()
+        self.todo_message_ids = set()
         
         # TODO 아이템에서 메시지 ID 추출
         if todo_items:
-            self.todo_message_ids = set()
             for todo in todo_items:
                 source_msg = todo.get("source_message", {})
                 if isinstance(source_msg, str):

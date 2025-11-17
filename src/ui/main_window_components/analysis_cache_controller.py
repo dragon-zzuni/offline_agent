@@ -31,6 +31,8 @@ class AnalysisCacheController:
     def __init__(self, ui: "SmartAssistantGUI") -> None:
         self.ui = ui
         self._collect_in_progress: bool = False
+        self._active_collection_persona: Optional[str] = None
+        self._pending_persona_key: Optional[str] = None
         self._last_analysis_incremental: bool = False
 
     # ------------------------------------------------------------------
@@ -398,9 +400,13 @@ class AnalysisCacheController:
                 logger.info(f"📋 캐시 복원된 TODO 개수: {len(cached_result.todo_list)}, 현재 페르소나: {current_persona}")
 
             # 3. 분석 결과 복원
-            if cached_result.analysis_results:
-                ui.analysis_results = cached_result.analysis_results
-                logger.info("📊 분석 결과 복원: %d개", len(cached_result.analysis_results))
+            analysis_data = getattr(cached_result, "analysis_data", None)
+            if analysis_data:
+                ui.analysis_results = analysis_data
+                logger.info("📊 분석 결과 복원: %d개", len(analysis_data))
+            elif hasattr(cached_result, 'analysis_summary') and cached_result.analysis_summary:
+                ui.analysis_results = cached_result.analysis_summary.get('results', [])
+                logger.info("📊 분석 결과 복원(하위 호환): %d개", len(ui.analysis_results) if ui.analysis_results else 0)
 
             # 4. UI 패널 업데이트 (메시지 요약, 이메일, 분석 결과)
             # 메시지 요약 패널 업데이트 (collected_messages가 설정된 후)
@@ -487,6 +493,7 @@ class AnalysisCacheController:
                 todo_list=todo_list,
                 messages=messages,
                 analysis_summary=analysis_summary,
+                analysis_data=list(analysis_results or []),
                 created_at=datetime.now(),
                 last_accessed_at=datetime.now(),
             )
@@ -676,10 +683,18 @@ class AnalysisCacheController:
     def _collect_and_cache_data(self, persona_key: str) -> None:
         ui = self.ui
         if self._collect_in_progress:
-            logger.info("⏳ 메시지 수집이 진행 중이어서 새 요청을 무시합니다: persona_key=%s", persona_key)
+            if persona_key == self._active_collection_persona:
+                logger.info("⏳ 이미 동일 페르소나(%s)에 대한 수집이 진행 중입니다.", persona_key)
+            else:
+                self._pending_persona_key = persona_key
+                logger.info(
+                    "⏳ 다른 페르소나 수집이 진행 중이라 %s 요청을 대기열에 추가했습니다.",
+                    persona_key,
+                )
             return
-
+ 
         self._collect_in_progress = True
+        self._active_collection_persona = persona_key
         start_ts = time.time()
 
         try:
@@ -726,14 +741,7 @@ class AnalysisCacheController:
                 )
                 logger.info("📨 메시지 수집 완료: %d개", len(messages))
 
-                ui.collected_messages = messages
-                if hasattr(ui.assistant, "collected_messages"):
-                    ui.assistant.collected_messages = messages
-                if hasattr(ui, "_register_known_messages"):
-                    ui._register_known_messages(messages)
-                if hasattr(ui, "_message_summary_cache"):
-                    ui._message_summary_cache.clear()
-
+                is_active_persona = persona_key == getattr(ui, "_current_persona_id", None)
                 persona_info = ui.selected_persona.__dict__ if ui.selected_persona else {}
                 cache_data = {
                     "messages": messages,
@@ -752,7 +760,21 @@ class AnalysisCacheController:
                 )
                 logger.info("📊 현재 캐시 키 목록: %s", list(ui._persona_cache.keys()))
 
-                self._update_ui_with_new_data(messages)
+                if is_active_persona:
+                    ui.collected_messages = messages
+                    if hasattr(ui.assistant, "collected_messages"):
+                        ui.assistant.collected_messages = messages
+                    if hasattr(ui, "_register_known_messages"):
+                        ui._register_known_messages(messages)
+                    if hasattr(ui, "_message_summary_cache"):
+                        ui._message_summary_cache.clear()
+                    self._update_ui_with_new_data(messages)
+                else:
+                    logger.info(
+                        "🔁 수집 완료했지만 페르소나가 이미 변경되어 UI 갱신을 생략합니다 (요청=%s, 현재=%s)",
+                        persona_key,
+                        getattr(ui, "_current_persona_id", None),
+                    )
 
                 current_tick, is_running = self._get_simulation_status()
                 if current_tick > 0 or ui._last_simulation_tick is None:
@@ -773,6 +795,16 @@ class AnalysisCacheController:
             logger.error("❌ 데이터 수집 및 캐시 저장 오류: %s", exc, exc_info=True)
         finally:
             self._collect_in_progress = False
+            self._active_collection_persona = None
+            next_persona = None
+            if self._pending_persona_key and self._pending_persona_key != persona_key:
+                next_persona = self._pending_persona_key
+                self._pending_persona_key = None
+            else:
+                self._pending_persona_key = None
+            if next_persona:
+                logger.info("▶️ 대기중이던 페르소나 수집을 재시작합니다: %s", next_persona)
+                self._collect_and_cache_data(next_persona)
 
     def _update_cache_with_analysis_results(
         self,
@@ -820,6 +852,7 @@ class AnalysisCacheController:
                     "todo_count": len(merged_todos),
                     "analysis_count": len(merged_analysis),
                 },
+                analysis_data=merged_analysis,
                 created_at=datetime.now(),
                 last_accessed_at=datetime.now(),
             )

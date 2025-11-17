@@ -16,41 +16,16 @@ logger = logging.getLogger(__name__)
 _virtual_dates_cache = None
 
 def load_virtual_dates() -> Dict[str, str]:
-    """가상 날짜 매핑 로드 (캐싱)
+    """가상 날짜 매핑 로드 (비활성화됨)
+    
+    가상 날짜 시스템은 더 이상 사용하지 않습니다.
+    VDOS의 실제 시뮬레이션 시간을 직접 사용합니다.
     
     Returns:
-        {item_type_id: iso_date_string} 형태의 딕셔너리
+        빈 딕셔너리
     """
-    global _virtual_dates_cache
-    
-    if _virtual_dates_cache is not None:
-        return _virtual_dates_cache
-    
-    try:
-        # 프로젝트 루트에서 상대 경로로 파일 찾기
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(os.path.dirname(current_dir))
-        virtual_dates_file = os.path.join(
-            project_root, 
-            "data", 
-            "multi_project_8week_ko", 
-            "virtual_dates.json"
-        )
-        
-        if os.path.exists(virtual_dates_file):
-            with open(virtual_dates_file, 'r', encoding='utf-8') as f:
-                _virtual_dates_cache = json.load(f)
-                logger.info(f"✅ 가상 날짜 매핑 로드: {len(_virtual_dates_cache)}개")
-                return _virtual_dates_cache
-        else:
-            logger.warning(f"가상 날짜 파일 없음: {virtual_dates_file}")
-            _virtual_dates_cache = {}
-            return _virtual_dates_cache
-            
-    except Exception as e:
-        logger.error(f"가상 날짜 로드 실패: {e}")
-        _virtual_dates_cache = {}
-        return _virtual_dates_cache
+    # 가상 날짜 시스템 비활성화 - 실제 VDOS 시뮬레이션 시간 사용
+    return {}
 
 
 def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -109,23 +84,7 @@ def parse_message_date(message: Dict[str, Any]) -> datetime:
         >>> parse_message_date(msg)
         datetime.datetime(2024, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
     """
-    # 1. 가상 날짜 확인 (우선순위 최상위)
-    virtual_dates = load_virtual_dates()
-    if virtual_dates:
-        # msg_id를 키로 직접 사용 (이미 email_{id} 또는 chat_{room}_{id} 형태)
-        msg_id = message.get("msg_id")
-        
-        if msg_id:
-            virtual_date_str = virtual_dates.get(msg_id)
-            if virtual_date_str:
-                dt = parse_iso_datetime(virtual_date_str)
-                if dt:
-                    logger.info(f"✅ 가상 날짜 적용: {msg_id} -> {virtual_date_str}")
-                    return dt
-            else:
-                logger.warning(f"⚠️  가상 날짜 없음: {msg_id}")
-    
-    # 2. 실제 날짜 필드 추출 (우선순위: date > timestamp > datetime)
+    # 실제 날짜 필드 추출 (우선순위: date > timestamp > datetime)
     date_str = (
         message.get("date") or 
         message.get("timestamp") or 

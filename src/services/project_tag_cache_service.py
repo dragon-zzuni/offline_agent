@@ -40,10 +40,15 @@ class ProjectTagCacheService:
                     confidence TEXT,
                     analysis_method TEXT,
                     classification_reason TEXT,
+                    project_full_name TEXT,
+                    evidence TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
             """)
+            self._ensure_columns(cursor)
+            self._backfill_project_full_names(cursor)
+            self._sync_evidence_column(cursor)
             
             # 인덱스 생성
             cursor.execute("""
@@ -64,6 +69,68 @@ class ProjectTagCacheService:
         except Exception as e:
             logger.error(f"❌ 캐시 DB 초기화 실패: {e}")
     
+    def _ensure_columns(self, cursor: sqlite3.Cursor) -> None:
+        """기존 DB에 누락된 컬럼이 있으면 추가"""
+        cursor.execute("PRAGMA table_info(project_tag_cache)")
+        existing = {row[1] for row in cursor.fetchall()}
+        for column, definition in (
+            ("classification_reason", "TEXT"),
+            ("project_full_name", "TEXT"),
+            ("evidence", "TEXT"),
+        ):
+            if column not in existing:
+                cursor.execute(f"ALTER TABLE project_tag_cache ADD COLUMN {column} {definition}")
+
+    def _backfill_project_full_names(self, cursor: sqlite3.Cursor) -> None:
+        """기존 레코드에 프로젝트 풀네임을 채운다."""
+        try:
+            cursor.execute("""
+                SELECT todo_id, project_tag
+                  FROM project_tag_cache
+                 WHERE (project_full_name IS NULL OR project_full_name = '')
+                   AND project_tag IS NOT NULL
+            """)
+            rows = cursor.fetchall()
+            if not rows:
+                return
+
+            try:
+                from src.utils.project_fullname_mapper import get_project_fullname
+            except Exception:  # pragma: no cover - mapper 사용 불가 시 건너뜀
+                return
+
+            for todo_id, project_code in rows:
+                full_name = get_project_fullname(project_code)
+                if full_name:
+                    cursor.execute(
+                        "UPDATE project_tag_cache SET project_full_name = ? WHERE todo_id = ?",
+                        (full_name, todo_id),
+                    )
+        except Exception as exc:  # pragma: no cover - 백필 실패는 치명적이지 않음
+            logger.debug("프로젝트 풀네임 백필 실패: %s", exc)
+
+    def _sync_evidence_column(self, cursor: sqlite3.Cursor) -> None:
+        """evidence 컬럼이 비어 있는 경우 classification_reason으로 채운다."""
+        try:
+            cursor.execute("""
+                UPDATE project_tag_cache
+                   SET evidence = classification_reason
+                 WHERE (evidence IS NULL OR TRIM(evidence) = '')
+            """)
+        except Exception as exc:  # pragma: no cover
+            logger.debug("evidence 컬럼 동기화 실패: %s", exc)
+
+    def _resolve_project_full_name(self, project_code: Optional[str]) -> Optional[str]:
+        """프로젝트 코드 기준으로 풀네임을 찾는다."""
+        if not project_code:
+            return None
+        try:
+            from src.utils.project_fullname_mapper import get_project_fullname
+
+            return get_project_fullname(project_code)
+        except Exception:
+            return None
+
     def get_cached_tag(self, todo_id: str) -> Optional[Dict[str, str]]:
         """
         캐시에서 프로젝트 태그 조회
@@ -79,7 +146,9 @@ class ProjectTagCacheService:
             cursor = conn.cursor()
             
             cursor.execute("""
-                SELECT project_tag, confidence, analysis_method, classification_reason, created_at, updated_at
+                SELECT project_tag, confidence, analysis_method,
+                       classification_reason, project_full_name, evidence,
+                       created_at, updated_at
                 FROM project_tag_cache
                 WHERE todo_id = ?
             """, (todo_id,))
@@ -93,8 +162,10 @@ class ProjectTagCacheService:
                     'confidence': result[1],
                     'analysis_method': result[2],
                     'classification_reason': result[3],
-                    'created_at': result[4],
-                    'updated_at': result[5]
+                    'project_full_name': result[4],
+                    'evidence': result[5],
+                    'created_at': result[6],
+                    'updated_at': result[7]
                 }
             
             return None
@@ -105,7 +176,9 @@ class ProjectTagCacheService:
     
     def save_tag(self, todo_id: str, project_tag: str, 
                  confidence: str = None, analysis_method: str = None,
-                 classification_reason: str = None):
+                 classification_reason: str = None,
+                 project_full_name: Optional[str] = None,
+                 evidence: Optional[str] = None):
         """
         프로젝트 태그를 캐시에 저장
         
@@ -121,14 +194,29 @@ class ProjectTagCacheService:
             cursor = conn.cursor()
             
             now = datetime.now().isoformat()
+            resolved_full_name = project_full_name or self._resolve_project_full_name(project_tag)
+            evidence_text = evidence if evidence is not None else classification_reason
             
             cursor.execute("""
                 INSERT OR REPLACE INTO project_tag_cache 
-                (todo_id, project_tag, confidence, analysis_method, classification_reason, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 
+                (todo_id, project_tag, confidence, analysis_method,
+                 classification_reason, project_full_name, evidence,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 
                     COALESCE((SELECT created_at FROM project_tag_cache WHERE todo_id = ?), ?),
                     ?)
-            """, (todo_id, project_tag, confidence, analysis_method, classification_reason, todo_id, now, now))
+            """, (
+                todo_id,
+                project_tag,
+                confidence,
+                analysis_method,
+                classification_reason,
+                resolved_full_name,
+                evidence_text,
+                todo_id,
+                now,
+                now,
+            ))
             
             conn.commit()
             conn.close()

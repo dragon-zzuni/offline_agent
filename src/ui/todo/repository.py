@@ -37,6 +37,7 @@ class TodoRepository:
         self._conn.row_factory = sqlite3.Row
         self._init_db()
         self._backfill_missing_source_dates()
+        self._backfill_missing_project_full_names()
 
     # ------------------------------------------------------------------ #
     # 내부 유틸
@@ -142,6 +143,43 @@ class TodoRepository:
         vdos_conn.close()
         if updated:
             logger.info("🔄 source_message 누락 수신 시간 %d건 보정 완료", updated)
+
+    def _backfill_missing_project_full_names(self) -> None:
+        """project_full_name이 비어 있는 TODO를 프로젝트 코드로 다시 채운다."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT id, project_tag
+              FROM todos
+             WHERE project_tag IS NOT NULL
+               AND project_tag != ''
+               AND (project_full_name IS NULL OR project_full_name = '')
+            """
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return
+
+        try:
+            from src.utils.project_fullname_mapper import get_project_fullname
+        except Exception as exc:  # pragma: no cover
+            logger.debug("project_full_name 매퍼 로드 실패로 백필 건너뜀: %s", exc)
+            return
+
+        updated = 0
+        with self._transaction() as tx:
+            for todo_id, project_code in rows:
+                full_name = get_project_fullname(project_code)
+                if not full_name:
+                    continue
+                tx.execute(
+                    "UPDATE todos SET project_full_name = ? WHERE id = ?",
+                    (full_name, todo_id),
+                )
+                updated += 1
+
+        if updated:
+            logger.info("🔄 project_full_name 백필 완료: %d건", updated)
 
     def _lookup_original_timestamp(
         self, source_msg: dict, vdos_conn: sqlite3.Connection

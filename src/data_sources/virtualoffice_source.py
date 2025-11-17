@@ -335,10 +335,18 @@ class VirtualOfficeDataSource(DataSource):
         # 통합 및 정렬
         all_messages = emails + messages
         
-        # 메시지 필터링은 데이터 수집 시점에 적용하지 않음
-        # TODO 생성 시에만 필터링 적용 (메시지 탭/메일 탭에서는 원본 메시지 표시)
+        # 페르소나가 발신한 메시지 제외 (recipient_type="from")
+        # 페르소나는 자신이 받은 메시지만 확인해야 함
+        before_filter = len(all_messages)
+        all_messages = [
+            msg for msg in all_messages
+            if msg.get("recipient_type") != "from"
+        ]
+        after_filter = len(all_messages)
+        
         logger.info(
-            f"📨 메시지 수집 완료 (필터링 없음): 이메일 {len(emails)}개, 채팅 {len(messages)}개"
+            f"📨 메시지 수집 완료: 이메일 {len(emails)}개, 채팅 {len(messages)}개 "
+            f"→ 발신 메시지 제외: {before_filter}개 → {after_filter}개"
         )
 
         # 시뮬레이션 시간 메타데이터 주입 (tick 기반 시간 계산)
@@ -468,10 +476,16 @@ class VirtualOfficeDataSource(DataSource):
                 for m in raw_messages
             ]
             
-            # 메시지 필터링은 배치 수집 시점에 적용하지 않음
-            # TODO 생성 시에만 필터링 적용
+            # 페르소나가 발신한 메시지 제외 (recipient_type="from")
+            before_filter_emails = len(emails)
+            before_filter_messages = len(messages)
+            
+            emails = [msg for msg in emails if msg.get("recipient_type") != "from"]
+            messages = [msg for msg in messages if msg.get("recipient_type") != "from"]
+            
             logger.info(
-                f"📨 배치 수집 완료 (필터링 없음): 이메일 {len(emails)}개, 채팅 {len(messages)}개"
+                f"📨 배치 수집 완료: 이메일 {before_filter_emails}개 → {len(emails)}개, "
+                f"채팅 {before_filter_messages}개 → {len(messages)}개 (발신 메시지 제외)"
             )
             
             # last_id 업데이트
