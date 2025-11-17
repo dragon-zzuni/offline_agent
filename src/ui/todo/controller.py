@@ -117,7 +117,11 @@ class TodoPanelController:
             logger.info(f"📊 TODO 전체 교체: {len(list(rows))}개")
             return {}
 
-    def load_active_items(self, persona_name: Optional[str] = None) -> List[dict]:
+    def load_active_items(
+        self,
+        persona_name: Optional[str] = None,
+        sim_until_tick: Optional[int] = None,
+    ) -> List[dict]:
         """활성 TODO 로드 (페르소나 필터링 옵션)
         
         Args:
@@ -126,11 +130,12 @@ class TodoPanelController:
         filter_persona = persona_name or self._current_persona_filter
         filter_email = self._current_persona_email
         filter_handle = self._current_persona_handle
-        
+
         return self.repository.fetch_active(
             persona_name=filter_persona,
             persona_email=filter_email,
-            persona_handle=filter_handle
+            persona_handle=filter_handle,
+            sim_until_tick=sim_until_tick,
         )
 
     # ------------------------------------------------------------------ #

@@ -40,6 +40,11 @@ class TimeRangeSelector(QWidget):
             parent: 부모 위젯
         """
         super().__init__(parent)
+
+        # 시뮬레이션 시간 컨텍스트
+        self._simulation_time: Optional[datetime] = None
+        self._is_simulation_mode: bool = False
+
         self._init_ui()
         self._setup_default_range()
     
@@ -170,13 +175,45 @@ class TimeRangeSelector(QWidget):
         self.apply_button.clicked.connect(self._apply_range)
         self.apply_button.setStyleSheet(Styles.button_success())
         layout.addWidget(self.apply_button)
-    
+
+    def set_simulation_context(self, sim_time: Optional[datetime] = None, is_simulation_mode: bool = False):
+        """시뮬레이션 시간 컨텍스트 설정
+
+        Args:
+            sim_time: 시뮬레이션 현재 시간 (UTC aware datetime). None이면 실시간 모드
+            is_simulation_mode: True면 시뮬레이션/리플레이 모드, False면 실시간 모드
+
+        Examples:
+            >>> # 리플레이 모드 (Day 30, 10:00)
+            >>> selector.set_simulation_context(sim_time=datetime(...), is_simulation_mode=True)
+
+            >>> # 실시간 모드로 복귀
+            >>> selector.set_simulation_context(sim_time=None, is_simulation_mode=False)
+        """
+        self._simulation_time = sim_time
+        self._is_simulation_mode = is_simulation_mode
+
+        if is_simulation_mode and sim_time:
+            logger.info(f"🎬 시뮬레이션 모드 활성화: {sim_time.isoformat()}")
+        else:
+            logger.info("⏱️ 실시간 모드 활성화")
+
+    def _get_current_sim_time(self) -> datetime:
+        """현재 시간 반환 (시뮬레이션 모드면 sim_time, 아니면 datetime.now())
+
+        Returns:
+            현재 시간 (datetime)
+        """
+        if self._is_simulation_mode and self._simulation_time:
+            return self._simulation_time
+        return datetime.now()
+
     def _setup_default_range(self):
         """기본 시간 범위 설정 (전체 기간 - 최근 30일)"""
-        now = datetime.now()
+        now = self._get_current_sim_time()
         # 기본값을 최근 30일로 설정하여 대부분의 데이터를 포함
         start = now - timedelta(days=30)
-        
+
         self.start_datetime.setDateTime(QDateTime(start))
         self.end_datetime.setDateTime(QDateTime(now))
     
@@ -204,7 +241,7 @@ class TimeRangeSelector(QWidget):
                 logger.info(f"📅 실제 데이터에서 범위 계산: {start_time} ~ {end_time}")
             else:
                 # 3. 데이터를 찾을 수 없으면 최근 1년 사용
-                now = datetime.now()
+                now = self._get_current_sim_time()
                 start = now - timedelta(days=365)
                 self.start_datetime.setDateTime(QDateTime(start))
                 self.end_datetime.setDateTime(QDateTime(now))
@@ -291,39 +328,43 @@ class TimeRangeSelector(QWidget):
         message_times = []
         
         for message in messages:
-            time_str = (
-                message.get('date') or 
-                message.get('timestamp') or 
-                message.get('sent_at') or
-                message.get('created_at') or
-                message.get('time')
+            time_value = (
+                message.get('simulated_datetime')
+                or (message.get('metadata') or {}).get('simulated_datetime')
+                or message.get('date')
+                or message.get('timestamp')
+                or message.get('sent_at')
+                or message.get('created_at')
+                or message.get('time')
             )
-            
-            if time_str:
-                try:
-                    if isinstance(time_str, str):
-                        # ISO 형식 시도
-                        if 'T' in time_str:
-                            message_time = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
-                        else:
-                            # 다른 형식들 시도
-                            for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d']:
-                                try:
-                                    message_time = datetime.strptime(time_str, fmt)
-                                    break
-                                except ValueError:
-                                    continue
-                            else:
-                                continue
-                    elif isinstance(time_str, datetime):
-                        message_time = time_str
+
+            if not time_value:
+                continue
+
+            try:
+                if isinstance(time_value, str):
+                    # ISO 형식 시도
+                    if 'T' in time_value:
+                        message_time = datetime.fromisoformat(time_value.replace('Z', '+00:00'))
                     else:
-                        continue
-                        
-                    message_times.append(message_time)
-                    
-                except Exception:
+                        # 다른 형식들 시도
+                        for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d']:
+                            try:
+                                message_time = datetime.strptime(time_value, fmt)
+                                break
+                            except ValueError:
+                                continue
+                        else:
+                            continue
+                elif isinstance(time_value, datetime):
+                    message_time = time_value
+                else:
                     continue
+
+                message_times.append(message_time)
+
+            except Exception:
+                continue
         
         return message_times
     
@@ -343,13 +384,14 @@ class TimeRangeSelector(QWidget):
     
     def _set_quick_range(self, hours: int = 0, days: int = 0):
         """빠른 선택 범위 설정
-        
+
         데이터의 가장 최근 시간을 기준으로 지정된 시간만큼 이전부터의 범위를 설정합니다.
-        
+        시뮬레이션 모드에서는 시뮬레이션 시간을 기준으로 계산합니다.
+
         Args:
             hours: 최근 몇 시간 (기본값: 0)
             days: 최근 몇 일 (기본값: 0)
-            
+
         Examples:
             >>> _set_quick_range(hours=4)  # 최근 4시간
             >>> _set_quick_range(days=7)   # 최근 7일
@@ -358,31 +400,37 @@ class TimeRangeSelector(QWidget):
         if hasattr(self, '_data_end'):
             end = self._data_end
         else:
-            end = datetime.now()
-        
+            end = self._get_current_sim_time()
+
         if days > 0:
             start = end - timedelta(days=days)
         else:
             start = end - timedelta(hours=hours)
-        
+
         self.start_datetime.setDateTime(QDateTime(start))
         self.end_datetime.setDateTime(QDateTime(end))
     
     def _set_today(self):
-        """오늘 00:00 ~ 현재 시간으로 설정"""
-        now = datetime.now()
+        """오늘 00:00 ~ 현재 시간으로 설정
+
+        시뮬레이션 모드에서는 시뮬레이션 시간을 기준으로 "오늘"을 계산합니다.
+        """
+        now = self._get_current_sim_time()
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        
+
         self.start_datetime.setDateTime(QDateTime(start))
         self.end_datetime.setDateTime(QDateTime(now))
     
     def _set_yesterday(self):
-        """어제 00:00 ~ 23:59로 설정"""
-        now = datetime.now()
+        """어제 00:00 ~ 23:59로 설정
+
+        시뮬레이션 모드에서는 시뮬레이션 시간을 기준으로 "어제"를 계산합니다.
+        """
+        now = self._get_current_sim_time()
         yesterday = now - timedelta(days=1)
         start = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
         end = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999)
-        
+
         self.start_datetime.setDateTime(QDateTime(start))
         self.end_datetime.setDateTime(QDateTime(end))
     

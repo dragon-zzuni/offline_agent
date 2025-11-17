@@ -2663,7 +2663,24 @@ class SmartAssistantGUI(QMainWindow):
                             font-family: 'Consolas', 'Monaco', monospace;
                         }
                     """)
-            
+
+            # TimeRangeSelector에 시뮬레이션 컨텍스트 업데이트
+            if hasattr(self, 'time_range_selector'):
+                try:
+                    from utils.datetime_utils import parse_simulation_time
+                    # VirtualOffice가 "Day 30 10:00" 형식으로 반환
+                    sim_datetime = parse_simulation_time(sim_time)
+                    if sim_datetime:
+                        # VirtualOffice가 연결되어 있고 시뮬레이션 시간이 있으면 시뮬레이션 모드 활성화
+                        self.time_range_selector.set_simulation_context(
+                            sim_time=sim_datetime,
+                            is_simulation_mode=True
+                        )
+                    else:
+                        logger.warning(f"시뮬레이션 시간 파싱 실패: {sim_time}")
+                except Exception as sim_update_error:
+                    logger.warning(f"TimeRangeSelector 시뮬레이션 컨텍스트 업데이트 오류: {sim_update_error}")
+
             # 캐시 관리 (틱 변경 시 캐시 무효화)
             # 유효한 틱 변경만 감지 (0은 오류 상태이므로 무시)
             if (self._last_simulation_tick is not None and 

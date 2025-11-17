@@ -421,7 +421,13 @@ class TodoRepository:
         
         return stats
 
-    def fetch_active(self, persona_name: Optional[str] = None, persona_email: Optional[str] = None, persona_handle: Optional[str] = None) -> List[dict]:
+    def fetch_active(
+        self,
+        persona_name: Optional[str] = None,
+        persona_email: Optional[str] = None,
+        persona_handle: Optional[str] = None,
+        sim_until_tick: Optional[int] = None,
+    ) -> List[dict]:
         """활성 TODO 조회 (페르소나 필터링 옵션)
         
         Args:
@@ -473,8 +479,52 @@ class TodoRepository:
         else:
             # 필터 없으면 전체 조회
             cur.execute("SELECT * FROM todos WHERE status!='done' ORDER BY created_at DESC")
-        
-        return [dict(row) for row in cur.fetchall()]
+
+        rows = [dict(row) for row in cur.fetchall()]
+
+        # 시뮬레이션 스냅샷 모드: source_message의 sim_tick 기준으로 필터링
+        if sim_until_tick is not None and sim_until_tick > 0:
+            filtered: List[dict] = []
+            for todo in rows:
+                src = todo.get("source_message")
+                if not src:
+                    # 원본 메시지 정보가 없으면 보수적으로 포함
+                    filtered.append(todo)
+                    continue
+
+                src_dict: Optional[dict] = None
+                if isinstance(src, dict):
+                    src_dict = src
+                elif isinstance(src, str):
+                    try:
+                        src_dict = json.loads(src)
+                    except Exception:
+                        src_dict = None
+                if not src_dict:
+                    filtered.append(todo)
+                    continue
+
+                metadata = src_dict.get("metadata") or {}
+                sim_tick = metadata.get("sim_tick") or src_dict.get("sim_tick")
+                try:
+                    tick_value = int(sim_tick)
+                except Exception:
+                    # sim_tick이 없거나 정수가 아니면 포함 (레거시 데이터 보호)
+                    filtered.append(todo)
+                    continue
+
+                if tick_value <= sim_until_tick:
+                    filtered.append(todo)
+
+            logger.info(
+                "🕒 시뮬레이션 스냅샷 필터링: tick<=%s, %d개 → %d개",
+                sim_until_tick,
+                len(rows),
+                len(filtered),
+            )
+            rows = filtered
+
+        return rows
 
     def update_top3_flags(self, updates: Iterable[tuple[int, str]]) -> None:
         updates = list(updates)

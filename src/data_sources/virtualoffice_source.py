@@ -167,15 +167,18 @@ class VirtualOfficeDataSource(DataSource):
         return self._tick_values[idx - 1]
 
     def _compute_sim_datetime_from_tick(self, tick: int) -> Optional[Tuple[datetime, int, int]]:
-        """tick을 시뮬레이션 datetime으로 변환"""
+        """tick을 시뮬레이션 datetime으로 변환 (480 tick/일, 09:00 시작)"""
         if not self._sim_base_dt:
             return None
+
         tick = max(1, tick)
-        day_ticks = max(1, self._sim_hours_per_day * 60)
+        ticks_per_day = max(1, self._sim_hours_per_day * 60)  # 1 tick = 1 minute
         tick_index = tick - 1
-        day_index = tick_index // day_ticks
-        tick_of_day = tick_index % day_ticks
-        minutes_24h = int((tick_of_day / day_ticks) * 1440)
+        day_index = tick_index // ticks_per_day
+        tick_of_day = tick_index % ticks_per_day
+
+        # 09:00을 기준으로 tick_of_day 분 만큼 진행
+        minutes_24h = tick_of_day + (9 * 60)
         sim_dt = self._sim_base_dt + timedelta(days=day_index, minutes=minutes_24h)
         return sim_dt, day_index, minutes_24h
 
@@ -228,10 +231,10 @@ class VirtualOfficeDataSource(DataSource):
             msg["sim_day_index"] = day_index + 1
             msg["sim_week_index"] = day_index // 7 + 1
             msg["sim_month_index"] = day_index // 30 + 1
-            
+
             # simulated_datetime을 최상위 레벨에도 추가 (TODO source_message에서 접근 가능하도록)
             msg["simulated_datetime"] = sim_dt.isoformat()
-            
+
             # 중요: 원본 date는 VDOS DB의 sent_at 시간 그대로 유지
             # msg["date"]를 덮어쓰지 않음!
     
@@ -722,59 +725,56 @@ class VirtualOfficeDataSource(DataSource):
             return False
     def _apply_time_filter(self, messages: List[Dict[str, Any]], time_range: Dict[str, Any]) -> List[Dict[str, Any]]:
         """메시지 리스트에 시간 범위 필터링 적용
-        
+
         Args:
             messages: 필터링할 메시지 리스트
             time_range: 시간 범위 {"start": datetime, "end": datetime}
-            
+
         Returns:
             필터링된 메시지 리스트
         """
         try:
             start_time = time_range.get("start")
             end_time = time_range.get("end")
-            
+
             if not start_time or not end_time:
                 logger.warning("시간 범위가 불완전합니다")
                 return messages
-            
+
             # UTC로 변환
             if start_time.tzinfo is None:
                 start_time = start_time.replace(tzinfo=timezone.utc)
             else:
                 start_time = start_time.astimezone(timezone.utc)
-                
+
             if end_time.tzinfo is None:
                 end_time = end_time.replace(tzinfo=timezone.utc)
             else:
                 end_time = end_time.astimezone(timezone.utc)
-            
+
             filtered_messages = []
-            
+
             for message in messages:
                 message_time = self._parse_message_time(message)
                 if message_time and start_time <= message_time <= end_time:
                     filtered_messages.append(message)
-            
+
             original_count = len(messages)
             filtered_count = len(filtered_messages)
-            
+
             logger.info(f"⏰ 시간 필터링 결과: {original_count}개 → {filtered_count}개")
-            
+
             return filtered_messages
-            
+
         except Exception as e:
             logger.error(f"시간 필터링 오류: {e}")
             return messages  # 오류 시 원본 반환
-    
+
     def _parse_message_time(self, message: Dict[str, Any]) -> Optional[datetime]:
         """메시지에서 시간 정보 파싱
-        
-        Args:
-            message: 메시지 딕셔너리
-            
-        Returns:
-            파싱된 datetime (UTC) 또는 None
+
+        시뮬레이션 시간(simulated_datetime)이 있으면 우선 사용하고,
+        없을 경우 실제 시간 필드(date, timestamp, sent_at, created_at)를 사용합니다.
         """
         try:
             try:
@@ -782,20 +782,38 @@ class VirtualOfficeDataSource(DataSource):
             except ImportError:
                 logger.warning("python-dateutil 패키지가 설치되지 않음. 기본 datetime 파싱만 사용")
                 dateutil = None
-            
-            # 다양한 시간 필드 시도
+
+            # 1) 시뮬레이션 시간 우선
+            sim_dt_value = (
+                message.get("simulated_datetime")
+                or (message.get("metadata") or {}).get("simulated_datetime")
+            )
+            if sim_dt_value:
+                try:
+                    if isinstance(sim_dt_value, datetime):
+                        dt = sim_dt_value
+                    else:
+                        dt = datetime.fromisoformat(str(sim_dt_value).replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt.astimezone(timezone.utc)
+                except Exception:
+                    # 실패 시 실제 시간 필드로 폴백
+                    pass
+
+            # 2) 실제 시간 필드 폴백
             time_fields = ['date', 'timestamp', 'sent_at', 'created_at']
-            
+
             for field in time_fields:
                 if field in message and message[field]:
                     time_value = message[field]
-                    
+
                     if isinstance(time_value, datetime):
                         # 이미 datetime 객체
                         if time_value.tzinfo is None:
                             return time_value.replace(tzinfo=timezone.utc)
                         return time_value.astimezone(timezone.utc)
-                    
+
                     elif isinstance(time_value, str):
                         # 문자열 파싱
                         try:
@@ -804,19 +822,19 @@ class VirtualOfficeDataSource(DataSource):
                             else:
                                 # 기본 ISO 형식만 지원
                                 dt = datetime.fromisoformat(time_value.replace('Z', '+00:00'))
-                            
+
                             if dt.tzinfo is None:
                                 dt = dt.replace(tzinfo=timezone.utc)
                             return dt.astimezone(timezone.utc)
                         except Exception:
                             continue
-                    
+
                     elif isinstance(time_value, (int, float)):
                         # 타임스탬프
                         return datetime.fromtimestamp(time_value, tz=timezone.utc)
-            
+
             return None
-            
+
         except Exception as e:
             logger.debug(f"메시지 시간 파싱 오류: {e}")
             return None

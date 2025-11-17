@@ -129,21 +129,61 @@ class ActionExtractor:
         self.deadline_markers = ["까지", "마감", "deadline", "제출", "due", "완료", "납기", "기한"]
         self.response_markers = ["답장", "답변", "회신", "reply", "response", "응답", "피드백"]
         self._bullet_pattern = re.compile(r"^[\-\*\•\·\d\)\(]+\s*")
-    
+        self._reference_time: datetime = datetime.now()  # 기본값은 현재 시간
+
+    def _get_reference_time(self, message_data: Dict) -> datetime:
+        """메시지에서 기준 시간 추출 (시뮬레이션 시간 우선)
+
+        Args:
+            message_data: 메시지 데이터
+
+        Returns:
+            기준 시간 (simulated_datetime 또는 datetime.now())
+        """
+        # 1. simulated_datetime 확인 (VirtualOffice replay 모드)
+        sim_time = (
+            message_data.get("simulated_datetime")
+            or (message_data.get("metadata") or {}).get("simulated_datetime")
+        )
+
+        if sim_time:
+            try:
+                # ISO 형식 파싱
+                from datetime import timezone
+                if isinstance(sim_time, str):
+                    # Z를 +00:00으로 변환
+                    sim_time_str = sim_time.replace("Z", "+00:00")
+                    dt = datetime.fromisoformat(sim_time_str)
+                    # naive datetime이면 UTC로 간주
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    logger.debug(f"시뮬레이션 시간 사용: {dt.isoformat()}")
+                    return dt
+                elif isinstance(sim_time, datetime):
+                    return sim_time
+            except Exception as e:
+                logger.warning(f"시뮬레이션 시간 파싱 실패 ({sim_time}): {e}")
+
+        # 2. 폴백: 현재 시간
+        return datetime.now()
+
     def extract_actions(self, message_data: Dict, user_email: str = "pm.1@quickchat.dev") -> List[ActionItem]:
         """메시지에서 액션 추출
-        
+
         Args:
             message_data: 메시지 데이터
             user_email: 사용자(PM) 이메일 주소 (기본값: pm.1@quickchat.dev)
-            
+
         Returns:
             액션 아이템 리스트
-            
+
         Note:
             사용자(PM)에게 **온** 메시지만 TODO로 변환합니다.
             사용자가 **보낸** 메시지는 제외됩니다.
         """
+        # 시뮬레이션 시간 추출 (VirtualOffice replay 모드 지원)
+        self._reference_time = self._get_reference_time(message_data)
+
         content = message_data.get("body", "") or message_data.get("content", "")
         subject = message_data.get("subject", "")
         sender = message_data.get("sender", "")
@@ -153,7 +193,7 @@ class ActionExtractor:
         if self._is_simple_acknowledgment(content, subject):
             logger.debug(f"단순 확인 메시지 필터링: {content[:50]}...")
             return []
-        msg_id = message_data.get("msg_id", f"msg_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        msg_id = message_data.get("msg_id", f"msg_{self._reference_time.strftime('%Y%m%d_%H%M%S')}")
         
         # ✅ 중요: 사용자(PM)가 보낸 메시지는 TODO로 만들지 않음
         if sender_email and sender_email.lower() == user_email.lower():
@@ -500,64 +540,68 @@ class ActionExtractor:
         return None
     
     def _parse_date_string(self, date_str: str) -> Optional[datetime]:
-        """날짜 문자열 파싱"""
+        """날짜 문자열 파싱 (시뮬레이션 시간 기준)
+
+        self._reference_time을 기준으로 상대적 날짜를 계산합니다.
+        """
         try:
-            # 오늘, 내일 처리
+            # 오늘, 내일 처리 (시뮬레이션 시간 기준)
             if "오늘" in date_str:
-                return datetime.now().replace(hour=18, minute=0, second=0, microsecond=0)
+                return self._reference_time.replace(hour=18, minute=0, second=0, microsecond=0)
             elif "내일" in date_str:
-                tomorrow = datetime.now() + timedelta(days=1)
+                tomorrow = self._reference_time + timedelta(days=1)
                 return tomorrow.replace(hour=18, minute=0, second=0, microsecond=0)
-            
+
             # 월/일 형식 (예: 1월 15일)
             month_day_match = re.match(r"(\d{1,2})월\s*(\d{1,2})일", date_str)
             if month_day_match:
                 month = int(month_day_match.group(1))
                 day = int(month_day_match.group(2))
-                year = datetime.now().year
+                year = self._reference_time.year
                 return datetime(year, month, day, 18, 0, 0)
-            
+
             # M/D 형식 (예: 1/15)
             md_match = re.match(r"(\d{1,2})/(\d{1,2})", date_str)
             if md_match:
                 month = int(md_match.group(1))
                 day = int(md_match.group(2))
-                year = datetime.now().year
+                year = self._reference_time.year
                 return datetime(year, month, day, 18, 0, 0)
-            
+
             # 요일 처리 (다음 해당 요일)
             weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
             for i, weekday in enumerate(weekdays):
                 if weekday in date_str:
-                    today = datetime.now().weekday()
+                    today = self._reference_time.weekday()
                     days_ahead = (i - today) % 7
                     if days_ahead == 0:  # 오늘이면 내일
                         days_ahead = 7
-                    target_date = datetime.now() + timedelta(days=days_ahead)
+                    target_date = self._reference_time + timedelta(days=days_ahead)
                     return target_date.replace(hour=18, minute=0, second=0, microsecond=0)
-            
+
         except Exception as e:
             logger.error(f"날짜 파싱 오류: {e}")
-        
+
         return None
     
     def _parse_time_string(self, time_str: str) -> Optional[datetime]:
-        """시간 문자열 파싱"""
+        """시간 문자열 파싱 (시뮬레이션 시간 기준)
+
+        self._reference_time을 기준으로 시간을 설정합니다.
+        """
         try:
             # HH:MM 형식
             time_match = re.match(r"(\d{1,2}):(\d{2})", time_str)
             if time_match:
                 hour = int(time_match.group(1))
                 minute = int(time_match.group(2))
-                today = datetime.now()
-                return today.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            
+                return self._reference_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
             # H시 형식
             hour_match = re.match(r"(\d{1,2})시", time_str)
             if hour_match:
                 hour = int(hour_match.group(1))
-                today = datetime.now()
-                return today.replace(hour=hour, minute=0, second=0, microsecond=0)
+                return self._reference_time.replace(hour=hour, minute=0, second=0, microsecond=0)
             
         except Exception as e:
             logger.error(f"시간 파싱 오류: {e}")

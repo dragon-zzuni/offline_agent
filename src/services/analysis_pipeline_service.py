@@ -543,7 +543,26 @@ class AnalysisPipelineService:
                 elif priority_obj:
                     priority_reasons = getattr(priority_obj, "reasoning", []) or []
                 evidence_payload = json.dumps(priority_reasons[:3], ensure_ascii=False)
-                
+
+                # 시뮬레이션 시간 추출 (VirtualOffice replay 모드 지원)
+                # 우선순위: simulated_datetime > date > datetime.now()
+                created_time = datetime.now().isoformat()
+                simulated_time = None
+                if message:
+                    msg_id = message.get("msg_id")
+                    original_message = self._original_messages_map.get(msg_id, message)
+                    # simulated_datetime이 있으면 우선 사용
+                    simulated_time = (
+                        original_message.get("simulated_datetime")
+                        or (original_message.get("metadata") or {}).get("simulated_datetime")
+                    )
+                    if simulated_time:
+                        created_time = simulated_time
+                        logger.debug(f"TODO {todo_id} 시뮬레이션 시간 사용: {simulated_time}")
+                    elif original_message.get("date"):
+                        created_time = original_message.get("date")
+                        logger.debug(f"TODO {todo_id} 원본 메시지 date 사용: {created_time}")
+
                 todo_item = {
                     "id": todo_id,
                     "title": title,
@@ -553,7 +572,8 @@ class AnalysisPipelineService:
                     "source_message": source_message_full,  # 전체 메시지 JSON
                     "type": todo_type,
                     "requester": requester,  # 실제 요청자 (보낸 사람)
-                    "created_at": datetime.now().isoformat(),
+                    "created_at": created_time,
+                    "simulated_datetime": simulated_time,  # 시뮬레이션 시간 (있는 경우)
                     "status": "pending",
                     "recipient_type": recipient_type,
                     "source_type": source_type,

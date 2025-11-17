@@ -128,12 +128,23 @@ class TimeFilterService:
             메시지 시간 (UTC aware datetime) 또는 None
         """
         try:
-            # 다양한 시간 필드 시도
-            time_fields = ['timestamp', 'sent_at', 'created_at', 'date', 'time']
-            
             # 디버깅: 메시지 구조 로그
             msg_id = message.get('msg_id', 'unknown')
             msg_type = message.get('type', 'unknown')
+
+            # 1) 시뮬레이션 시간(simulated_datetime)이 있으면 우선 사용
+            sim_dt_value = (
+                message.get("simulated_datetime")
+                or (message.get("metadata") or {}).get("simulated_datetime")
+            )
+            if sim_dt_value:
+                parsed_sim = self._parse_datetime(sim_dt_value)
+                if parsed_sim:
+                    logger.debug(f"🔍 메시지 {msg_id} ({msg_type}): simulated_datetime={sim_dt_value}")
+                    return parsed_sim
+            
+            # 2) 다양한 실제 시간 필드 시도
+            time_fields = ['timestamp', 'sent_at', 'created_at', 'date', 'time']
             
             for field in time_fields:
                 if field in message and message[field]:
@@ -177,6 +188,18 @@ class TimeFilterService:
             TODO 생성 시간 (UTC aware datetime) 또는 None
         """
         try:
+            # 1) 시뮬레이션 시간(simulated_datetime)이 있으면 우선 사용
+            sim_dt_value = (
+                todo.get("simulated_datetime")
+                or todo.get("source_simulated_datetime")
+                or (todo.get("metadata") or {}).get("simulated_datetime")
+            )
+            if sim_dt_value:
+                parsed = self._parse_datetime(sim_dt_value)
+                if parsed:
+                    return parsed
+
+            # 2) 생성 시간 및 관련 시간 필드 사용
             # TODO 생성 시간 또는 관련 메시지 시간 사용
             time_fields = ['created_at', 'timestamp', 'due_date', 'source_timestamp']
             

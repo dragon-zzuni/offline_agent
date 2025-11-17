@@ -4,7 +4,7 @@
 
 날짜 파싱 및 변환 관련 공통 함수를 제공합니다.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 import logging
 import json
@@ -185,17 +185,17 @@ def is_in_time_range(
     end: Optional[datetime] = None
 ) -> bool:
     """datetime 객체가 지정된 시간 범위 내에 있는지 확인
-    
+
     타임존이 없는 naive datetime은 UTC로 간주합니다.
-    
+
     Args:
         dt: 확인할 datetime 객체
         start: 시작 시간 (None이면 제한 없음)
         end: 종료 시간 (None이면 제한 없음)
-        
+
     Returns:
         시간 범위 내에 있으면 True, 그렇지 않으면 False
-        
+
     Examples:
         >>> from datetime import datetime, timedelta, timezone
         >>> now = datetime.now(timezone.utc)
@@ -203,7 +203,7 @@ def is_in_time_range(
         >>> end = now + timedelta(hours=1)
         >>> is_in_time_range(now, start, end)
         True
-        
+
         >>> past = now - timedelta(hours=2)
         >>> is_in_time_range(past, start, end)
         False
@@ -211,17 +211,138 @@ def is_in_time_range(
     # naive datetime을 UTC aware로 변환
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    
+
     if start:
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
         if dt < start:
             return False
-    
+
     if end:
         if end.tzinfo is None:
             end = end.replace(tzinfo=timezone.utc)
         if dt > end:
             return False
-    
+
     return True
+
+
+def parse_simulation_time(
+    sim_time_str: str,
+    sim_base: Optional[datetime] = None
+) -> Optional[datetime]:
+    """시뮬레이션 시간 문자열을 datetime으로 파싱
+
+    "Day X HH:MM" 형식의 문자열을 datetime으로 변환합니다.
+
+    Args:
+        sim_time_str: 시뮬레이션 시간 문자열 (예: "Day 30 10:00")
+        sim_base: 시뮬레이션 시작 날짜 (Day 1의 기준). None이면 2024-01-01 사용
+
+    Returns:
+        datetime 객체 또는 None (파싱 실패 시)
+
+    Examples:
+        >>> from datetime import datetime, timezone
+        >>> parse_simulation_time("Day 30 10:00")
+        datetime.datetime(2024, 1, 30, 10, 0, tzinfo=datetime.timezone.utc)
+
+        >>> base = datetime(2023, 12, 17, 9, 0, tzinfo=timezone.utc)
+        >>> parse_simulation_time("Day 30 14:30", sim_base=base)
+        datetime.datetime(2024, 1, 15, 14, 30, tzinfo=datetime.timezone.utc)
+    """
+    if not sim_time_str:
+        return None
+
+    try:
+        import re
+        # Parse "Day X HH:MM" format
+        match = re.match(r"Day\s+(\d+)\s+(\d{1,2}):(\d{2})", sim_time_str)
+        if not match:
+            logger.warning(f"시뮬레이션 시간 형식이 잘못됨: {sim_time_str}")
+            return None
+
+        day_index = int(match.group(1))
+        hour = int(match.group(2))
+        minute = int(match.group(3))
+
+        # 기본 베이스: 2024-01-01 00:00 UTC (Day 1)
+        if sim_base is None:
+            sim_base = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        elif sim_base.tzinfo is None:
+            sim_base = sim_base.replace(tzinfo=timezone.utc)
+
+        # Day 1 = sim_base, Day 2 = sim_base + 1 day, etc.
+        days_offset = day_index - 1  # Day 1 is base day
+        result = sim_base + timedelta(days=days_offset, hours=hour, minutes=minute)
+
+        logger.debug(f"시뮬레이션 시간 파싱: {sim_time_str} → {result.isoformat()}")
+        return result
+
+    except Exception as e:
+        logger.error(f"시뮬레이션 시간 파싱 오류 ({sim_time_str}): {e}")
+        return None
+
+
+def format_simulation_time(
+    dt: datetime,
+    sim_base: Optional[datetime] = None,
+    format_type: str = "compact"
+) -> str:
+    """시뮬레이션 시간을 사용자 친화적 형식으로 포맷팅
+
+    VirtualOffice 시뮬레이션 시간을 "Day X, HH:MM" 형식으로 표시합니다.
+
+    Args:
+        dt: 포맷할 datetime 객체
+        sim_base: 시뮬레이션 시작 시간 (Day 1의 기준). None이면 날짜 기반 계산
+        format_type: 포맷 타입
+            - "compact": "Day 30, 10:00" (기본값)
+            - "full": "Day 30, 2024-01-15 10:00"
+            - "time_only": "10:00"
+
+    Returns:
+        포맷팅된 문자열
+
+    Examples:
+        >>> from datetime import datetime, timezone
+        >>> dt = datetime(2024, 1, 15, 10, 30, tzinfo=timezone.utc)
+        >>> sim_base = datetime(2023, 12, 17, 9, 0, tzinfo=timezone.utc)
+        >>> format_simulation_time(dt, sim_base)
+        'Day 30, 10:30'
+
+        >>> format_simulation_time(dt, sim_base, format_type="time_only")
+        '10:30'
+    """
+    if dt is None:
+        return ""
+
+    # UTC로 변환
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    if format_type == "time_only":
+        return dt.strftime("%H:%M")
+
+    # Day 계산
+    if sim_base:
+        # 시뮬레이션 베이스가 주어진 경우
+        if sim_base.tzinfo is None:
+            sim_base = sim_base.replace(tzinfo=timezone.utc)
+
+        # 일 차이 계산
+        delta = (dt - sim_base).days + 1  # Day 1부터 시작
+        day_index = max(1, delta)
+    else:
+        # 베이스가 없으면 일자 기반으로 계산 (2024-01-01 = Day 1)
+        # 이는 폴백 방식
+        day_of_year = dt.timetuple().tm_yday
+        day_index = day_of_year
+
+    time_str = dt.strftime("%H:%M")
+
+    if format_type == "full":
+        date_str = dt.strftime("%Y-%m-%d")
+        return f"Day {day_index}, {date_str} {time_str}"
+    else:  # compact
+        return f"Day {day_index}, {time_str}"

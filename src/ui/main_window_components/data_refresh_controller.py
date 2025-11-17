@@ -148,18 +148,27 @@ class DataRefreshController:
     # 내부 유틸
     # ------------------------------------------------------------------
     def _update_time_range(self, messages: list[Dict[str, Any]]) -> None:
-        """수집한 메시지의 시간 범위를 UI에 반영."""
+        """수집한 메시지의 시간 범위를 UI에 반영.
+
+        시뮬레이션 시간이 있으면 이를 우선 사용하고,
+        없으면 기존 date 필드를 사용한다.
+        """
         ui = self.ui
         if not messages or not hasattr(ui, "time_range_selector"):
             return
 
-        dates = []
+        dates: list[datetime] = []
         for msg in messages:
-            date_str: Optional[str] = msg.get("date")
-            if not date_str:
+            # 시뮬레이션 시간이 있으면 우선 사용
+            raw_value: Optional[str] = (
+                msg.get("simulated_datetime")
+                or (msg.get("metadata") or {}).get("simulated_datetime")
+                or msg.get("date")
+            )
+            if not raw_value:
                 continue
             try:
-                dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(str(raw_value).replace("Z", "+00:00"))
             except Exception:
                 continue
             dates.append(dt)
@@ -171,7 +180,7 @@ class DataRefreshController:
         data_end = max(dates)
         ui.time_range_selector.set_data_range(data_start, data_end)
         logger.info(
-            "데이터 시간 범위 설정: %s ~ %s",
-            data_start.strftime("%Y-%m-%d"),
-            data_end.strftime("%Y-%m-%d"),
+            "데이터 시간 범위 설정(시뮬레이션 기준): %s ~ %s",
+            data_start.strftime("%Y-%m-%d %H:%M"),
+            data_end.strftime("%Y-%m-%d %H:%M"),
         )

@@ -75,14 +75,16 @@ def _priority_sort_key(todo: dict):
     idx = order.get((todo.get("priority") or "").lower(), 3)
     return (idx, -_created_ts(todo))
 
-def _deadline_badge(todo: dict) -> Optional[tuple[str, str, str]]:
+def _deadline_badge(todo: dict, now: Optional[datetime] = None) -> Optional[tuple[str, str, str]]:
     deadline = todo.get("deadline_ts") or todo.get("deadline")
     dt = _parse_iso_dt(deadline)
     if not dt:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
+    # 기준 시각이 주어지지 않으면 현재 UTC 기준으로 계산
+    if now is None:
+        now = datetime.now(timezone.utc)
     diff_hours = (dt - now).total_seconds() / 3600.0
     if diff_hours < 0:
         return ("마감 지남", "#991B1B", "#FEE2E2")
@@ -282,26 +284,40 @@ class BasicTodoItem(QWidget):
         if recipient_badge:
             meta.addWidget(recipient_badge, 0)
         
-        # 수신 시간 표시 (원본 메시지의 시뮬레이션 시간 사용)
+        # 수신 시간 표시 (시뮬레이션 시간 우선)
         received_time = None
-        
-        # 1. source_message에서 원본 메시지의 date 가져오기 (VDOS DB의 sent_at)
-        source_message = todo.get("source_message")
-        if source_message:
-            try:
-                # source_message가 JSON 문자열이면 파싱
-                if isinstance(source_message, str):
-                    source_msg_dict = json.loads(source_message)
-                else:
-                    source_msg_dict = source_message
-                
-                # date 사용 (VDOS DB의 sent_at이 이미 시뮬레이션 시간)
-                # simulated_datetime은 수집 시간이므로 사용하지 않음
-                received_time = source_msg_dict.get("date")
-            except:
-                pass
-        
-        # 2. evidence에서 시도 (폴백)
+        is_simulation_time = False
+
+        # 1. TODO 자체의 simulated_datetime 확인 (최우선)
+        received_time = todo.get("simulated_datetime")
+        if received_time:
+            is_simulation_time = True
+
+        # 2. source_message에서 simulated_datetime 확인
+        if not received_time:
+            source_message = todo.get("source_message")
+            if source_message:
+                try:
+                    # source_message가 JSON 문자열이면 파싱
+                    if isinstance(source_message, str):
+                        source_msg_dict = json.loads(source_message)
+                    else:
+                        source_msg_dict = source_message
+
+                    # simulated_datetime 우선 사용 (VirtualOffice replay 모드)
+                    received_time = (
+                        source_msg_dict.get("simulated_datetime")
+                        or (source_msg_dict.get("metadata") or {}).get("simulated_datetime")
+                    )
+                    if received_time:
+                        is_simulation_time = True
+                    else:
+                        # 폴백: date 필드 사용
+                        received_time = source_msg_dict.get("date")
+                except:
+                    pass
+
+        # 3. evidence에서 시도 (폴백)
         if not received_time:
             evidence = todo.get("evidence")
             if evidence:
@@ -309,14 +325,14 @@ class BasicTodoItem(QWidget):
                     evidence_list = json.loads(evidence) if isinstance(evidence, str) else evidence
                     if evidence_list and len(evidence_list) > 0:
                         first_msg = evidence_list[0]
-                        received_time = first_msg.get("date")
+                        received_time = first_msg.get("simulated_datetime") or first_msg.get("date")
                 except:
                     pass
-        
-        # 3. 없으면 created_at 사용 (폴백)
+
+        # 4. 없으면 created_at 사용 (폴백)
         if not received_time:
             received_time = todo.get("created_at")
-        
+
         if received_time:
             from utils.datetime_utils import parse_iso_datetime
             received_dt = parse_iso_datetime(received_time)
@@ -344,7 +360,20 @@ class BasicTodoItem(QWidget):
 
         chips_row = QHBoxLayout()
         chips_row.setSpacing(6)
-        deadline_badge = _deadline_badge(todo)
+
+        # 마감 배지는 시뮬레이션 스냅샷 모드일 경우
+        # 시뮬레이션 시간 기준으로 계산한다.
+        sim_now: Optional[datetime] = None
+        try:
+            parent_panel = self.parent()
+            if hasattr(parent_panel, "_snapshot_enabled") and parent_panel._snapshot_enabled:
+                # TodoPanel의 헬퍼를 통해 현재 시뮬레이션 시각 조회
+                if hasattr(parent_panel, "_get_sim_now_datetime"):
+                    sim_now = parent_panel._get_sim_now_datetime()
+        except Exception as e:  # pragma: no cover - UI 트리 이슈 방어
+            logger.debug(f"[BasicTodoItem] 시뮬레이션 시간 조회 실패: {e}")
+
+        deadline_badge = _deadline_badge(todo, now=sim_now)
         if deadline_badge:
             text, fg, bg = deadline_badge
             dl = QLabel(text)
@@ -540,6 +569,10 @@ class TodoPanel(QWidget):
         self._viewed_ids: set[str] = set()
         self._item_widgets: Dict[str, Tuple[QListWidgetItem | None, BasicTodoItem | None]] = {}
         self._top3_updated_cb: Optional[Callable[[List[dict]], None]] = top3_callback
+
+        # 시뮬레이션 스냅샷 상태
+        self._snapshot_enabled: bool = False
+        self._snapshot_sim_tick: Optional[int] = None
         
         project_service: Optional[object] = None
         try:
@@ -629,6 +662,12 @@ class TodoPanel(QWidget):
         top_header.addWidget(self.top3_label)
         top_header.addWidget(self.top3_rule_btn)
         top_header.addWidget(self.top3_nl_btn)
+
+        # 시뮬레이션 스냅샷 모드 토글
+        self.snapshot_checkbox = QCheckBox("시뮬레이션 스냅샷")
+        self.snapshot_checkbox.setToolTip("현재 시뮬레이션 틱까지의 TODO만 표시합니다.")
+        self.snapshot_checkbox.toggled.connect(self._on_snapshot_toggled)
+        top_header.addWidget(self.snapshot_checkbox)
         top_header.addStretch(1)
         
         # 캐시 상태 표시 위젯 추가
@@ -1076,7 +1115,13 @@ class TodoPanel(QWidget):
             persona_handle=persona_handle
         )
         
-        rows = self.controller.load_active_items()
+        # 시뮬레이션 스냅샷 모드일 때는 현재 틱 기준으로 필터링
+        sim_until_tick: Optional[int] = None
+        if self._snapshot_enabled:
+            sim_until_tick = self._get_current_sim_tick()
+            logger.info(f"[TodoPanel] 스냅샷 모드: sim_until_tick={sim_until_tick}")
+
+        rows = self.controller.load_active_items(sim_until_tick=sim_until_tick)
         logger.info(f"[TodoPanel] DB에서 {len(rows)}개 TODO 로드")
 
         if not rows:
@@ -1171,6 +1216,117 @@ class TodoPanel(QWidget):
         self.top3_label.setText(f"🔺 Top-3 (즉시 처리) · {len(top3)}")
 
         self._current_top3 = top3
+
+    def _on_snapshot_toggled(self, checked: bool) -> None:
+        """시뮬레이션 스냅샷 모드 토글 핸들러."""
+        self._snapshot_enabled = bool(checked)
+        logger.info(
+            "[TodoPanel] 스냅샷 모드 변경: %s",
+            "ON" if self._snapshot_enabled else "OFF",
+        )
+        # 모드 변경 시 즉시 새로고침하여 목록을 재계산
+        self.refresh_todo_list(preserve_existing_on_empty=False)
+
+    def _get_current_sim_tick(self) -> Optional[int]:
+        """부모 윈도우에서 현재 시뮬레이션 틱 가져오기."""
+        try:
+            parent_window = self.parent()
+            # SmartAssistantGUI까지 부모 체인 탐색
+            while parent_window and not hasattr(parent_window, "_last_simulation_tick"):
+                parent_window = parent_window.parent()
+
+            if not parent_window:
+                logger.debug("[TodoPanel] 시뮬레이션 틱 정보를 찾을 수 없음")
+                return None
+
+            tick = getattr(parent_window, "_last_simulation_tick", None)
+            if isinstance(tick, int) and tick > 0:
+                self._snapshot_sim_tick = tick
+                return tick
+
+            return None
+        except Exception as e:
+            logger.error(f"[TodoPanel] 시뮬레이션 틱 조회 오류: {e}")
+            return None
+
+    def _get_sim_now_datetime(self) -> Optional[datetime]:
+        """현재 시뮬레이션 '지금'을 datetime으로 근사.
+
+        1) 현재 TODO 목록의 source_message.metadata.sim_tick / simulated_datetime를 사용해
+           가장 최근 시점을 찾고,
+        2) 필요 시 UTC aware로 정규화한다.
+
+        (VirtualOfficeDataSource에 직접 의존하지 않고, TODO 메타데이터만 사용)
+        """
+        tick = self._get_current_sim_tick()
+        if not tick:
+            return None
+
+        try:
+            candidates: list[tuple[int, datetime]] = []
+
+            for todo in getattr(self, "_all_rows", []) or []:
+                src = todo.get("source_message")
+                if not src:
+                    continue
+
+                src_dict: Optional[dict] = None
+                if isinstance(src, dict):
+                    src_dict = src
+                elif isinstance(src, str):
+                    try:
+                        import json
+
+                        src_dict = json.loads(src)
+                    except Exception:
+                        src_dict = None
+                if not src_dict:
+                    continue
+
+                metadata = src_dict.get("metadata") or {}
+                sim_tick = metadata.get("sim_tick") or src_dict.get("sim_tick")
+                sim_dt_str = (
+                    metadata.get("simulated_datetime")
+                    or src_dict.get("simulated_datetime")
+                    or src_dict.get("date")
+                )
+                if not sim_tick or not sim_dt_str:
+                    continue
+
+                try:
+                    sim_tick_int = int(sim_tick)
+                except Exception:
+                    continue
+
+                # TODO 스냅샷 상한 틱을 초과하는 항목은 무시
+                if sim_tick_int > tick:
+                    continue
+
+                try:
+                    sim_dt = datetime.fromisoformat(str(sim_dt_str).replace("Z", "+00:00"))
+                except Exception:
+                    continue
+
+                if sim_dt.tzinfo is None:
+                    sim_dt = sim_dt.replace(tzinfo=timezone.utc)
+
+                candidates.append((sim_tick_int, sim_dt))
+
+            if not candidates:
+                return None
+
+            # 가장 최근 sim_tick 기준으로 스냅샷 기준 시각 결정
+            best_tick, best_dt = max(candidates, key=lambda x: x[0])
+            logger.info(
+                "[TodoPanel] 스냅샷 기준 시각: sim_tick=%s, dt=%s",
+                best_tick,
+                best_dt.isoformat(),
+            )
+            return best_dt
+
+        except Exception as e:  # pragma: no cover - 방어 코드
+            logger.error(f"[TodoPanel] 시뮬레이션 datetime 계산 오류: {e}", exc_info=True)
+            return None
 
     def _set_render_lists(self, all_rows: List[dict], top3_items: List[dict], rest_items: List[dict]) -> None:
         self._all_rows = list(all_rows)
