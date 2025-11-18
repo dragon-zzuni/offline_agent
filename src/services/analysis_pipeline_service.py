@@ -676,13 +676,13 @@ class AnalysisPipelineService:
         )
         medium_count = sum(
             1 for r in analysis_results
-            if (r.get("priority") or {}).get("priority_level", "").lower() == "medium"
+           if (r.get("priority") or {}).get("priority_level", "").lower() == "medium"
         )
         low_count = sum(
             1 for r in analysis_results
             if (r.get("priority") or {}).get("priority_level", "").lower() == "low"
         )
-        
+         
         return {
             "total_messages": len(messages),
             "email_count": email_count,

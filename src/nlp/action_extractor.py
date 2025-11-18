@@ -149,6 +149,10 @@ class ActionExtractor:
         sender = message_data.get("sender", "")
         sender_email = message_data.get("sender_email", "")
         
+        # 메시지 수신 시각 추출 (마감일 계산 기준)
+        message_date_str = message_data.get("simulated_datetime") or message_data.get("date")
+        self._reference_date = self._parse_message_date(message_date_str) if message_date_str else datetime.now()
+        
         # 단순 인사/확인 메시지 필터링 (TODO 생성 안 함)
         if self._is_simple_acknowledgment(content, subject):
             logger.debug(f"단순 확인 메시지 필터링: {content[:50]}...")
@@ -500,13 +504,16 @@ class ActionExtractor:
         return None
     
     def _parse_date_string(self, date_str: str) -> Optional[datetime]:
-        """날짜 문자열 파싱"""
+        """날짜 문자열 파싱 (메시지 수신 시각 기준)"""
         try:
+            # 기준 날짜 (메시지 수신 시각)
+            reference_date = getattr(self, '_reference_date', datetime.now())
+            
             # 오늘, 내일 처리
             if "오늘" in date_str:
-                return datetime.now().replace(hour=18, minute=0, second=0, microsecond=0)
+                return reference_date.replace(hour=18, minute=0, second=0, microsecond=0)
             elif "내일" in date_str:
-                tomorrow = datetime.now() + timedelta(days=1)
+                tomorrow = reference_date + timedelta(days=1)
                 return tomorrow.replace(hour=18, minute=0, second=0, microsecond=0)
             
             # 월/일 형식 (예: 1월 15일)
@@ -514,7 +521,7 @@ class ActionExtractor:
             if month_day_match:
                 month = int(month_day_match.group(1))
                 day = int(month_day_match.group(2))
-                year = datetime.now().year
+                year = reference_date.year
                 return datetime(year, month, day, 18, 0, 0)
             
             # M/D 형식 (예: 1/15)
@@ -522,24 +529,45 @@ class ActionExtractor:
             if md_match:
                 month = int(md_match.group(1))
                 day = int(md_match.group(2))
-                year = datetime.now().year
+                year = reference_date.year
                 return datetime(year, month, day, 18, 0, 0)
             
             # 요일 처리 (다음 해당 요일)
             weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
             for i, weekday in enumerate(weekdays):
                 if weekday in date_str:
-                    today = datetime.now().weekday()
+                    today = reference_date.weekday()
                     days_ahead = (i - today) % 7
                     if days_ahead == 0:  # 오늘이면 내일
                         days_ahead = 7
-                    target_date = datetime.now() + timedelta(days=days_ahead)
+                    target_date = reference_date + timedelta(days=days_ahead)
                     return target_date.replace(hour=18, minute=0, second=0, microsecond=0)
             
         except Exception as e:
             logger.error(f"날짜 파싱 오류: {e}")
         
         return None
+    
+    def _parse_message_date(self, date_str: str) -> datetime:
+        """메시지 날짜 문자열을 datetime으로 파싱 (timezone-naive로 변환)"""
+        try:
+            from dateutil import parser
+            dt = parser.parse(date_str)
+            # timezone 정보 제거 (naive datetime으로 변환)
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+            return dt
+        except:
+            try:
+                # ISO 형식 시도
+                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                # timezone 정보 제거
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)
+                return dt
+            except:
+                logger.warning(f"메시지 날짜 파싱 실패: {date_str}, 현재 시각 사용")
+                return datetime.now()
     
     def _parse_time_string(self, time_str: str) -> Optional[datetime]:
         """시간 문자열 파싱"""
