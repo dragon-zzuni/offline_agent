@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 from src.integrations.polling_worker import PollingWorker
 from src.integrations.simulation_monitor import SimulationMonitor
 from src.integrations.virtualoffice_client import VirtualOfficeClient
+from src.utils.datetime_utils import get_simulation_time_range
 
 if TYPE_CHECKING:  # pragma: no cover - 순환 참조 방지용 힌트
     from src.integrations.models import PersonaInfo
@@ -172,6 +173,9 @@ class VirtualOfficeConnectionController:
         if hasattr(ui, "tick_history_btn"):
             ui.tick_history_btn.setEnabled(True)
 
+        # VDOS 시뮬레이션 시간 범위로 TimeRangeSelector 자동 설정
+        self._sync_time_range_with_simulation()
+
         logger.info("✅ 연결 상태 레이블 업데이트: %d개 페르소나", len(personas))
 
     def _show_connection_success_dialog(self, personas, sim_status) -> None:
@@ -312,3 +316,42 @@ class VirtualOfficeConnectionController:
                 }
             """
             )
+
+    def _sync_time_range_with_simulation(self) -> None:
+        """VDOS 시뮬레이션 시간 범위로 TimeRangeSelector 동기화 및 TodoPanel 시뮬레이션 시간 설정"""
+        try:
+            ui = self.ui
+            
+            # data_source 가져오기
+            data_source = None
+            if hasattr(ui, 'assistant') and hasattr(ui.assistant, 'data_source_manager'):
+                data_source = ui.assistant.data_source_manager.current_source
+            
+            if not data_source:
+                logger.warning("데이터 소스를 찾을 수 없어 시간 범위 동기화를 건너뜁니다")
+                return
+            
+            # 시뮬레이션 시간 범위 가져오기
+            time_range = get_simulation_time_range(data_source)
+            if not time_range:
+                logger.warning("시뮬레이션 시간 범위를 가져올 수 없습니다")
+                return
+            
+            start_time, end_time = time_range
+            
+            # TimeRangeSelector 업데이트
+            if hasattr(ui, 'time_range_selector'):
+                ui.time_range_selector.set_time_range(start_time, end_time)
+                logger.info(f"📅 시간 범위 동기화: {start_time.strftime('%Y-%m-%d %H:%M')} ~ {end_time.strftime('%Y-%m-%d %H:%M')}")
+            else:
+                logger.warning("TimeRangeSelector를 찾을 수 없습니다")
+            
+            # TodoPanel에 시뮬레이션 시간 설정 (마감일 계산 기준)
+            if hasattr(ui, 'todo_panel'):
+                ui.todo_panel.set_simulation_time(end_time)
+                logger.info(f"⏰ TodoPanel 시뮬레이션 시간 설정: {end_time.strftime('%Y-%m-%d %H:%M')}")
+            else:
+                logger.warning("TodoPanel을 찾을 수 없습니다")
+                
+        except Exception as e:
+            logger.error(f"시간 범위 동기화 실패: {e}", exc_info=True)

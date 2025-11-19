@@ -75,14 +75,25 @@ def _priority_sort_key(todo: dict):
     idx = order.get((todo.get("priority") or "").lower(), 3)
     return (idx, -_created_ts(todo))
 
-def _deadline_badge(todo: dict) -> Optional[tuple[str, str, str]]:
+def _deadline_badge(todo: dict, reference_time: Optional[datetime] = None) -> Optional[tuple[str, str, str]]:
+    """마감일 배지 생성
+    
+    Args:
+        todo: TODO 딕셔너리
+        reference_time: 기준 시간 (None이면 현재 시간 사용, VDOS 시뮬레이션 시간 전달 가능)
+    """
     deadline = todo.get("deadline_ts") or todo.get("deadline")
     dt = _parse_iso_dt(deadline)
     if not dt:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
+    
+    # 기준 시간 (시뮬레이션 시간 또는 현재 시간)
+    now = reference_time if reference_time else datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    
     diff_hours = (dt - now).total_seconds() / 3600.0
     if diff_hours < 0:
         return ("마감 지남", "#991B1B", "#FEE2E2")
@@ -344,7 +355,13 @@ class BasicTodoItem(QWidget):
 
         chips_row = QHBoxLayout()
         chips_row.setSpacing(6)
-        deadline_badge = _deadline_badge(todo)
+        
+        # 시뮬레이션 시간 가져오기 (parent가 TodoPanel인 경우)
+        sim_time = None
+        if parent and hasattr(parent, '_simulation_time'):
+            sim_time = parent._simulation_time
+        
+        deadline_badge = _deadline_badge(todo, sim_time)
         if deadline_badge:
             text, fg, bg = deadline_badge
             dl = QLabel(text)
@@ -540,6 +557,7 @@ class TodoPanel(QWidget):
         self._viewed_ids: set[str] = set()
         self._item_widgets: Dict[str, Tuple[QListWidgetItem | None, BasicTodoItem | None]] = {}
         self._top3_updated_cb: Optional[Callable[[List[dict]], None]] = top3_callback
+        self._simulation_time: Optional[datetime] = None  # VDOS 시뮬레이션 시간
         
         project_service: Optional[object] = None
         try:
@@ -591,6 +609,12 @@ class TodoPanel(QWidget):
     def set_top3_service_instance(self, service: Optional[Top3Service]) -> None:
         self.top3_service = service
         self.controller.set_top3_service(service)
+    
+    def set_simulation_time(self, sim_time: Optional[datetime]) -> None:
+        """VDOS 시뮬레이션 시간 설정 (마감일 계산 기준)"""
+        self._simulation_time = sim_time
+        if sim_time:
+            logger.debug(f"시뮬레이션 시간 설정: {sim_time.strftime('%Y-%m-%d %H:%M')}")
 
     @property
     def repository(self) -> TodoRepository:

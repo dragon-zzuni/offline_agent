@@ -184,3 +184,68 @@ def is_in_time_range(
             return False
     
     return True
+
+
+def get_simulation_current_time(data_source) -> Optional[datetime]:
+    """VDOS 시뮬레이션의 현재 시간 가져오기
+    
+    Args:
+        data_source: VirtualOfficeSource 인스턴스
+        
+    Returns:
+        시뮬레이션 현재 시간 (datetime) 또는 None
+    """
+    try:
+        if not data_source:
+            return None
+            
+        # VirtualOfficeSource인지 확인
+        if not hasattr(data_source, 'get_simulation_status_cached'):
+            return None
+        
+        status = data_source.get_simulation_status_cached()
+        if not status:
+            return None
+        
+        # sim_time 필드에서 현재 시뮬레이션 시간 가져오기
+        sim_time_str = status.get('sim_time')
+        if sim_time_str:
+            return parse_iso_datetime(sim_time_str)
+        
+        return None
+    except Exception as e:
+        logger.error(f"시뮬레이션 현재 시간 가져오기 실패: {e}")
+        return None
+
+
+def get_simulation_time_range(data_source) -> Optional[tuple[datetime, datetime]]:
+    """VDOS 시뮬레이션의 시작 시간과 현재 시간 가져오기
+    
+    Args:
+        data_source: VirtualOfficeSource 인스턴스
+        
+    Returns:
+        (시작 시간, 현재 시간) 튜플 또는 None
+    """
+    try:
+        if not data_source:
+            return None
+            
+        # VirtualOfficeSource인지 확인
+        if not hasattr(data_source, '_sim_base_dt'):
+            return None
+        
+        # 시작 시간 (sim_base_dt)
+        start_time = data_source._sim_base_dt
+        if not start_time:
+            return None
+        
+        # 현재 시간
+        current_time = get_simulation_current_time(data_source)
+        if not current_time:
+            return None
+        
+        return (start_time, current_time)
+    except Exception as e:
+        logger.error(f"시뮬레이션 시간 범위 가져오기 실패: {e}")
+        return None

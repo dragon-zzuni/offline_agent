@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, Qt, QDateTime
 
 from .styles import Colors, FontSizes, FontWeights, Styles, Spacing, BorderRadius
+from src.utils.datetime_utils import get_simulation_current_time
 
 logger = logging.getLogger(__name__)
 
@@ -368,23 +369,57 @@ class TimeRangeSelector(QWidget):
         self.start_datetime.setDateTime(QDateTime(start))
         self.end_datetime.setDateTime(QDateTime(end))
     
+    def _get_simulation_time(self) -> Optional[datetime]:
+        """시뮬레이션 현재 시간 가져오기 (VDOS 연결 시)"""
+        try:
+            # 부모 윈도우 찾기
+            parent = self.parent()
+            while parent and not hasattr(parent, 'assistant'):
+                parent = parent.parent()
+            
+            if not parent or not hasattr(parent, 'assistant'):
+                return None
+            
+            # data_source 가져오기
+            if hasattr(parent.assistant, 'data_source_manager'):
+                data_source = parent.assistant.data_source_manager.current_source
+                if data_source:
+                    return get_simulation_current_time(data_source)
+            
+            return None
+        except Exception as e:
+            logger.debug(f"시뮬레이션 시간 가져오기 실패: {e}")
+            return None
+    
     def _set_today(self):
-        """오늘 00:00 ~ 현재 시간으로 설정"""
-        now = datetime.now()
+        """오늘 00:00 ~ 현재 시간으로 설정 (시뮬레이션 시간 기준)"""
+        # 시뮬레이션 시간 우선 사용
+        sim_time = self._get_simulation_time()
+        now = sim_time if sim_time else datetime.now()
+        
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         
         self.start_datetime.setDateTime(QDateTime(start))
         self.end_datetime.setDateTime(QDateTime(now))
+        
+        if sim_time:
+            logger.info(f"📅 오늘 설정 (시뮬레이션 시간 기준): {start.strftime('%Y-%m-%d %H:%M')} ~ {now.strftime('%Y-%m-%d %H:%M')}")
     
     def _set_yesterday(self):
-        """어제 00:00 ~ 23:59로 설정"""
-        now = datetime.now()
+        """어제 00:00 ~ 23:59로 설정 (시뮬레이션 시간 기준)"""
+        # 시뮬레이션 시간 우선 사용
+        sim_time = self._get_simulation_time()
+        now = sim_time if sim_time else datetime.now()
+        
         yesterday = now - timedelta(days=1)
         start = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
         end = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999)
         
         self.start_datetime.setDateTime(QDateTime(start))
         self.end_datetime.setDateTime(QDateTime(end))
+        
+        if sim_time:
+            logger.info(f"📅 어제 설정 (시뮬레이션 시간 기준): {start.strftime('%Y-%m-%d')} ~ {end.strftime('%Y-%m-%d')}")
     
     def _apply_range(self):
         """선택한 시간 범위 적용 및 즉시 데이터 수집"""
