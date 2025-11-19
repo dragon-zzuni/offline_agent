@@ -75,13 +75,29 @@ class Top3LLMSelector:
             logger.warning("[Top3LLM] 후보 TODO가 없습니다 (모두 완료 상태)")
             return set()
         
+        # 마감이 지난 TODO 제외
+        now = datetime.now()
+        original_count = len(candidates)
+        candidates = [
+            t for t in candidates 
+            if not t.get("deadline") or 
+            datetime.fromisoformat(t.get("deadline").replace("Z", "+00:00")) >= now
+        ]
+        
+        if len(candidates) < original_count:
+            logger.info(f"[Top3LLM] 마감이 지난 TODO {original_count - len(candidates)}개 제외")
+        
+        if not candidates:
+            logger.warning("[Top3LLM] 후보 TODO가 없습니다 (모두 마감 지남)")
+            return set()
+        
         # LLM 사용 가능 여부 확인
         if not self.llm_client.is_available():
             logger.warning("[Top3LLM] LLM 클라이언트를 사용할 수 없습니다 → 폴백 모드")
             return self._fallback_selection(candidates)
         
-        # 사전 필터링 제거: LLM이 모든 TODO를 직접 분석하도록 함
-        # (자연어 규칙의 모든 조건을 정확히 적용하기 위해)
+        # 사전 필터링 없이 모든 TODO를 LLM에 전달
+        # (자연어 규칙을 정확히 적용하려면 전체를 봐야 함)
         logger.info(f"[Top3LLM] TODO {len(candidates)}개를 LLM에 전달 (사전 필터링 없음)")
         
         # LLM 시도
@@ -95,6 +111,79 @@ class Top3LLMSelector:
         # LLM 실패 시 폴백
         logger.warning("[Top3LLM] LLM 선정 실패 → 폴백 모드")
         return self._fallback_selection(candidates)
+    
+    def _smart_prefilter(self, candidates: List[Dict], natural_rule: str) -> List[Dict]:
+        """스마트 사전 필터링
+        
+        마감일 조건이 있으면 마감일 기준으로 정렬해서 상위 50개만 선택
+        (토큰 제한 때문에 모든 TODO를 LLM에 전달할 수 없음)
+        
+        Args:
+            candidates: 후보 TODO 리스트
+            natural_rule: 자연어 규칙
+            
+        Returns:
+            필터링된 TODO 리스트
+        """
+        # 마감일 관련 키워드 감지
+        rule_lower = natural_rule.lower()
+        deadline_keywords_far = ["많이 남은", "여유", "급하지 않은", "오래 남은"]
+        deadline_keywords_near = ["임박", "긴급", "급한", "가까운"]
+        
+        has_deadline_far = any(kw in rule_lower for kw in deadline_keywords_far)
+        has_deadline_near = any(kw in rule_lower for kw in deadline_keywords_near)
+        
+        # 마감일 조건이 없으면 전체 반환 (최대 100개)
+        if not (has_deadline_far or has_deadline_near):
+            if len(candidates) > 100:
+                logger.info(f"[Top3LLM] 마감일 조건 없음 → 상위 100개만 선택")
+                return candidates[:100]
+            return candidates
+        
+        # 마감일이 있는 TODO만 필터링
+        with_deadline = [t for t in candidates if t.get("deadline")]
+        without_deadline = [t for t in candidates if not t.get("deadline")]
+        
+        logger.info(f"[Top3LLM] 마감일 있음: {len(with_deadline)}개, 없음: {len(without_deadline)}개")
+        
+        if not with_deadline:
+            logger.warning("[Top3LLM] 마감일 조건이 있지만 마감일이 있는 TODO가 없습니다")
+            return candidates[:100] if len(candidates) > 100 else candidates
+        
+        # 마감일 기준 정렬
+        now = datetime.now()
+        
+        def get_deadline_sort_key(todo):
+            deadline = todo.get("deadline")
+            if not deadline:
+                return datetime.max if has_deadline_far else datetime.min
+            try:
+                return datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+            except:
+                return datetime.max if has_deadline_far else datetime.min
+        
+        # 정렬 (많이 남은 것 우선 vs 임박한 것 우선)
+        if has_deadline_far:
+            # 마감일이 먼 순서 (내림차순)
+            with_deadline.sort(key=get_deadline_sort_key, reverse=True)
+            logger.info("[Top3LLM] 마감일이 먼 순서로 정렬")
+        else:
+            # 마감일이 가까운 순서 (오름차순)
+            with_deadline.sort(key=get_deadline_sort_key)
+            logger.info("[Top3LLM] 마감일이 가까운 순서로 정렬")
+        
+        # 상위 50개 선택 (토큰 제한 고려)
+        top_50 = with_deadline[:50]
+        
+        logger.info(f"[Top3LLM] 마감일 기준 상위 50개 선택")
+        
+        # 디버그: 선택된 TODO의 마감일 범위 로깅
+        if top_50:
+            first_deadline = top_50[0].get("deadline")
+            last_deadline = top_50[-1].get("deadline")
+            logger.info(f"[Top3LLM] 선택된 범위: {first_deadline} ~ {last_deadline}")
+        
+        return top_50
     
     def _try_llm_selection(
         self, 
@@ -213,7 +302,7 @@ class Top3LLMSelector:
             else:
                 score += 1.0
             
-            # 마감일 임박도
+            # 마감일 처리
             deadline = todo.get("deadline")
             if deadline:
                 try:
@@ -221,7 +310,12 @@ class Top3LLMSelector:
                         dl = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
                         hours_left = (dl - now).total_seconds() / 3600.0
                         
-                        if hours_left < 24:
+                        # 마감이 지났으면 점수 대폭 감소
+                        if hours_left < 0:
+                            score -= 10.0  # 마감 지난 TODO는 우선순위 최하위
+                            logger.debug(f"[Top3LLM] 마감 지남: {todo.get('id')} (점수 -10)")
+                        # 마감이 임박하면 점수 증가
+                        elif hours_left < 24:
                             score += 2.0
                         elif hours_left < 72:
                             score += 1.0
@@ -250,44 +344,39 @@ class Top3LLMSelector:
         # VDOS DB에서 사람 정보 가져오기
         person_mapping = self._get_person_mapping()
         
-        # TODO 리스트를 간결한 형태로 직렬화
+        # TODO 리스트를 간결한 형태로 직렬화 (토큰 절약)
         todo_list = []
         for i, todo in enumerate(todos, 1):
             requester = todo.get("requester", "")
-            # 이메일을 이름으로 변환
             requester_name = person_mapping.get(requester, requester)
             
-            # 프로젝트 정보 (풀네임 우선, 없으면 코드)
             project_code = todo.get("project", "")
-            project_fullname = todo.get("project_full_name", "")
-            project_display = f"{project_fullname} ({project_code})" if project_fullname else project_code
-            
-            # ID를 더 명확하게 강조
             todo_id = todo.get("id", "")
             todo_type = todo.get("type", "")
             
-            # 수신 방법 (메일/메시지)
+            # 수신방법
             source_type = todo.get("source_type", "")
-            source_display = ""
             if source_type == "email":
                 source_display = "메일"
             elif source_type == "messenger":
                 source_display = "메시지"
             else:
-                source_display = source_type or "알 수 없음"
+                source_display = source_type or "알수없음"
             
-            todo_info = f"""[TODO #{i}]
-→ ID: "{todo_id}" (이 ID를 그대로 사용하세요!)
-→ 제목: {(todo.get("title") or "")[:80]}
-→ 프로젝트: {project_display}
-→ 요청자: {requester_name}
-→ 유형: {todo_type}
-→ 수신방법: {source_display}
-→ 우선순위: {todo.get("priority", "medium")}
-→ 마감일: {todo.get("deadline", "")}"""
+            # 수신시간 (created_at 또는 updated_at)
+            received_at = todo.get("created_at", "") or todo.get("updated_at", "")
+            
+            # 마감일
+            deadline = todo.get("deadline", "")
+            
+            # 우선순위
+            priority = todo.get("priority", "medium")
+            
+            # 한 줄로 압축 (모든 필수 정보 포함)
+            todo_info = f"#{i} ID:{todo_id} | 프로젝트:{project_code or '없음'} | 요청자:{requester_name} | 유형:{todo_type} | 수신방법:{source_display} | 수신시간:{received_at} | 마감:{deadline or '없음'} | 우선순위:{priority}"
             todo_list.append(todo_info)
         
-        todos_text = "\n\n".join(todo_list)
+        todos_text = "\n".join(todo_list)
         
         # 사람 매핑 정보도 프롬프트에 추가
         person_info = "\n".join([f"- {email}: {name}" for email, name in person_mapping.items()])
@@ -304,22 +393,24 @@ class Top3LLMSelector:
 TODO 리스트 ({len(todos)}개):
 {todos_text}
 
-선정 기준 (반드시 순서대로 적용):
-1. **프로젝트 조건을 최우선으로 정확히 만족**: 
+선정 기준 (사용자가 명시한 조건만 적용):
+**중요**: 사용자 규칙에 명시되지 않은 조건은 무시하세요! 예를 들어 "마감이 많이 남은 것"만 요청했다면 프로젝트/요청자/유형은 고려하지 마세요.
+
+1. **프로젝트 조건 (사용자가 프로젝트를 명시한 경우에만 적용)**: 
    - 각 TODO의 "프로젝트" 필드를 확인하세요 (예: "Project LUMINA (PL)" 형태로 표시됨)
    - 사용자가 프로젝트 이름을 언급하면 (한글/영문/약어 모두 가능):
      * "LUMINA", "루미나", "PL" → "Project LUMINA (PL)" 또는 약어 "PL"이 포함된 TODO 선택
      * "CareBridge", "케어브릿지", "CI" → "CareBridge Integration (CI)" 또는 약어 "CI"가 포함된 TODO 선택
      * "Care Connect", "케어커넥트", "CC" → "Care Connect 2.0 (CC)" 또는 약어 "CC"가 포함된 TODO 선택
    - **중요**: 프로젝트 필드에 풀네임과 약어가 함께 표시되므로, 사용자가 어떤 형태로 입력해도 매칭되어야 합니다!
-   - 프로젝트 조건이 맞지 않으면 절대 선택하지 마세요!
+   - 프로젝트 조건이 명시되었다면 맞지 않는 TODO는 절대 선택하지 마세요!
 
-2. **요청자 조건을 정확히 만족**: 
+2. **요청자 조건 (사용자가 요청자를 명시한 경우에만 적용)**: 
    - "요청자(이 TODO를 생성한 사람)" 필드를 확인하세요
    - 사용자가 "전형우"라고 하면 요청자가 "전형우" 또는 "hyungwoo.jeon@example.com"인 TODO만 선택
    - 설명에 언급된 사람이 아니라 "요청자" 필드를 확인하세요!
 
-3. **유형 조건을 절대적으로 만족 (매우 중요!)**: 
+3. **유형 조건 (사용자가 유형을 명시한 경우에만 적용, 매우 중요!)**: 
    - "유형" 필드를 확인하세요
    - 사용자가 "업무처리"라고 하면 **반드시** 유형이 "task"인 TODO**만** 선택
    - "문서검토"면 **반드시** 유형이 "review"인 TODO**만** 선택
@@ -328,15 +419,26 @@ TODO 리스트 ({len(todos)}개):
    - **절대로 다른 유형을 섞어서 선정하지 마세요!**
    - 예: "업무처리"를 요청했는데 "마감작업"이나 "미팅"을 선정하면 안 됩니다!
 
-4. **수신방법 조건을 정확히 만족**:
+4. **수신방법 조건 (사용자가 수신방법을 명시한 경우에만 적용)**:
    - "수신방법" 필드를 확인하세요
    - 사용자가 "메시지로 수신"이라고 하면 **반드시** 수신방법이 "메시지"인 TODO**만** 선택
    - "메일로 수신"이라고 하면 **반드시** 수신방법이 "메일"인 TODO**만** 선택
    - 수신방법 조건이 있으면 **절대로 다른 수신방법을 섞지 마세요!**
 
-5. **위 1, 2, 3, 4 조건을 모두 만족하는 TODO 중에서** 마감일, 우선순위 등을 고려하여 3개 선정
+5. **마감일 조건 (사용자가 마감일 관련 조건을 명시한 경우 최우선 적용)**:
+   - "마감일" 필드를 확인하세요
+   - "마감이 많이 남은", "여유있는", "급하지 않은" → 마감일이 가장 먼 TODO 우선
+   - "마감이 임박한", "긴급한", "급한" → 마감일이 가장 가까운 TODO 우선
+   - 마감일 조건이 명시되었다면 이를 **최우선**으로 고려하세요!
 
-6. **반드시 정확히 3개를 선정해야 합니다**:
+6. **우선순위 조건 (사용자가 우선순위를 명시한 경우에만 적용)**:
+   - "우선순위" 필드를 확인하세요 (high, medium, low)
+   - 사용자가 "중요한", "우선순위 높은" → high 우선
+   - 사용자가 "덜 중요한", "우선순위 낮은" → low 우선
+
+7. **최종 선정**: 위에서 사용자가 명시한 조건들을 모두 만족하는 TODO 중에서 3개 선정
+
+8. **반드시 정확히 3개를 선정해야 합니다**:
    - 조건을 완벽히 만족하는 TODO가 3개 이상이면 → 그 중 3개 선정
    - 조건을 완벽히 만족하는 TODO가 3개 미만이면:
      a) 먼저 완벽히 만족하는 TODO를 모두 선정
@@ -353,7 +455,7 @@ TODO 리스트 ({len(todos)}개):
    - 예시 1: "PN 프로젝트의 전형우가 요청한 업무처리 TODO 1개를 선정하고, PN 프로젝트의 다른 요청자(임호규)가 요청한 업무처리 TODO 2개를 추가로 선정했습니다. (요청자 조건만 완화, 프로젝트와 유형은 통일)"
    - 예시 2: "완벽히 일치하는 TODO가 없어서, 전형우가 요청한 업무처리 TODO 3개를 선정했습니다. (프로젝트 조건 완화, 요청자와 유형은 통일)"
 
-7. **매우 중요**: 
+9. **매우 중요**: 
    - selected_ids에는 반드시 위 TODO 리스트의 "ID:" 필드에 있는 **정확한 ID**만 사용하세요
    - 예: TODO #5의 ID가 "abc123"이면 → "abc123"을 그대로 사용
    - 절대로 "task_103" 같은 존재하지 않는 ID를 만들지 마세요!

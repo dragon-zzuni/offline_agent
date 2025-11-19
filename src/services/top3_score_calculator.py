@@ -65,10 +65,20 @@ class Top3ScoreCalculator:
         if dl:
             if dl.tzinfo is None:
                 dl = dl.replace(tzinfo=timezone.utc)
-            hours_left = max(0.0, (dl - now).total_seconds() / 3600.0)
-            emphasis = self.rules.get("deadline_emphasis", 24.0)
-            base = self.rules.get("deadline_base", 1.0)
-            w_deadline = base + (emphasis / (emphasis + hours_left))
+            hours_left = (dl - now).total_seconds() / 3600.0
+            
+            # 마감이 지났으면 큰 패널티 적용
+            if hours_left < 0:
+                # 마감이 지난 시간에 비례해서 패널티 증가
+                hours_overdue = abs(hours_left)
+                w_deadline = 0.1 / (1.0 + hours_overdue / 24.0)  # 하루 지날수록 점수 감소
+                logger.debug(f"[ScoreCalc] 마감 지남: {todo.get('id')} ({hours_overdue:.1f}시간), 점수={w_deadline:.3f}")
+            else:
+                # 마감이 남았으면 기존 로직
+                hours_left = max(0.0, hours_left)
+                emphasis = self.rules.get("deadline_emphasis", 24.0)
+                base = self.rules.get("deadline_base", 1.0)
+                w_deadline = base + (emphasis / (emphasis + hours_left))
         else:
             w_deadline = 1.0
         
