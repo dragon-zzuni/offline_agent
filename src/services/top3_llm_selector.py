@@ -351,6 +351,15 @@ class Top3LLMSelector:
             requester_name = person_mapping.get(requester, requester)
             
             project_code = todo.get("project", "")
+            project_fullname = todo.get("project_full_name", "")
+            # 프로젝트 표시: 풀네임(코드) 형식
+            if project_fullname and project_code:
+                project_display = f"{project_fullname}({project_code})"
+            elif project_code:
+                project_display = project_code
+            else:
+                project_display = "없음"
+            
             todo_id = todo.get("id", "")
             todo_type = todo.get("type", "")
             
@@ -373,7 +382,7 @@ class Top3LLMSelector:
             priority = todo.get("priority", "medium")
             
             # 한 줄로 압축 (모든 필수 정보 포함)
-            todo_info = f"#{i} ID:{todo_id} | 프로젝트:{project_code or '없음'} | 요청자:{requester_name} | 유형:{todo_type} | 수신방법:{source_display} | 수신시간:{received_at} | 마감:{deadline or '없음'} | 우선순위:{priority}"
+            todo_info = f"#{i} ID:{todo_id} | 프로젝트:{project_display} | 요청자:{requester_name} | 유형:{todo_type} | 수신방법:{source_display} | 수신시간:{received_at} | 마감:{deadline or '없음'} | 우선순위:{priority}"
             todo_list.append(todo_info)
         
         todos_text = "\n".join(todo_list)
