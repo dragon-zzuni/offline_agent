@@ -84,11 +84,21 @@ class ProjectTagService:
         import os
         workspace_root = Path(os.getcwd())
         
+        # 현재 파일의 위치를 기준으로 프로젝트 루트 찾기
+        # src/services/project_tag_service.py -> .../offline_agent
+        current_file = Path(__file__).resolve()
+        # parents[0]: services, [1]: src, [2]: offline_agent, [3]: virtual-office-orchestration
+        project_root_from_file = current_file.parents[3]
+        
         possible_paths = [
-            # 작업 디렉토리 기준 (가장 안전)
+            # 1. 소스 코드 구조 기준 (가장 정확함 - 프로젝트 루트/virtualoffice)
+            project_root_from_file / "virtualoffice" / "src" / "virtualoffice" / "vdos.db",
+            
+            # 2. 작업 디렉토리 기준 (프로젝트 루트에서 실행 시)
             workspace_root / "virtualoffice" / "src" / "virtualoffice" / "vdos.db",
-            # 현재 파일 기준 (폴백)
-            Path(__file__).resolve().parents[3] / "virtualoffice" / "src" / "virtualoffice" / "vdos.db",
+            
+            # 3. 작업 디렉토리가 offline_agent인 경우 상위 디렉토리 확인
+            workspace_root.parent / "virtualoffice" / "src" / "virtualoffice" / "vdos.db",
         ]
         
         # VDOS 연결자가 있으면 경로 가져오기

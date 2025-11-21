@@ -279,3 +279,6 @@ TODO.md
 PERSONAL_*.md
 
 # End of https://www.toptal.com/developers/gitignore/api/windows,python
+
+# Debug Tools
+debug_tools/

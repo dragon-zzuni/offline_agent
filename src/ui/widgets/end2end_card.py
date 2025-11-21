@@ -32,9 +32,61 @@ class End2EndCard(QWidget):
         
         root = QVBoxLayout(self)
 
+        # 제목 및 상태 표시 영역
+        title_row = QHBoxLayout()
+        
         self.title_label = QLabel(f"🔴 {todo.get('title','(제목없음)')}")
         self.title_label.setStyleSheet("font-weight: 700;")
-        root.addWidget(self.title_label)
+        title_row.addWidget(self.title_label, 1)
+        
+        # 상태 결정: 마감일 지났으면 overdue
+        todo_status = todo.get("status") or "pending"
+        deadline_str = todo.get("deadline")
+        
+        if todo_status == "pending" and deadline_str:
+            try:
+                from datetime import datetime
+                from utils.datetime_utils import parse_iso_datetime
+                
+                deadline_dt = parse_iso_datetime(deadline_str)
+                
+                # 시뮬레이션 시간 사용 (parent가 TodoPanel인 경우)
+                if parent and hasattr(parent, '_simulation_time') and parent._simulation_time:
+                    now = parent._simulation_time
+                else:
+                    now = datetime.now()
+                
+                # timezone-naive 비교를 위해 변환
+                if deadline_dt and deadline_dt.tzinfo:
+                    deadline_dt = deadline_dt.replace(tzinfo=None)
+                if now.tzinfo:
+                    now = now.replace(tzinfo=None)
+                
+                if deadline_dt and deadline_dt < now:
+                    todo_status = "overdue"
+            except:
+                pass
+        
+        # 상태 라벨 생성
+        status_text = {
+            "pending": "Pending",
+            "overdue": "Overdue",
+            "completed": "Completed",
+            "snoozed": "Snoozed"
+        }.get(todo_status, todo_status.capitalize())
+        
+        status_label = QLabel(status_text)
+        
+        # 상태별 스타일
+        if todo_status == "overdue":
+            status_label.setStyleSheet("background:#FEE2E2; color:#991B1B; padding:2px 8px; border-radius:999px; font-weight:600;")
+        elif todo_status == "completed":
+            status_label.setStyleSheet("background:#D1FAE5; color:#065F46; padding:2px 8px; border-radius:999px; font-weight:600;")
+        else:
+            status_label.setStyleSheet("background:#E0E7FF; color:#3730A3; padding:2px 8px; border-radius:999px; font-weight:600;")
+        
+        title_row.addWidget(status_label, 0)
+        root.addLayout(title_row)
 
         chips = QHBoxLayout()
         try:
@@ -45,7 +97,13 @@ class End2EndCard(QWidget):
             lbl = QLabel(f"〔{chip}〕")
             lbl.setStyleSheet("color:#374151; background:#F3F4F6; padding:2px 6px; border-radius:8px;")
             chips.addWidget(lbl)
-        dl_badge = _deadline_badge(todo)
+        
+        # 시뮬레이션 시간 가져오기 (parent가 TodoPanel인 경우)
+        sim_time = None
+        if parent and hasattr(parent, '_simulation_time'):
+            sim_time = parent._simulation_time
+        
+        dl_badge = _deadline_badge(todo, sim_time)
         if dl_badge:
             text, fg, bg = dl_badge
             dlabel = QLabel(f"〔{text}〕")

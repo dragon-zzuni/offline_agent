@@ -30,12 +30,15 @@ class MessageSummary:
     sentiment: str  # positive, negative, neutral
     urgency_level: str  # high, medium, low
     action_required: bool
+    validated_deadlines: List[Dict] = None  # LLM이 검증한 마감일 리스트
     suggested_response: Optional[str] = None
     created_at: datetime = None
     
     def __post_init__(self):
         if self.created_at is None:
             self.created_at = datetime.now()
+        if self.validated_deadlines is None:
+            self.validated_deadlines = []
     
     def to_dict(self) -> Dict:
         """딕셔너리로 변환"""
@@ -46,6 +49,7 @@ class MessageSummary:
             "sentiment": self.sentiment,
             "urgency_level": self.urgency_level,
             "action_required": self.action_required,
+            "validated_deadlines": self.validated_deadlines,
             "suggested_response": self.suggested_response,
             "created_at": self.created_at.isoformat()
         }
@@ -266,32 +270,54 @@ class MessageSummarizer:
         
         return None
 
-    async def summarize_message(self, content: str, sender: str = "", subject: str = "") -> MessageSummary:
+    async def summarize_message(self, content: str, sender: str = "", subject: str = "", message_date: str = "") -> MessageSummary:
         if self.is_available and self.chat_url:
             try:
-                return await self._llm_summarize(content, sender, subject)
+                return await self._llm_summarize(content, sender, subject, message_date)
             except Exception as exc:
                 logger.error(f"메시지 요약 오류: {exc}")
         return self._basic_summarize(content, sender, subject)
     
-    def _create_summarization_prompt(self, content: str, sender: str, subject: str) -> str:
+    def _create_summarization_prompt(self, content: str, sender: str, subject: str, message_date: str = "") -> str:
         """요약 프롬프트 생성"""
+        # 메시지 수신일 파싱 (날짜만 추출)
+        received_date = ""
+        if message_date:
+            try:
+                from datetime import datetime
+                # ISO 형식 파싱
+                dt = datetime.fromisoformat(message_date.replace('Z', '+00:00'))
+                received_date = dt.strftime('%Y-%m-%d')
+            except:
+                received_date = message_date[:10] if len(message_date) >= 10 else message_date
+        
+        date_info = f"\n**메시지 수신일: {received_date}** (마감일 계산 기준)" if received_date else ""
+        
         prompt = f"""
 다음 메시지를 분석하여 JSON 형식으로 답변해주세요. 반드시 소문자 json이라는 단어를 포함한 json 문자열로만 응답하세요:
 
 발신자: {sender}
-제목: {subject}
+제목: {subject}{date_info}
 내용: {content[:2000]}
 
 다음 형식으로 분석해주세요:
-{{
+{{{{
     "summary": "메시지의 핵심 내용을 2-3문장으로 요약",
     "key_points": ["핵심 포인트 1", "핵심 포인트 2", "핵심 포인트 3"],
     "sentiment": "positive/negative/neutral 중 하나",
     "urgency_level": "high/medium/low 중 하나",
     "action_required": true/false,
+    "validated_deadlines": [
+        {{{{
+            "text": "내일 오전까지 검토",
+            "date": "YYYY-MM-DD",
+            "time": "HH:MM",
+            "is_valid": true,
+            "reason": "명확한 마감 요청"
+        }}}}
+    ],
     "suggested_response": "권장 응답 내용 (선택사항)"
-}}
+}}}}
 
 ## action_required 판단 기준 (매우 중요!)
 
@@ -328,14 +354,17 @@ class MessageSummarizer:
 **2. 과거 사건 보고**
 - "미팅에서 논의했습니다", "작업을 완료했습니다"
 - "검토를 진행했습니다", "확인했습니다"
+- "오늘 회의에서 논의한", "오늘 정리한", "오늘 진행한"
 - "completed", "finished", "done"
 - **판단 기준**: 이미 끝난 일에 대한 보고
+- **중요**: 과거 보고 + "필요한 경우 ~" 같은 조건부 요청이 함께 있어도 → false
 
 **3. 조건부 제안 (선택적)**
 - "필요하시면 말씀해 주세요", "궁금하시면 연락 주세요"
+- "필요한 경우 공유 부탁드립니다", "필요하면 알려주세요"
 - "원하시면 도와드리겠습니다", "언제든 말씀해 주세요"
 - "if you need", "if you want", "anytime"
-- **판단 기준**: 수신자가 원할 때만 행동하면 되는 경우
+- **판단 기준**: 수신자가 원할 때만 행동하면 되는 경우 (선택적)
 
 **4. 단순 인사/확인**
 - "확인했습니다", "알겠습니다", "감사합니다"
@@ -373,15 +402,130 @@ class MessageSummarizer:
 - **조건부 표현 + 선택적 제안**이면 → false
 - **미래 일정 + 명확한 요청**이면 → true
 
+### 🎯 실전 예시
+
+**예시 1: action_required = false**
+```
+"오늘 회의에서 논의한 주요 이슈와 다음 단계 정리하였습니다. 필요한 경우 추가 자료 공유 부탁드립니다."
+→ ❌ false (과거 보고 + 조건부 요청 = 정보 공유 목적)
+```
+
+**예시 2: action_required = true**
+```
+"내일 회의 전까지 자료 검토 부탁드립니다."
+→ ✅ true (명확한 요청 + 마감일)
+```
+
+**예시 3: action_required = false**
+```
+"오늘 진행 상황 공유드립니다. 궁금하신 점 있으시면 말씀해주세요."
+→ ❌ false (정보 공유 + 조건부 제안)
+```
+
+**예시 4: action_required = false** ⚠️ 중요!
+```
+"오늘의 디자인 작업이 완료되었습니다. 피드백 요청드립니다."
+→ ❌ false (작업 완료 보고가 주 목적, 피드백은 부차적)
+```
+
+**예시 5: action_required = false** ⚠️ 중요!
+```
+"디자인 초안을 제출합니다. 피드백 부탁드립니다."
+→ ❌ false (제출 완료 보고가 주 목적, 피드백은 부차적)
+```
+
+**예시 6: action_required = false** ⚠️ 중요!
+```
+"QA 테스트를 마무리했습니다. 발견된 이슈를 문서화하여 공유합니다. 검토 후 피드백 주시면 감사하겠습니다."
+→ ❌ false (테스트 완료 보고 + 정보 공유가 주 목적)
+```
+
 ## 기타 분석 기준
 
 - urgency_level: 긴급 키워드(긴급, urgent, asap, 즉시, 오늘까지, deadline)가 있으면 high
 - sentiment: 긍정적/부정적/중립적 톤 분석
+
+## 📅 마감일 검증 기준
+
+메시지에서 마감일 표현을 찾았을 때, 다음 기준으로 **유효성을 검증**하세요:
+
+### ❌ 유효하지 않은 마감일 (무시해야 함)
+
+**🔴 매우 중요: 다음 경우는 절대 마감일로 인식하지 마세요!**
+
+1. **질문 형태**: "언제까지 가능하신가요?", "언제까지 공유해주실 수 있을까요?"
+2. **과거 완료 표현**: 
+   - "오늘 리뷰한", "오늘 진행한", "오늘 완료된"
+   - "오늘 회의에서 논의한", "오늘 작업한", "오늘 정리한"
+   - "내일 진행한", "어제 완료한"
+   - **판단 기준**: 과거형 동사 + 시간 표현 = 이미 끝난 일
+3. **단순 정보 공유**: 
+   - "오늘 진행 상황", "오늘 회의 내용", "오늘 결과"
+   - "공유드립니다", "알려드립니다", "보고드립니다"
+   - **판단 기준**: 정보 전달 목적, 요청 없음
+4. **불확실한 표현**: "가능하면", "여유 있을 때", "시간 되실 때"
+
+### ✅ 유효한 마감일 (추출해야 함)
+
+**다음 경우만 마감일로 인식하세요:**
+
+1. **명확한 요청 동사 + 날짜**: 
+   - "내일까지 제출해주세요", "12월 20일까지 완료 부탁드립니다"
+   - "오늘 중으로 검토 부탁", "내일까지 피드백 주세요"
+   - **핵심**: 요청 동사 (제출, 완료, 검토, 피드백, 확인, 승인 등) 필수
+2. **미래 일정 + 참석/준비 요청**:
+   - "내일 회의에 참석해주세요"
+   - "오늘 오후 미팅 준비 부탁드립니다"
+   - **핵심**: 미래 시점 + 행동 요청
+
+### ⏰ 마감 시간 추출 규칙
+**🔴 매우 중요: 반드시 메시지 수신일을 기준으로 계산하세요!**
+
+메시지 상단에 표시된 "메시지 수신일"을 기준으로 상대적 날짜를 계산합니다:
+
+**시간 기본값:**
+- "오전까지" (시간 명시 없음) → 12:00
+- "오후까지" (시간 명시 없음) → 18:00
+- "저녁까지" → 21:00
+- 시간 명시 없음 → 18:00 (기본값)
+
+**날짜 계산 (메시지 수신일 기준):**
+- "오늘" → 메시지 수신일
+- "내일" → 메시지 수신일 + 1일
+- "모레" → 메시지 수신일 + 2일
+- 구체적 날짜 (예: "12월 20일") → 해당 날짜 그대로
+
+**예시 1 - 유효한 마감일:**
+- 메시지 수신일: 2025-11-14
+- "내일 오전까지 제출해주세요" → ✅ date: "2025-11-15", time: "12:00"
+- "오늘 중으로 검토 부탁" → ✅ date: "2025-11-14", time: "18:00"
+
+**예시 2 - 무효한 마감일 (과거 완료):**
+- 메시지 수신일: 2025-11-22
+- "오늘 회의에서 논의한 내용입니다" → ❌ 마감일 없음 (과거 완료)
+- "오늘 진행한 작업 공유드립니다" → ❌ 마감일 없음 (정보 공유)
+- "내일 회의에 참석해주세요" → ✅ date: "2025-11-23", time: "18:00" (미래 요청)
+
+### 📋 validated_deadlines 형식
+유효한 마감일을 찾으면 다음 형식으로 반환:
+```json
+"validated_deadlines": [
+    {{{{
+        "text": "내일 오전까지 검토",
+        "date": "YYYY-MM-DD",
+        "time": "HH:MM",
+        "is_valid": true,
+        "reason": "명확한 마감 요청"
+    }}}}
+]
+```
+
+무효한 마감일은 포함하지 마세요.
 """
         return prompt
 
-    async def _llm_summarize(self, content: str, sender: str = "", subject: str = "") -> MessageSummary:
-        prompt = self._create_summarization_prompt(content, sender, subject)
+    async def _llm_summarize(self, content: str, sender: str = "", subject: str = "", message_date: str = "") -> MessageSummary:
+        prompt = self._create_summarization_prompt(content, sender, subject, message_date)
         resp_json = await self._call_chat_completion(
             [
                 {"role": "system", "content": "당신은 업무용 메시지 분석 전문가입니다. 이메일과 메신저 메시지를 분석하여 요약, 핵심 포인트, 감정, 긴급도, 필요한 액션을 파악합니다."},
@@ -419,6 +563,7 @@ class MessageSummarizer:
                     sentiment=data.get("sentiment", "neutral"),
                     urgency_level=data.get("urgency_level", "low"),
                     action_required=data.get("action_required", False),
+                    validated_deadlines=data.get("validated_deadlines", []),
                     suggested_response=data.get("suggested_response")
                 )
         except Exception as e:
@@ -498,6 +643,7 @@ class MessageSummarizer:
             content = (m.get("content") or m.get("body") or "").strip()
             sender  = (m.get("sender")  or "").strip()
             subject = (m.get("subject") or "").strip()
+            message_date = (m.get("date") or m.get("sent_at") or m.get("timestamp") or "").strip()
 
             # 내용이 비면 호출하지 않고 기본 요약
             if not content:
@@ -512,7 +658,7 @@ class MessageSummarizer:
                     if i > 0:
                         await asyncio.sleep(0.2)
                     
-                    s = await self.summarize_message(content, sender, subject)
+                    s = await self.summarize_message(content, sender, subject, message_date)
                     # ✅ 요약 객체에 원본 메시지 ID 연결 (핵심)
                     s.original_id = m.get("msg_id") or s.original_id
                     results[i] = s

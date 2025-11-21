@@ -42,7 +42,8 @@ class Top3LLMSelector:
         self,
         todos: List[Dict],
         natural_rule: str,
-        entity_rules: Optional[Dict[str, Dict[str, float]]] = None
+        entity_rules: Optional[Dict[str, Dict[str, float]]] = None,
+        simulation_time: Optional[datetime] = None
     ) -> Tuple[Set[str], str]:
         """LLM으로 Top3 선정 (폴백 메커니즘 포함)
         
@@ -50,6 +51,7 @@ class Top3LLMSelector:
             todos: TODO 리스트
             natural_rule: 자연어 규칙
             entity_rules: 엔티티 규칙 (캐시 키 생성용)
+            simulation_time: 시뮬레이션 시간 (None이면 현재 시간 사용)
             
         Returns:
             (선정된 TODO ID 집합, 선정 이유)
@@ -60,7 +62,7 @@ class Top3LLMSelector:
         
         if not natural_rule or not natural_rule.strip():
             logger.warning("[Top3LLM] 자연어 규칙이 비어있습니다")
-            return self._fallback_selection(todos)
+            return self._fallback_selection(todos, simulation_time)
         
         # 캐시 확인
         cached = self.cache_manager.get(todos, entity_rules, natural_rule)
@@ -75,8 +77,8 @@ class Top3LLMSelector:
             logger.warning("[Top3LLM] 후보 TODO가 없습니다 (모두 완료 상태)")
             return set()
         
-        # 마감이 지난 TODO 제외
-        now = datetime.now()
+        # 마감이 지난 TODO 제외 (시뮬레이션 시간 사용)
+        now = simulation_time if simulation_time else datetime.now()
         original_count = len(candidates)
         candidates = [
             t for t in candidates 
@@ -94,7 +96,7 @@ class Top3LLMSelector:
         # LLM 사용 가능 여부 확인
         if not self.llm_client.is_available():
             logger.warning("[Top3LLM] LLM 클라이언트를 사용할 수 없습니다 → 폴백 모드")
-            return self._fallback_selection(candidates)
+            return self._fallback_selection(candidates, simulation_time)
         
         # 사전 필터링 없이 모든 TODO를 LLM에 전달
         # (자연어 규칙을 정확히 적용하려면 전체를 봐야 함)
@@ -110,7 +112,7 @@ class Top3LLMSelector:
         
         # LLM 실패 시 폴백
         logger.warning("[Top3LLM] LLM 선정 실패 → 폴백 모드")
-        return self._fallback_selection(candidates)
+        return self._fallback_selection(candidates, simulation_time)
     
     def _smart_prefilter(self, candidates: List[Dict], natural_rule: str) -> List[Dict]:
         """스마트 사전 필터링
@@ -276,10 +278,14 @@ class Top3LLMSelector:
         
         return valid_ids
     
-    def _fallback_selection(self, todos: List[Dict]) -> Set[str]:
+    def _fallback_selection(self, todos: List[Dict], simulation_time: Optional[datetime] = None) -> Set[str]:
         """폴백 선정 (점수 기반)
         
         LLM이 실패했을 때 사용하는 간단한 점수 기반 선정
+        
+        Args:
+            todos: TODO 리스트
+            simulation_time: 시뮬레이션 시간 (None이면 현재 시간 사용)
         """
         logger.info(f"[Top3LLM] 폴백 모드: 점수 기반 선정 (후보: {len(todos)}개)")
         
@@ -288,7 +294,7 @@ class Top3LLMSelector:
         
         # 점수 계산
         scored = []
-        now = datetime.now()
+        now = simulation_time if simulation_time else datetime.now()
         
         for todo in todos:
             score = 0.0

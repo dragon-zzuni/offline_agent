@@ -202,8 +202,52 @@ class BasicTodoItem(QWidget):
         self.new_badge.hide()
         top.addWidget(self.new_badge, 0)
 
-        status = QLabel((todo.get("status") or "pending").capitalize())
-        status.setStyleSheet("background:#E0E7FF; color:#3730A3; padding:2px 8px; border-radius:999px; font-weight:600;")
+        # 상태 결정: 마감일 지났으면 overdue
+        todo_status = todo.get("status") or "pending"
+        deadline_str = todo.get("deadline")
+        
+        if todo_status == "pending" and deadline_str:
+            try:
+                from datetime import datetime
+                from utils.datetime_utils import parse_iso_datetime
+                
+                deadline_dt = parse_iso_datetime(deadline_str)
+                
+                # 시뮬레이션 시간 사용 (parent가 TodoPanel인 경우)
+                if parent and hasattr(parent, '_simulation_time') and parent._simulation_time:
+                    now = parent._simulation_time
+                else:
+                    now = datetime.now()
+                
+                # timezone-naive 비교를 위해 변환
+                if deadline_dt and deadline_dt.tzinfo:
+                    deadline_dt = deadline_dt.replace(tzinfo=None)
+                if now.tzinfo:
+                    now = now.replace(tzinfo=None)
+                
+                if deadline_dt and deadline_dt < now:
+                    todo_status = "overdue"
+            except:
+                pass
+        
+        # 상태 라벨 생성
+        status_text = {
+            "pending": "Pending",
+            "overdue": "Overdue",
+            "completed": "Completed",
+            "snoozed": "Snoozed"
+        }.get(todo_status, todo_status.capitalize())
+        
+        status = QLabel(status_text)
+        
+        # 상태별 스타일
+        if todo_status == "overdue":
+            status.setStyleSheet("background:#FEE2E2; color:#991B1B; padding:2px 8px; border-radius:999px; font-weight:600;")
+        elif todo_status == "completed":
+            status.setStyleSheet("background:#D1FAE5; color:#065F46; padding:2px 8px; border-radius:999px; font-weight:600;")
+        else:
+            status.setStyleSheet("background:#E0E7FF; color:#3730A3; padding:2px 8px; border-radius:999px; font-weight:600;")
+        
         top.addWidget(status, 0)
         
         # 프로젝트 태그 추가
@@ -1103,6 +1147,17 @@ class TodoPanel(QWidget):
         rows = self.controller.load_active_items()
         logger.info(f"[TodoPanel] DB에서 {len(rows)}개 TODO 로드")
 
+        # 시간 필터 적용 (부모 윈도우의 TimeFilterService 사용)
+        parent_window = self.parent()
+        while parent_window and not hasattr(parent_window, 'time_filter_service'):
+            parent_window = parent_window.parent()
+        
+        if parent_window and hasattr(parent_window, 'time_filter_service'):
+            time_filter_service = parent_window.time_filter_service
+            if time_filter_service.is_enabled:
+                rows = time_filter_service.filter_todos(rows)
+                logger.info(f"[TodoPanel] 시간 필터 적용 후: {len(rows)}개 TODO")
+
         if not rows:
             # 기존 TODO가 있으면 유지 (백그라운드 분석 중)
             if preserve_existing_on_empty and self._all_rows:
@@ -1228,8 +1283,12 @@ class TodoPanel(QWidget):
             cloned["status"] = (cloned.get("status") or "pending").lower()
             cloned_rows.append(cloned)
 
-        # Top3 계산 (선정이유 팝업 표시 여부 전달)
-        top_ids = self.controller.calculate_top3(cloned_rows, show_reasoning=show_reasoning)
+        # Top3 계산 (선정이유 팝업 표시 여부 전달, 시뮬레이션 시간 전달)
+        top_ids = self.controller.calculate_top3(
+            cloned_rows, 
+            show_reasoning=show_reasoning,
+            simulation_time=self._simulation_time
+        )
         
         top3_items = sorted(
             [row for row in cloned_rows if row.get("id") in top_ids],
@@ -1546,17 +1605,37 @@ class TodoPanel(QWidget):
             QMessageBox.critical(self, "완료 처리 실패", str(e))
             return
 
-        self._viewed_ids.discard(todo_id)
-        self._item_widgets.pop(todo_id, None)
-
+        # UI에서 제거하지 않고 상태만 업데이트
         if self._all_rows:
-            remaining = [row for row in self._all_rows if row.get("id") != todo_id]
-            if len(remaining) != len(self._all_rows):
-                self._rebuild_from_rows(remaining)
-                return
-
-        if db_updated:
-            self.refresh_todo_list()
+            for row in self._all_rows:
+                if row.get("id") == todo_id:
+                    row["status"] = "completed"  # 'done' 대신 'completed' 사용
+                    row["updated_at"] = now_iso
+                    break
+        
+        # 해당 TODO 위젯만 업데이트 (전체 새로고침 대신)
+        stored = self._item_widgets.get(todo_id)
+        if stored:
+            item, widget = stored
+            if widget and hasattr(widget, 'todo'):
+                # 위젯의 TODO 데이터 업데이트
+                widget.todo["status"] = "completed"
+                widget.todo["updated_at"] = now_iso
+                
+                # 위젯 재생성하여 Completed 배지 표시
+                for idx in range(self.todo_list.count()):
+                    list_item = self.todo_list.item(idx)
+                    if list_item == item:
+                        # 새 위젯 생성
+                        new_widget = BasicTodoItem(widget.todo, self, unread=False, closable=True)
+                        new_widget.mark_done_clicked.connect(self._on_mark_done_clicked)
+                        
+                        # 위젯 교체
+                        self.todo_list.setItemWidget(list_item, new_widget)
+                        self._item_widgets[todo_id] = (list_item, new_widget)
+                        
+                        logger.info(f"TODO {todo_id} 위젯을 Completed 상태로 업데이트")
+                        break
     
     def _on_project_filter_changed(self, project_code: str) -> None:
         """프로젝트 필터 변경 이벤트 핸들러"""
@@ -1999,10 +2078,45 @@ class TodoDetailDialog(QDialog):
         self.reply_text.setVisible(False)
         main_layout.addWidget(self.reply_text)
         
-        # 닫기 버튼
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
-        buttons.rejected.connect(self.reject)
-        main_layout.addWidget(buttons)
+        # 하단 버튼 레이아웃
+        bottom_buttons = QHBoxLayout()
+        bottom_buttons.addStretch()
+        
+        # Done 버튼
+        self.done_button = QPushButton("✓ Done")
+        self.done_button.setStyleSheet("""
+            QPushButton {
+                background:#10B981; color:white; padding:8px 24px; 
+                border-radius:6px; font-weight:600; font-size:14px;
+            }
+            QPushButton:hover {
+                background:#059669;
+            }
+            QPushButton:pressed {
+                background:#047857;
+            }
+        """)
+        self.done_button.clicked.connect(self._on_done_clicked)
+        bottom_buttons.addWidget(self.done_button)
+        
+        # Close 버튼
+        self.close_button = QPushButton("Close")
+        self.close_button.setStyleSheet("""
+            QPushButton {
+                background:#6B7280; color:white; padding:8px 24px; 
+                border-radius:6px; font-weight:600; font-size:14px;
+            }
+            QPushButton:hover {
+                background:#4B5563;
+            }
+            QPushButton:pressed {
+                background:#374151;
+            }
+        """)
+        self.close_button.clicked.connect(self.reject)
+        bottom_buttons.addWidget(self.close_button)
+        
+        main_layout.addLayout(bottom_buttons)
     
     def _get_existing_summary(self) -> str:
         """기존 요약 가져오기"""
@@ -2171,4 +2285,21 @@ class TodoDetailDialog(QDialog):
         # 원본 메시지는 위쪽 "원본 메시지" 섹션에만 표시되고,
         # 아래쪽 "요약 및 액션" 섹션은 요약 생성 버튼을 눌렀을 때만 내용이 표시됩니다.
         pass
+    
+    def _on_done_clicked(self):
+        """Done 버튼 클릭 시 TODO를 완료 처리하고 다이얼로그 닫기"""
+        todo_id = self.todo.get("id")
+        if not todo_id:
+            QMessageBox.warning(self, "완료 처리", "ID가 없는 TODO는 완료 처리할 수 없습니다.")
+            return
+        
+        # 부모 위젯(TodoPanel)에서 완료 처리
+        parent_panel = self.parent()
+        if parent_panel and hasattr(parent_panel, '_mark_done'):
+            parent_panel._mark_done(todo_id)
+            logger.info(f"TODO {todo_id} 완료 처리됨")
+            self.accept()  # 다이얼로그 닫기
+        else:
+            QMessageBox.warning(self, "완료 처리", "TODO를 완료 처리할 수 없습니다.")
+            logger.error(f"부모 패널을 찾을 수 없거나 _mark_done 메서드가 없습니다.")
 

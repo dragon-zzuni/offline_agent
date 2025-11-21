@@ -27,13 +27,20 @@ def get_project_service():
     if _project_service_instance is None:
         # 프로젝트 태그 캐시 DB 경로 설정
         import os
-        vdos_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 
-                               'virtualoffice', 'src', 'virtualoffice')
+        # 현재 파일: offline_agent/src/ui/widgets/project_tag_widget.py
+        # 목표: virtual-office-orchestration/virtualoffice/src/virtualoffice
+        
+        # 1. widgets -> ui
+        # 2. ui -> src
+        # 3. src -> offline_agent
+        # 4. offline_agent -> virtual-office-orchestration (Project Root)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
+        
+        vdos_dir = os.path.join(project_root, 'virtualoffice', 'src', 'virtualoffice')
         cache_db_path = os.path.join(vdos_dir, 'project_tags_cache.db')
         
         _project_service_instance = ProjectTagService(cache_db_path=cache_db_path)
     return _project_service_instance
-
 
 class ProjectTagLabel(QLabel):
     """개별 프로젝트 태그 라벨"""

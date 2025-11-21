@@ -33,31 +33,33 @@ class VDOSConnector:
     
     def _find_vdos_db(self) -> str:
         """VDOS 데이터베이스 자동 탐지"""
-        # 가능한 경로들
-        possible_paths = [
-            "virtualoffice/src/virtualoffice/vdossnapshot.db",
-            "virtualoffice/src/virtualoffice/vdos.db",
-            "../virtualoffice/src/virtualoffice/vdossnapshot.db",
-            "../virtualoffice/src/virtualoffice/vdos.db",
-            "../../virtualoffice/src/virtualoffice/vdossnapshot.db",
-            "../../virtualoffice/src/virtualoffice/vdos.db",
-            os.path.expanduser("~/virtualoffice/src/virtualoffice/vdossnapshot.db"),
-            os.path.expanduser("~/virtualoffice/src/virtualoffice/vdos.db"),
-        ]
-        
         # 현재 파일 기준으로 상대 경로 계산
         current_dir = Path(__file__).parent
         project_root = current_dir.parent.parent.parent  # offline_agent/src/utils -> project_root
         vdos_path = project_root / "virtualoffice" / "src" / "virtualoffice" / "vdos.db"
         snapshot_path = vdos_path.with_name("vdossnapshot.db")
-        possible_paths.insert(0, str(vdos_path))
-        possible_paths.insert(0, str(snapshot_path))
+        
+        # 가능한 경로들 (vdos.db 우선)
+        possible_paths = [
+            str(vdos_path),  # vdos.db 우선
+            str(snapshot_path),  # snapshot은 폴백
+            "virtualoffice/src/virtualoffice/vdos.db",
+            "../virtualoffice/src/virtualoffice/vdos.db",
+            "../../virtualoffice/src/virtualoffice/vdos.db",
+            os.path.expanduser("~/virtualoffice/src/virtualoffice/vdos.db"),
+            "virtualoffice/src/virtualoffice/vdossnapshot.db",
+            "../virtualoffice/src/virtualoffice/vdossnapshot.db",
+            "../../virtualoffice/src/virtualoffice/vdossnapshot.db",
+            os.path.expanduser("~/virtualoffice/src/virtualoffice/vdossnapshot.db"),
+        ]
         
         for path in possible_paths:
             if os.path.exists(path):
+                logger.info(f"[VDOS] DB 발견: {path}")
                 return os.path.abspath(path)
         
         # 기본값 반환
+        logger.warning(f"[VDOS] DB를 찾을 수 없음, 기본 경로 사용: {vdos_path}")
         return str(vdos_path)
     
     def _check_availability(self) -> bool:

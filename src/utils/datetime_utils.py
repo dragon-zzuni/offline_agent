@@ -197,24 +197,63 @@ def get_simulation_current_time(data_source) -> Optional[datetime]:
     """
     try:
         if not data_source:
+            logger.warning("[SimTime] data_source가 None")
             return None
             
         # VirtualOfficeSource인지 확인
         if not hasattr(data_source, 'get_simulation_status_cached'):
+            logger.warning(f"[SimTime] get_simulation_status_cached 메서드 없음: {type(data_source).__name__}")
             return None
         
         status = data_source.get_simulation_status_cached()
         if not status:
+            logger.warning("[SimTime] status가 None")
             return None
         
-        # sim_time 필드에서 현재 시뮬레이션 시간 가져오기
+        logger.info(f"[SimTime] status 키: {list(status.keys())}")
+        
+        # 1. sim_time 필드 확인 (하지만 "Day X HH:MM" 형식이므로 사용 불가)
         sim_time_str = status.get('sim_time')
         if sim_time_str:
-            return parse_iso_datetime(sim_time_str)
+            logger.info(f"[SimTime] sim_time 필드 발견: {sim_time_str} (Day X 형식이므로 틱 기반 계산 사용)")
+            # "Day X HH:MM" 형식은 파싱하지 않고 틱 기반 계산 사용
+        else:
+            logger.info("[SimTime] sim_time 필드 없음")
         
+        # 2. sim_time이 없으면 sim_base_dt + current_tick으로 계산
+        if hasattr(data_source, '_compute_sim_datetime_from_tick'):
+            current_tick = status.get('current_tick', 0)
+            logger.info(f"[SimTime] current_tick: {current_tick}")
+            
+            if current_tick > 0:
+                result = data_source._compute_sim_datetime_from_tick(current_tick)
+                if result:
+                    sim_dt, day_index, minutes_24h = result
+                    logger.info(f"[SimTime] 틱 {current_tick}으로부터 계산: {sim_dt}")
+                    return sim_dt
+                else:
+                    logger.warning(f"[SimTime] _compute_sim_datetime_from_tick({current_tick})이 None 반환")
+            else:
+                logger.warning("[SimTime] current_tick이 0 이하")
+        else:
+            logger.warning("[SimTime] _compute_sim_datetime_from_tick 메서드 없음")
+        
+        # 3. 마지막으로 sim_base_dt 사용 (최소한의 시작 시간)
+        if hasattr(data_source, '_sim_base_dt'):
+            sim_base_dt = data_source._sim_base_dt
+            if sim_base_dt:
+                logger.info(f"[SimTime] sim_base_dt 사용: {sim_base_dt}")
+                return sim_base_dt
+            else:
+                logger.warning("[SimTime] _sim_base_dt가 None")
+        else:
+            logger.warning("[SimTime] _sim_base_dt 속성 없음")
+        
+        logger.warning("[SimTime] 모든 방법 실패")
         return None
+        
     except Exception as e:
-        logger.error(f"시뮬레이션 현재 시간 가져오기 실패: {e}")
+        logger.error(f"[SimTime] 시뮬레이션 현재 시간 가져오기 실패: {e}", exc_info=True)
         return None
 
 

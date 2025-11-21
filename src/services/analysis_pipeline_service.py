@@ -148,12 +148,12 @@ class AnalysisPipelineService:
         # 2. 우선순위 분류
         ranked_messages = await self._rank_messages(messages)
         
-        # 3. 상위 N개 요약
+        # 3. 상위 N개 요약 (마감일 검증 포함)
         top_messages = [m for (m, _) in ranked_messages][:top_n]
         summaries = await self._summarize_messages(top_messages, batch_callback=batch_callback)
         
-        # 4. 액션 추출
-        actions = await self._extract_actions(top_messages)
+        # 4. 액션 추출 (요약 결과의 마감일 검증 활용)
+        actions = await self._extract_actions(top_messages, summaries=summaries)
         
         # 5. 결과 병합
         analysis_results = self._merge_results(
@@ -330,17 +330,62 @@ class AnalysisPipelineService:
     
     async def _extract_actions(
         self,
-        messages: List[Dict[str, Any]]
+        messages: List[Dict[str, Any]],
+        summaries: Optional[List[Any]] = None
     ) -> List[Any]:
-        """액션 추출"""
+        """액션 추출 (요약 결과의 마감일 검증 활용)
+        
+        Args:
+            messages: 메시지 리스트
+            summaries: MessageSummarizer의 분석 결과 (validated_deadlines 포함)
+        """
         logger.info("⚡ 액션 추출 중...")
         user_email = self._user_profile.get("email_address", "pm.1@quickchat.dev")
-        actions = await self._action_extractor.batch_extract_actions(
-            messages,
-            user_email=user_email
-        )
-        logger.debug(f"액션 추출 완료: {len(actions)}개")
-        return actions
+        
+        # 요약 결과를 msg_id로 매핑
+        summary_by_id = {}
+        if summaries:
+            for i, msg in enumerate(messages):
+                if i < len(summaries) and summaries[i]:
+                    msg_id = msg.get("msg_id")
+                    summary = summaries[i]
+                    
+                    # Summary 객체를 dict로 변환
+                    if hasattr(summary, 'to_dict'):
+                        summary_dict = summary.to_dict()
+                    elif hasattr(summary, '__dict__'):
+                        summary_dict = summary.__dict__
+                    else:
+                        summary_dict = summary if isinstance(summary, dict) else {}
+                    
+                    summary_by_id[msg_id] = summary_dict
+                    
+                    # 디버깅: validated_deadlines 확인
+                    validated_deadlines = summary_dict.get('validated_deadlines', [])
+                    if validated_deadlines:
+                        logger.debug(
+                            f"📅 메시지 {msg_id}: {len(validated_deadlines)}개 검증된 마감일"
+                        )
+        
+        # 각 메시지 처리 시 요약 결과 전달
+        all_actions = []
+        for msg in messages:
+            msg_id = msg.get("msg_id")
+            summary_data = summary_by_id.get(msg_id)
+            
+            # ActionExtractor에 요약 결과 설정
+            if summary_data:
+                self._action_extractor.set_message_summary(summary_data)
+            
+            # 액션 추출
+            actions = self._action_extractor.extract_actions(msg, user_email=user_email)
+            all_actions.extend(actions)
+            
+            # 요약 결과 초기화
+            self._action_extractor.clear_message_summary()
+        
+        logger.info(f"✅ 액션 추출 완료: {len(all_actions)}개")
+        return all_actions
     
     def _merge_results(
         self,
@@ -464,8 +509,53 @@ class AnalysisPipelineService:
         
         logger.info(f"TO/CC 중복 제거: {to_cc_duplicates_removed}개 CC 메시지 제거")
         
-        # 2단계: TODO 생성
+        # 2단계: 발신자 + 수신 시각 기반 중복 제거
+        # 같은 발신자가 같은 시각에 보낸 메시지는 하나로 통합
+        sender_time_groups = {}  # (sender, date) -> [results]
+        sender_time_duplicates_removed = 0
+        
         for result in filtered_results:
+            message = result.get("message", {})
+            sender = message.get("sender", "unknown")
+            date_str = message.get("date", "")
+            
+            # 날짜를 분 단위까지만 사용 (초는 무시)
+            if date_str:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    # 분 단위까지만 (초/마이크로초 제거)
+                    date_key = dt.strftime('%Y-%m-%d %H:%M')
+                except:
+                    date_key = date_str[:16]  # YYYY-MM-DD HH:MM
+            else:
+                date_key = "unknown"
+            
+            key = (sender, date_key)
+            
+            if key not in sender_time_groups:
+                sender_time_groups[key] = []
+            sender_time_groups[key].append(result)
+        
+        # 각 그룹에서 하나만 선택 (우선순위: 액션 개수가 많은 것)
+        deduplicated_results = []
+        for (sender, date_key), results in sender_time_groups.items():
+            if len(results) == 1:
+                deduplicated_results.append(results[0])
+            else:
+                # 액션이 가장 많은 결과 선택
+                best_result = max(results, key=lambda r: len(r.get("actions", [])))
+                deduplicated_results.append(best_result)
+                sender_time_duplicates_removed += len(results) - 1
+                logger.debug(
+                    f"발신자+시각 중복 제거: sender={sender}, time={date_key}, "
+                    f"{len(results)}개 → 1개"
+                )
+        
+        logger.info(f"발신자+시각 중복 제거: {sender_time_duplicates_removed}개 메시지 제거")
+        
+        # 3단계: TODO 생성
+        for result in deduplicated_results:
             actions = result.get("actions") or []
             priority_obj = result.get("priority") or {}
             priority_level = (

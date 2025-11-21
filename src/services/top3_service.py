@@ -302,12 +302,13 @@ class Top3Service:
     
 
     
-    def pick_top3(self, items: List[Dict], use_llm: bool = True) -> Set[str]:
+    def pick_top3(self, items: List[Dict], use_llm: bool = True, simulation_time: Optional[datetime] = None) -> Set[str]:
         """Top3 TODO 선정 (LLM 또는 점수 기반)
         
         Args:
             items: TODO 항목 리스트
             use_llm: LLM 사용 여부 (기본값: True)
+            simulation_time: 시뮬레이션 시간 (None이면 현재 시간 사용)
         
         Returns:
             Set[str]: Top3 TODO ID 집합
@@ -350,7 +351,8 @@ class Top3Service:
                 top3_ids = llm_selector.select_top3(
                     todos=candidates,
                     natural_rule=self._last_instruction,
-                    entity_rules=self._entity_rules
+                    entity_rules=self._entity_rules,
+                    simulation_time=simulation_time
                 )
                 
                 if top3_ids:

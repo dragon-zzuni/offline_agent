@@ -9,9 +9,12 @@ import re
 import uuid
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
+
+# DeadlineValidatorService는 필요 시 lazy import
+_deadline_validator = None
 
 
 @dataclass
@@ -55,7 +58,14 @@ class ActionItem:
 class ActionExtractor:
     """액션 추출기"""
     
-    def __init__(self):
+    def __init__(self, enable_llm_validation: bool = True):
+        """
+        Args:
+            enable_llm_validation: LLM 기반 마감일 검증 활성화 여부 (기본값: True)
+        """
+        self.enable_llm_validation = enable_llm_validation
+        self._message_summary = None  # MessageSummarizer 결과 캐시
+        
         # 액션 타입별 패턴 정의
         self.action_patterns = {
             "meeting": {
@@ -130,6 +140,21 @@ class ActionExtractor:
         self.response_markers = ["답장", "답변", "회신", "reply", "response", "응답", "피드백"]
         self._bullet_pattern = re.compile(r"^[\-\*\•\·\d\)\(]+\s*")
     
+    def set_message_summary(self, summary_data: dict):
+        """MessageSummarizer 결과 설정
+        
+        Args:
+            summary_data: MessageSummarizer에서 분석한 결과 (validated_deadlines 포함)
+        """
+        self._message_summary = summary_data
+        validated_deadlines = summary_data.get('validated_deadlines', [])
+        if validated_deadlines:
+            logger.debug(f"MessageSummarizer 결과 설정: {len(validated_deadlines)}개 검증된 마감일")
+    
+    def clear_message_summary(self):
+        """MessageSummarizer 결과 초기화"""
+        self._message_summary = None
+    
     def extract_actions(self, message_data: Dict, user_email: str = "pm.1@quickchat.dev") -> List[ActionItem]:
         """메시지에서 액션 추출
         
@@ -149,13 +174,42 @@ class ActionExtractor:
         sender = message_data.get("sender", "")
         sender_email = message_data.get("sender_email", "")
         
+        # sender_email이 없으면 sender에서 이메일 추출 시도
+        if not sender_email and sender and "@" in sender:
+            sender_email = sender
+        
+        # 메시지 수신 시간 추출 (마감일 기준 시간)
+        message_time = None
+        for time_field in ['sent_at', 'date', 'timestamp', 'created_at']:
+            if time_field in message_data and message_data[time_field]:
+                try:
+                    from utils.datetime_utils import parse_iso_datetime
+                    message_time = parse_iso_datetime(message_data[time_field])
+                    break
+                except:
+                    pass
+        
+        # 전체 텍스트 (LLM 검증용)
+        full_text = f"{subject}\n{content}"
+        
+        # 인스턴스 변수로 저장 (하위 메서드에서 사용)
+        self._current_full_text = full_text
+        self._current_message_time = message_time
+        
         # 메시지 수신 시각 추출 (마감일 계산 기준)
-        message_date_str = message_data.get("simulated_datetime") or message_data.get("date")
+        # 주의: simulated_datetime은 시뮬레이션 "현재 시각"이므로 사용하지 않음
+        # date 필드가 실제 메시지 수신 시각
+        message_date_str = message_data.get("date") or message_data.get("sent_at") or message_data.get("timestamp")
         self._reference_date = self._parse_message_date(message_date_str) if message_date_str else datetime.now()
         
         # 단순 인사/확인 메시지 필터링 (TODO 생성 안 함)
         if self._is_simple_acknowledgment(content, subject):
             logger.debug(f"단순 확인 메시지 필터링: {content[:50]}...")
+            return []
+        
+        # 과거 완료 + 정보 공유 메시지 필터링 (TODO 생성 안 함)
+        if self._is_past_info_sharing(content):
+            logger.debug(f"과거 완료 정보 공유 메시지 필터링: {content[:50]}...")
             return []
         msg_id = message_data.get("msg_id", f"msg_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         
@@ -165,9 +219,12 @@ class ActionExtractor:
             return []
         
         # 이메일 주소가 없는 경우 sender 이름으로 체크 (chat 메시지)
-        if not sender_email and sender and "kim jihoon" in sender.lower():
-            logger.debug(f"⏭️ 사용자가 보낸 메시지 스킵 (이름 기반): {msg_id}")
-            return []
+        if not sender_email and sender:
+            # PM 이름 목록 (이정두, lee_jd 등)
+            pm_names = ["kim jihoon", "이정두", "lee_jd", "leejd"]
+            if any(pm_name in sender.lower() for pm_name in pm_names):
+                logger.debug(f"⏭️ 사용자가 보낸 메시지 스킵 (이름 기반): {msg_id}, sender={sender}")
+                return []
         
         actions = []
         combined_text = f"{subject} {content}".strip()
@@ -182,7 +239,7 @@ class ActionExtractor:
         # 문장 단위의 일반 요청 추출 (키워드가 없어도 요청 표현 감지)
         if combined_text:
             actions.extend(
-                self._extract_generic_requests(combined_text, sender, msg_id)
+                self._extract_generic_requests(combined_text, sender, msg_id, full_text, message_time)
             )
 
         # 중복 제거 및 정리
@@ -219,7 +276,7 @@ class ActionExtractor:
         
         return actions
 
-    def _extract_generic_requests(self, text: str, sender: str, msg_id: str) -> List[ActionItem]:
+    def _extract_generic_requests(self, text: str, sender: str, msg_id: str, full_text: str = None, message_time: datetime = None) -> List[ActionItem]:
         """명시적 키워드가 없어도 요청 어조를 감지해 액션을 생성한다."""
         actions: List[ActionItem] = []
         for sentence in self._split_sentences(text):
@@ -238,7 +295,7 @@ class ActionExtractor:
                     action_type=inferred_type,
                     title=self._generate_action_title(inferred_type, normalized),
                     description=normalized,
-                    deadline=self._extract_deadline(normalized),
+                    deadline=self._extract_deadline(normalized, full_text, message_time),
                     priority=priority,
                     assignee="나",
                     requester=sender,
@@ -248,12 +305,12 @@ class ActionExtractor:
             )
 
         # 글머리표나 리스트 형태의 요청도 액션으로 변환
-        for bullet in self._extract_bullet_requests(text.splitlines(), sender, msg_id):
+        for bullet in self._extract_bullet_requests(text.splitlines(), sender, msg_id, full_text, message_time):
             actions.append(bullet)
         return actions
 
     def _extract_bullet_requests(
-        self, lines: List[str], sender: str, msg_id: str
+        self, lines: List[str], sender: str, msg_id: str, full_text: str = None, message_time: datetime = None
     ) -> List[ActionItem]:
         actions: List[ActionItem] = []
         for raw_line in lines:
@@ -271,7 +328,7 @@ class ActionExtractor:
                     action_type=inferred_type,
                     title=self._generate_action_title(inferred_type, line),
                     description=line,
-                    deadline=self._extract_deadline(line),
+                    deadline=self._extract_deadline(line, full_text, message_time),
                     priority=self._determine_priority(line),
                     assignee="나",
                     requester=sender,
@@ -372,7 +429,11 @@ class ActionExtractor:
         priority = self._determine_priority(text)
         
         # 데드라인 추출
-        deadline = self._extract_deadline(text)
+        deadline = self._extract_deadline(
+            text,
+            getattr(self, '_current_full_text', None),
+            getattr(self, '_current_message_time', None)
+        )
         
         return ActionItem(
             action_id=f"{action_type}_{uuid.uuid4().hex[:12]}",
@@ -475,24 +536,88 @@ class ActionExtractor:
         
         return "medium"  # 기본값
     
-    def _extract_deadline(self, text: str) -> Optional[datetime]:
-        """데드라인 추출"""
-        # 날짜 패턴들
+    def _extract_deadline(self, text: str, full_text: Optional[str] = None, message_time: Optional[datetime] = None) -> Optional[datetime]:
+        """데드라인 추출 (MessageSummarizer 검증 결과 우선 활용)
+        
+        Args:
+            text: 분석할 텍스트 (문장 또는 단락)
+            full_text: 전체 메시지 텍스트 (LLM 검증용, 선택)
+            message_time: 메시지 수신 시간 (기준 시간)
+            
+        Returns:
+            검증된 마감일 또는 None
+        """
+        # 0단계: MessageSummarizer 검증 결과 확인 (이미 LLM이 검증한 경우)
+        if hasattr(self, '_message_summary') and self._message_summary:
+            validated_deadlines = self._message_summary.get('validated_deadlines', [])
+            
+            # text에 해당하는 마감일이 있는지 확인
+            for vd in validated_deadlines:
+                if not vd.get('is_valid'):
+                    continue
+                
+                vd_text = vd.get('text', '')
+                vd_date = vd.get('date')
+                vd_time = vd.get('time', '18:00')
+                
+                # text에 마감일 텍스트가 포함되어 있으면 사용
+                if vd_text and vd_text in text:
+                    try:
+                        # 날짜 파싱
+                        deadline_dt = datetime.strptime(vd_date, '%Y-%m-%d')
+                        
+                        # 시간 추가
+                        hour, minute = map(int, vd_time.split(':'))
+                        deadline_dt = deadline_dt.replace(hour=hour, minute=minute)
+                        
+                        # timezone 추가
+                        if deadline_dt.tzinfo is None:
+                            deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+                        
+                        logger.info(
+                            f"✅ MessageSummarizer 검증 결과 사용: '{vd_text}' → "
+                            f"{deadline_dt.strftime('%Y-%m-%d %H:%M')}"
+                        )
+                        return deadline_dt
+                    except Exception as e:
+                        logger.warning(f"MessageSummarizer 마감일 파싱 실패: {e}")
+        
+        # 1단계: 규칙 기반 추출
+        # 날짜 패턴들 (시간 정보 포함, 구체적인 것부터 매칭)
         date_patterns = [
-            r"(\d{1,2}월\s*\d{1,2}일)",
-            r"(\d{1,2}/\d{1,2})",
-            r"(\d{4}-\d{2}-\d{2})",
-            r"(오늘|내일|이번 주|다음 주)",
-            r"(\w+요일)"
+            r"(오늘\s*(?:오전|오후)\s*\d{1,2}시(?:\s*\d{1,2}분)?)",  # 오늘 오후 5시
+            r"(내일\s*(?:오전|오후)\s*\d{1,2}시(?:\s*\d{1,2}분)?)",  # 내일 오전 10시
+            r"(오늘\s*(?:오전|오후)(?:\s*까지)?)",  # 오늘 오전까지, 오늘 오후까지
+            r"(내일\s*(?:오전|오후)(?:\s*까지)?)",  # 내일 오전까지, 내일 오후까지
+            r"(\d{1,2}월\s*\d{1,2}일\s*(?:오전|오후)?\s*\d{1,2}시?)",  # 12월 20일 오후 3시
+            r"(\d{1,2}월\s*\d{1,2}일)",  # 12월 20일
+            r"(\d{1,2}/\d{1,2})",  # 12/20
+            r"(\d{4}-\d{2}-\d{2})",  # 2025-12-20
+            r"(오늘|내일)",  # 오늘, 내일
+            r"(이번 주|다음 주)",  # 이번 주, 다음 주
+            r"(\w+요일)"  # 월요일, 화요일 등
         ]
         
+        extracted_deadline = None
         for pattern in date_patterns:
             match = re.search(pattern, text)
             if match:
                 date_str = match.group(1)
-                return self._parse_date_string(date_str)
+                extracted_deadline = self._parse_date_string(date_str)
+                if extracted_deadline:
+                    break
         
-        return None
+        # 마감일이 없으면 종료
+        if not extracted_deadline:
+            return None
+        
+        # 2단계: MessageSummarizer 결과가 없을 때는 규칙 기반만 사용
+        # (백그라운드 분석에서 이미 LLM 검증이 진행되므로 중복 호출 방지)
+        logger.debug(
+            f"규칙 기반 마감일 추출: {extracted_deadline.strftime('%Y-%m-%d %H:%M')} "
+            f"(MessageSummarizer 검증 대기 중)"
+        )
+        return extracted_deadline
     
     def _extract_deadline_from_match(self, match: str, action_type: str) -> Optional[datetime]:
         """매칭된 부분에서 데드라인 추출"""
@@ -509,12 +634,52 @@ class ActionExtractor:
             # 기준 날짜 (메시지 수신 시각)
             reference_date = getattr(self, '_reference_date', datetime.now())
             
+            # 시간 정보 추출 (오전/오후 포함)
+            hour = 18  # 기본값
+            minute = 0
+            
+            # "오전까지", "오후까지" 처리 (시간 없이)
+            if "오전" in date_str and "까지" in date_str and "시" not in date_str:
+                hour = 12  # 오전까지 = 12시 (정오)
+                minute = 0
+            elif "오후" in date_str and "까지" in date_str and "시" not in date_str:
+                hour = 18  # 오후까지 = 18시
+                minute = 0
+            else:
+                # "오후 5시", "오전 10시", "오후 3시 30분" 등 파싱
+                time_pattern = r'(오전|오후)\s*(\d{1,2})시(?:\s*(\d{1,2})분)?'
+                time_match = re.search(time_pattern, date_str)
+                if time_match:
+                    period = time_match.group(1)
+                    hour_val = int(time_match.group(2))
+                    minute_val = int(time_match.group(3)) if time_match.group(3) else 0
+                    
+                    # 오후 처리
+                    if period == "오후" and hour_val < 12:
+                        hour = hour_val + 12
+                    elif period == "오전":
+                        hour = hour_val
+                    else:
+                        hour = hour_val
+                    minute = minute_val
+                else:
+                    # "5시", "17시", "15시까지" 등 파싱
+                    simple_time_pattern = r'(\d{1,2})시(?:\s*(\d{1,2})분)?'
+                    simple_time_match = re.search(simple_time_pattern, date_str)
+                    if simple_time_match:
+                        hour_val = int(simple_time_match.group(1))
+                        minute_val = int(simple_time_match.group(2)) if simple_time_match.group(2) else 0
+                        
+                        # 15시 같은 24시간 형식은 그대로 사용
+                        hour = hour_val
+                        minute = minute_val
+            
             # 오늘, 내일 처리
             if "오늘" in date_str:
-                return reference_date.replace(hour=18, minute=0, second=0, microsecond=0)
+                return reference_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
             elif "내일" in date_str:
                 tomorrow = reference_date + timedelta(days=1)
-                return tomorrow.replace(hour=18, minute=0, second=0, microsecond=0)
+                return tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
             
             # 월/일 형식 (예: 1월 15일)
             month_day_match = re.match(r"(\d{1,2})월\s*(\d{1,2})일", date_str)
@@ -591,6 +756,65 @@ class ActionExtractor:
             logger.error(f"시간 파싱 오류: {e}")
         
         return None
+    
+    def _is_past_info_sharing(self, content: str) -> bool:
+        """과거 완료 + 정보 공유 메시지 판별
+        
+        Args:
+            content: 메시지 본문
+            
+        Returns:
+            True if 과거 완료 정보 공유 메시지, False otherwise
+        """
+        content_lower = content.lower()
+        
+        # 과거 완료 표현
+        past_tense_patterns = [
+            '논의한', '진행한', '완료한', '정리한', '검토한', '확인한',
+            '작업한', '리뷰한', '분석한', '공유한', '전달한', 
+            '정리하였습니다', '완료하였습니다', '진행하였습니다',
+            '완료되었습니다', '마무리했습니다', '문서화하여'
+        ]
+        
+        # 정보 공유/제출 표현
+        info_sharing_patterns = [
+            '공유드립니다', '알려드립니다', '보고드립니다', '안내드립니다',
+            '전달드립니다', '공유합니다', '알립니다',
+            '제출합니다', '보내겠습니다', '공유해 주시면'
+        ]
+        
+        # 조건부 요청 (선택적)
+        conditional_patterns = [
+            '필요한 경우', '필요하시면', '궁금하시면', '원하시면'
+        ]
+        
+        has_past = any(pattern in content for pattern in past_tense_patterns)
+        has_sharing = any(pattern in content for pattern in info_sharing_patterns)
+        has_conditional = any(pattern in content for pattern in conditional_patterns)
+        
+        # 과거 완료 + 정보 공유 = 정보 전달 목적
+        if has_past and has_sharing:
+            return True
+        
+        # 과거 완료 + 조건부 요청 = 정보 전달 목적
+        if has_past and has_conditional:
+            return True
+        
+        # 정보 공유 + 조건부 요청만 = 정보 전달 목적
+        if has_sharing and has_conditional and not self._has_clear_request(content):
+            return True
+        
+        return False
+    
+    def _has_clear_request(self, content: str) -> bool:
+        """명확한 요청 동사가 있는지 확인"""
+        request_verbs = [
+            '제출해', '완료해', '검토해', '확인해', '승인해', '참석해',
+            '준비해', '작성해', '수정해', '업데이트해', '공유해주', '알려주',
+            '부탁드립니다', '부탁합니다', '바랍니다'
+        ]
+        
+        return any(verb in content for verb in request_verbs)
     
     def _is_simple_acknowledgment(self, content: str, subject: str = "") -> bool:
         """단순 인사/확인 메시지 판별
@@ -673,18 +897,43 @@ class ActionExtractor:
         return False
     
     def _deduplicate_actions(self, actions: List[ActionItem]) -> List[ActionItem]:
-        """중복 액션 제거"""
-        seen = set()
-        unique_actions = []
+        """중복 액션 제거 - 같은 발신자 + 같은 메시지에서 여러 유형의 TODO 생성 방지"""
+        if not actions:
+            return []
         
-        for action in actions:
-            # 제목과 설명의 해시로 중복 체크
-            action_key = f"{action.title}_{action.description[:50]}"
-            if action_key not in seen:
-                seen.add(action_key)
-                unique_actions.append(action)
+        if len(actions) == 1:
+            return actions
         
-        return unique_actions
+        # 같은 메시지에서 여러 액션이 추출된 경우
+        # → 발신자(requester)가 모두 같고, source_message_id도 같음
+        # → 우선순위가 가장 높은 유형 1개만 선택
+        
+        # 유형 우선순위 (높을수록 중요)
+        type_priority = {
+            "deadline": 6,  # 마감 작업이 가장 중요
+            "meeting": 5,   # 미팅 참석
+            "task": 4,      # 일반 업무
+            "review": 3,    # 문서 검토
+            "response": 2,  # 답변 작성
+            "documentation": 1,
+        }
+        
+        # 가장 우선순위가 높은 액션 선택
+        best_action = max(
+            actions,
+            key=lambda a: (
+                type_priority.get(a.action_type, 0),
+                len(a.description)  # 같은 우선순위면 설명이 더 긴 것
+            )
+        )
+        
+        if len(actions) > 1:
+            logger.debug(
+                f"중복 액션 제거: {len(actions)}개 → 1개 "
+                f"(발신자: {best_action.requester}, 선택 유형: {best_action.action_type})"
+            )
+        
+        return [best_action]
     
     async def batch_extract_actions(self, messages: List[Dict], user_email: str = "pm.1@quickchat.dev") -> List[ActionItem]:
         """여러 메시지에서 액션 일괄 추출

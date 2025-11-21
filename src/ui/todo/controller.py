@@ -154,12 +154,13 @@ class TodoPanelController:
     # ------------------------------------------------------------------ #
     # Top-3 계산
     # ------------------------------------------------------------------ #
-    def calculate_top3(self, rows: List[dict], show_reasoning: bool = False) -> Set[str]:
+    def calculate_top3(self, rows: List[dict], show_reasoning: bool = False, simulation_time: Optional[datetime] = None) -> Set[str]:
         """Top-3 선정 및 점수 계산.
         
         Args:
             rows: TODO 리스트
             show_reasoning: True면 선정이유 팝업 표시 (기본값: False)
+            simulation_time: 시뮬레이션 시간 (None이면 현재 시간 사용)
         """
         if not self.top3_service:
             for row in rows:
@@ -167,7 +168,7 @@ class TodoPanelController:
             return set()
 
         try:
-            top_ids = set(self.top3_service.pick_top3(rows))
+            top_ids = set(self.top3_service.pick_top3(rows, simulation_time=simulation_time))
             updates: List[Tuple[int, str]] = []
             for row in rows:
                 row_id = row.get("id")

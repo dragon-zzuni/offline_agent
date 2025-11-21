@@ -374,21 +374,47 @@ class TimeRangeSelector(QWidget):
         try:
             # 부모 윈도우 찾기
             parent = self.parent()
+            logger.info(f"[TimeRange] 부모 찾기 시작: {type(parent).__name__}")
+            
             while parent and not hasattr(parent, 'assistant'):
                 parent = parent.parent()
+                if parent:
+                    logger.debug(f"[TimeRange] 부모 탐색: {type(parent).__name__}")
             
-            if not parent or not hasattr(parent, 'assistant'):
+            if not parent:
+                logger.warning("[TimeRange] 부모 윈도우를 찾을 수 없음")
+                return None
+                
+            if not hasattr(parent, 'assistant'):
+                logger.warning(f"[TimeRange] assistant 속성 없음: {type(parent).__name__}")
                 return None
             
-            # data_source 가져오기
-            if hasattr(parent.assistant, 'data_source_manager'):
-                data_source = parent.assistant.data_source_manager.current_source
-                if data_source:
-                    return get_simulation_current_time(data_source)
+            logger.info(f"[TimeRange] assistant 발견: {type(parent.assistant).__name__}")
             
-            return None
+            # data_source 가져오기
+            if not hasattr(parent.assistant, 'data_source_manager'):
+                logger.warning("[TimeRange] data_source_manager 없음")
+                return None
+            
+            logger.info(f"[TimeRange] data_source_manager 발견: {type(parent.assistant.data_source_manager).__name__}")
+            
+            data_source = parent.assistant.data_source_manager.current_source
+            if not data_source:
+                logger.warning("[TimeRange] current_source가 None")
+                return None
+            
+            logger.info(f"[TimeRange] data_source 발견: {type(data_source).__name__}")
+            
+            sim_time = get_simulation_current_time(data_source)
+            if sim_time:
+                logger.info(f"📅 시뮬레이션 현재 시간: {sim_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                logger.warning("[TimeRange] get_simulation_current_time()이 None 반환")
+            
+            return sim_time
+            
         except Exception as e:
-            logger.debug(f"시뮬레이션 시간 가져오기 실패: {e}")
+            logger.error(f"[TimeRange] 시뮬레이션 시간 가져오기 실패: {e}", exc_info=True)
             return None
     
     def _set_today(self):

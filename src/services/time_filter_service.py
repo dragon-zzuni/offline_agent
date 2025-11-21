@@ -177,12 +177,34 @@ class TimeFilterService:
             TODO 생성 시간 (UTC aware datetime) 또는 None
         """
         try:
-            # TODO 생성 시간 또는 관련 메시지 시간 사용
+            # 1. source_message의 sent_at 우선 사용 (원본 메시지 시간)
+            if 'source_message' in todo and todo['source_message']:
+                try:
+                    import json
+                    source_msg = todo['source_message']
+                    if isinstance(source_msg, str):
+                        source_msg = json.loads(source_msg)
+                    
+                    # source_message에서 sent_at 찾기
+                    if isinstance(source_msg, dict):
+                        sent_at = source_msg.get('sent_at') or source_msg.get('date') or source_msg.get('timestamp')
+                        if sent_at:
+                            parsed = self._parse_datetime(sent_at)
+                            if parsed:
+                                logger.debug(f"✅ TODO {todo.get('id')} source_message.sent_at: {parsed}")
+                                return parsed
+                except Exception as e:
+                    logger.debug(f"source_message 파싱 실패: {e}")
+            
+            # 2. TODO 생성 시간 또는 관련 메시지 시간 사용 (폴백)
             time_fields = ['created_at', 'timestamp', 'due_date', 'source_timestamp']
             
             for field in time_fields:
                 if field in todo and todo[field]:
-                    return self._parse_datetime(todo[field])
+                    parsed = self._parse_datetime(todo[field])
+                    if parsed:
+                        logger.debug(f"✅ TODO {todo.get('id')} {field}: {parsed}")
+                        return parsed
             
             logger.debug(f"⚠️ TODO 시간 정보 없음: {todo.get('id', 'unknown')}")
             return None

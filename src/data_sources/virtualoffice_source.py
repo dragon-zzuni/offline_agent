@@ -784,6 +784,9 @@ class VirtualOfficeDataSource(DataSource):
     def _parse_message_time(self, message: Dict[str, Any]) -> Optional[datetime]:
         """메시지에서 시간 정보 파싱
         
+        시뮬레이션 시간(simulated_datetime)을 우선 사용하고,
+        없으면 원본 시간(date, sent_at 등)을 사용합니다.
+        
         Args:
             message: 메시지 딕셔너리
             
@@ -797,7 +800,36 @@ class VirtualOfficeDataSource(DataSource):
                 logger.warning("python-dateutil 패키지가 설치되지 않음. 기본 datetime 파싱만 사용")
                 dateutil = None
             
-            # 다양한 시간 필드 시도
+            # 1. 시뮬레이션 시간 우선 사용 (VDOS 연결 시)
+            if 'simulated_datetime' in message and message['simulated_datetime']:
+                try:
+                    sim_time = message['simulated_datetime']
+                    if isinstance(sim_time, str):
+                        dt = datetime.fromisoformat(sim_time.replace('Z', '+00:00'))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        return dt.astimezone(timezone.utc)
+                    elif isinstance(sim_time, datetime):
+                        if sim_time.tzinfo is None:
+                            return sim_time.replace(tzinfo=timezone.utc)
+                        return sim_time.astimezone(timezone.utc)
+                except Exception as e:
+                    logger.debug(f"simulated_datetime 파싱 실패, 원본 시간 사용: {e}")
+            
+            # 2. 메타데이터의 simulated_datetime 확인
+            metadata = message.get('metadata', {})
+            if 'simulated_datetime' in metadata and metadata['simulated_datetime']:
+                try:
+                    sim_time = metadata['simulated_datetime']
+                    if isinstance(sim_time, str):
+                        dt = datetime.fromisoformat(sim_time.replace('Z', '+00:00'))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        return dt.astimezone(timezone.utc)
+                except Exception as e:
+                    logger.debug(f"metadata.simulated_datetime 파싱 실패: {e}")
+            
+            # 3. 원본 시간 필드 사용 (폴백)
             time_fields = ['date', 'timestamp', 'sent_at', 'created_at']
             
             for field in time_fields:
